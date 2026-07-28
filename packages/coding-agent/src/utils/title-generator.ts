@@ -4,16 +4,33 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	calculateRateLimitBackoffMs,
+	completeSimple,
+	type Model,
+	parseRateLimitReason,
+	retryTransientCompletion,
+} from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { isConPTYHosted } from "@oh-my-pi/pi-tui";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
-import { resolveRoleSelection } from "../config/model-resolver";
+import { resolveModelOverride, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
+import {
+	findRetryFallbackCandidates,
+	formatRetryFallbackSelector,
+	getRetryFallbackChains,
+	parseRetryAfterMsFromError,
+	type RetryFallbackResolutionContext,
+	resolveRetryFallbackChainKey,
+} from "../session/retry-fallback-chains";
 import { formatTitleUserMessage } from "../tiny/message-preproc";
 import { isTinyTitleLocalModelKey, ONLINE_TINY_TITLE_MODEL_KEY } from "../tiny/models";
 import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
@@ -229,93 +246,177 @@ export async function generateTitleOnline(
 	// markers work uniformly everywhere.
 	const systemPrompt = titleSystemPrompt ? [titleSystemPrompt, TITLE_MARKER_INSTRUCTION] : [TITLE_SYSTEM_PROMPT];
 	const userMessage = formatTitleUserMessage(firstMessage);
-	const modelName = `${model.provider}/${model.id}`;
-	const modelContext = {
-		sessionId,
-		provider: model.provider,
-		id: model.id,
-		model: modelName,
-	};
-	logger.debug("title-generator: start", modelContext);
 
-	try {
-		const apiKey = await registry.getApiKey(model, sessionId);
-		if (!apiKey) {
-			logger.warn("title-generator: no API key", { ...modelContext, reason: "missing-api-key" });
-			return null;
-		}
-		// Resolve metadata after getApiKey so the session-sticky credential for this
-		// request is already recorded; metadataResolver can then return the correct
-		// account_uuid rather than the snapshot-at-call-site value.
-		const metadata = metadataResolver?.(model.provider);
+	// Title generation is a 3-7 word task, but the ceiling has to survive
+	// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
+	const maxTokens = TITLE_MAX_TOKENS;
+	const attemptModels = resolveTitleFailoverModels(model, registry, settings);
 
-		// Title generation is a 3-7 word task, but the ceiling has to survive
-		// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
-		const maxTokens = TITLE_MAX_TOKENS;
-		logger.debug("title-generator: request", { ...modelContext, maxTokens });
+	for (const [attemptIndex, attemptModel] of attemptModels.entries()) {
+		if (signal?.aborted) return null;
+		const modelName = `${attemptModel.provider}/${attemptModel.id}`;
+		// `failoverAttempt` is added only past the primary so the single-attempt
+		// path's log shape is unchanged.
+		const modelContext = {
+			sessionId,
+			provider: attemptModel.provider,
+			id: attemptModel.id,
+			model: modelName,
+			...(attemptIndex > 0 ? { failoverAttempt: attemptIndex } : {}),
+		};
+		logger.debug("title-generator: start", modelContext);
+		try {
+			const apiKey = await registry.getApiKey(attemptModel, sessionId);
+			if (!apiKey) {
+				logger.warn("title-generator: no API key", { ...modelContext, reason: "missing-api-key" });
+				// A fallback candidate with working credentials beats an
+				// unauthenticated primary — same auth-skip semantics as the
+				// turn path's candidate iteration.
+				continue;
+			}
+			// Resolve metadata after getApiKey so the session-sticky credential for this
+			// request is already recorded; metadataResolver can then return the correct
+			// account_uuid rather than the snapshot-at-call-site value.
+			const metadata = metadataResolver?.(attemptModel.provider);
 
-		const response = await retryTransientCompletion(
-			() =>
-				completeSimple(
-					model,
-					{
-						systemPrompt,
-						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-					},
-					{
-						apiKey: registry.resolver(model, sessionId),
-						maxTokens,
-						disableReasoning: true,
-						// Greedy decode: titling is extraction, not generation. Backends that
-						// default temperature high (e.g. Ollama's 0.8) otherwise garble names
-						// from the message ("hashline" → "HasHroshi"). Providers whose models
-						// reject sampling params drop this via `supportsSamplingParams`.
-						temperature: 0,
-						metadata,
-						signal,
-					},
-				),
-			{ signal },
-		);
+			logger.debug("title-generator: request", { ...modelContext, maxTokens });
 
-		if (response.stopReason === "error") {
-			logger.warn("title-generator: response error", {
+			// Two layers, deliberately: `retryTransientCompletion` re-tries this
+			// *same* model through a blip (upstream's behaviour), while the
+			// enclosing loop fails over to the next chain candidate once the
+			// model itself is the problem (rate-limited, out of credit, no
+			// credentials). Collapsing either one loses a distinct recovery.
+			const response = await retryTransientCompletion(
+				() =>
+					completeSimple(
+						attemptModel,
+						{
+							systemPrompt,
+							messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+						},
+						{
+							apiKey: registry.resolver(attemptModel, sessionId),
+							maxTokens,
+							disableReasoning: true,
+							// Greedy decode: titling is extraction, not generation. Backends that
+							// default temperature high (e.g. Ollama's 0.8) otherwise garble names
+							// from the message ("hashline" → "HasHroshi"). Providers whose models
+							// reject sampling params drop this via `supportsSamplingParams`.
+							temperature: 0,
+							metadata,
+							signal,
+						},
+					),
+				{ signal },
+			);
+
+			if (response.stopReason === "error") {
+				logger.warn("title-generator: response error", {
+					...modelContext,
+					reason: "provider-response-error",
+					stopReason: response.stopReason,
+					errorMessage: response.errorMessage,
+				});
+				if (signal?.aborted) return null;
+				noteTitleFailoverCooldown(registry, attemptModel, response.errorMessage);
+				continue;
+			}
+
+			const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
+
+			if (!title) {
+				logger.debug("title-generator: no title returned", {
+					...modelContext,
+					reason: "model-returned-none",
+					usage: response.usage,
+					stopReason: response.stopReason,
+				});
+				// The provider answered fine; the model just produced no usable
+				// title. Failing over would burn another request for the same
+				// likely outcome — the session stays unnamed and the next user
+				// message retries, as before.
+				return null;
+			}
+
+			logger.debug("title-generator: success", {
 				...modelContext,
-				reason: "provider-response-error",
-				stopReason: response.stopReason,
-				errorMessage: response.errorMessage,
-			});
-			return null;
-		}
-
-		const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
-
-		if (!title) {
-			logger.debug("title-generator: no title returned", {
-				...modelContext,
-				reason: "model-returned-none",
+				title,
 				usage: response.usage,
 				stopReason: response.stopReason,
 			});
-			return null;
+
+			return title;
+		} catch (err) {
+			logger.warn("title-generator: error", {
+				...modelContext,
+				reason: "exception",
+				error: err instanceof Error ? err.message : String(err),
+			});
+			if (signal?.aborted) return null;
+			noteTitleFailoverCooldown(registry, attemptModel, err instanceof Error ? err.message : String(err));
 		}
+	}
+	return null;
+}
 
-		logger.debug("title-generator: success", {
-			...modelContext,
-			title,
-			usage: response.usage,
-			stopReason: response.stopReason,
-		});
-
-		return title;
+/**
+ * Build the ordered title attempt list: the resolved title model first, then
+ * the `retry.fallbackChains` candidates that follow it — the same chain the
+ * turn path walks when a model's stream fails (see `TurnRecovery`). Without
+ * configured chains the list is just the primary, preserving single-attempt
+ * behavior; `retry.enabled` / `retry.modelFallback` opt out entirely.
+ *
+ * Selectors already in cooldown (`ModelRegistry.suppressSelector`, e.g. an
+ * earlier 429 with a long retry-after) are dropped so titling never pays a
+ * guaranteed rate-limit error when a healthy fallback exists. If every
+ * candidate is suppressed the primary is kept — a stale cooldown must not
+ * brick titling.
+ */
+function resolveTitleFailoverModels(primary: Model<Api>, registry: ModelRegistry, settings: Settings): Model<Api>[] {
+	const models = [primary];
+	if (settings.get("retry.enabled") === false || settings.get("retry.modelFallback") === false) return models;
+	try {
+		const context: RetryFallbackResolutionContext = {
+			chains: getRetryFallbackChains(settings),
+			getModelRole: role => settings.getModelRole(role),
+			modelLookup: registry,
+		};
+		const currentSelector = formatRetryFallbackSelector(primary, undefined);
+		const chainKey = resolveRetryFallbackChainKey(context, currentSelector, primary);
+		if (chainKey) {
+			for (const selector of findRetryFallbackCandidates(context, chainKey, currentSelector, primary)) {
+				const resolved =
+					resolveModelOverride([selector.raw], registry, settings).model ??
+					registry.find(selector.provider, selector.id);
+				if (resolved && !models.some(existing => modelsAreEqual(existing, resolved))) models.push(resolved);
+			}
+		}
 	} catch (err) {
-		logger.warn("title-generator: error", {
-			...modelContext,
-			reason: "exception",
+		// Chain resolution is best-effort: a malformed chain must never break
+		// titling, it just degrades to the single-attempt path.
+		logger.debug("title-generator: fallback chain resolution failed; using primary only", {
 			error: err instanceof Error ? err.message : String(err),
 		});
-		return null;
 	}
+	if (models.length > 1) {
+		const viable = models.filter(m => !registry.isSelectorSuppressed(formatRetryFallbackSelector(m, undefined)));
+		if (viable.length > 0) return viable;
+	}
+	return models;
+}
+
+/**
+ * Mirror the turn path's cooldown bookkeeping (`noteRetryFallbackCooldown`)
+ * so a selector that just failed a title request is skipped by later title
+ * attempts and by the shared retry-fallback candidate iteration.
+ */
+function noteTitleFailoverCooldown(registry: ModelRegistry, model: Model<Api>, errorMessage: string | undefined): void {
+	let cooldownMs = errorMessage ? parseRetryAfterMsFromError(errorMessage) : undefined;
+	if (!cooldownMs || cooldownMs <= 0) {
+		const reason = parseRateLimitReason(errorMessage ?? "");
+		cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
+	}
+	registry.suppressSelector(formatRetryFallbackSelector(model, undefined), Date.now() + cooldownMs);
 }
 
 function extractGeneratedTitle(contentBlocks: AssistantMessage["content"]): string {
