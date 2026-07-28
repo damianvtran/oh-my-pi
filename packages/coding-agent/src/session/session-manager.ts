@@ -492,6 +492,21 @@ export class SessionManager {
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
 
+	/**
+	 * Collab rebind tap: invoked after the active session id changes — resume,
+	 * new/clear, fork, branch/tree navigation, and the rollback that restores a
+	 * failed switch. A room whose lifetime is the *process* (`collab.autoStart`)
+	 * uses it to follow the session the user is now in; without it the room can
+	 * only end with the session it was started on, which is exactly what makes
+	 * an in-session `/resume` drop remote access until omp is relaunched.
+	 *
+	 * Fired mid-transition (the manager has adopted the new session before
+	 * AgentSession finishes restoring model/thinking/messages), so an observer
+	 * that reads more than the id MUST defer its work — see
+	 * `CollabHost.#scheduleSessionRebind`.
+	 */
+	onSessionIdChanged?: (sessionId: string) => void;
+
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
 	#turnOutputBaseline = 0;
@@ -1084,10 +1099,28 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Single funnel for every session-id write, so {@link onSessionIdChanged}
+	 * cannot be bypassed by a transition that assigns the field directly. Only a
+	 * genuine change notifies, and an observer's failure is contained: a broken
+	 * tap must never abort a session switch.
+	 */
+	#setSessionId(sessionId: string): void {
+		if (this.#sessionId === sessionId) return;
+		this.#sessionId = sessionId;
+		const callback = this.onSessionIdChanged;
+		if (!callback) return;
+		try {
+			callback(sessionId);
+		} catch (err) {
+			logger.warn("collab session-id hook failed", { error: String(err) });
+		}
+	}
+
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
-		this.#sessionId = mintSessionId();
+		this.#setSessionId(mintSessionId());
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -1144,7 +1177,7 @@ export class SessionManager {
 	#applyEntries(header: SessionHeader, entries: SessionEntry[]): void {
 		this.#header = header;
 		this.#entries = entries;
-		this.#sessionId = header.id;
+		this.#setSessionId(header.id);
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = header.timestamp;
@@ -1429,7 +1462,7 @@ export class SessionManager {
 		this.#clearDiskError();
 
 		const timestamp = nowIso();
-		this.#sessionId = mintSessionId();
+		this.#setSessionId(mintSessionId());
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#header = {
 			type: "session",
@@ -2564,7 +2597,7 @@ export class SessionManager {
 
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
-		this.#sessionId = newSessionId;
+		this.#setSessionId(newSessionId);
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = timestamp;

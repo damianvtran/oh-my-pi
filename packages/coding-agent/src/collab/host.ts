@@ -113,6 +113,16 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
  */
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
 /**
+ * Trailing debounce before a session-following room rebinds (see
+ * {@link CollabHost.#scheduleSessionRebind}). One user-visible transition moves
+ * the session id more than once — `/tree` mints a branch session, a failed
+ * resume rolls back to the previous one — and the tap fires while AgentSession
+ * is still restoring model, thinking level and messages. Waiting for the
+ * transition to go quiet means guests are re-welcomed once, with the state the
+ * user actually ended up in.
+ */
+const SESSION_REBIND_DEBOUNCE_MS = 250;
+/**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
  * response (an `undefined` value is a genuine guest cancel); `unavailable`
  * means the collab channel went away (teardown, relay drop) or the request was
@@ -144,6 +154,21 @@ export class CollabHost {
 	#unregisterLinkFileCleanup?: () => void;
 	/** Rejects a `start()` blocked on the relay handshake; set only for that window. */
 	#abortStart?: (reason: Error) => void;
+	/**
+	 * True for a room whose lifetime is the process rather than the session
+	 * (`collab.autoStart`): it rebinds to whatever session is loaded instead of
+	 * ending when the user resumes, clears, forks or branches. A hand-shared
+	 * `/collab` room keeps the opposite contract — a guest was given access to
+	 * one session and must never be silently moved to another.
+	 */
+	#followSession = false;
+	/** Publication inputs, retained so a rebind can re-publish the record in place. */
+	#relayUrl = "";
+	#publishLink = false;
+	#publishView = false;
+	/** Room start time; stable across rebinds — the room, not the session, started then. */
+	#startedAt = "";
+	#rebindDebounce: Timer | null = null;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -219,11 +244,26 @@ export class CollabHost {
 	 * `options.publishLink` opts into the `<config-root>/run/collab` discovery
 	 * record; the caller owns that policy decision so config scoping lives beside
 	 * the rest of it in `startCollabHosting`.
+	 *
+	 * `options.followSession` makes the room process-scoped: an in-session
+	 * `/resume`, `/new`, `/fork` or `/tree` rebinds it to the newly loaded
+	 * session instead of ending it (see {@link #scheduleSessionRebind}). Only
+	 * `collab.autoStart` passes it — a room the user hand-shared stays bound to
+	 * the session its guests were invited to.
 	 */
-	async start(relayUrl: string, webUrl = "", options: { view?: boolean; publishLink?: boolean } = {}): Promise<void> {
+	async start(
+		relayUrl: string,
+		webUrl = "",
+		options: { view?: boolean; publishLink?: boolean; followSession?: boolean } = {},
+	): Promise<void> {
 		const rawKey = generateRoomKey();
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
+		this.#followSession = options.followSession === true;
+		this.#relayUrl = relayUrl;
+		this.#publishLink = options.publishLink === true;
+		this.#publishView = options.view === true;
+		this.#startedAt = new Date().toISOString();
 		this.#writeToken = writeToken;
 		this.#link = formatCollabLink(relayUrl, roomId, rawKey, writeToken);
 		this.#webLink = formatCollabWebLink(relayUrl, roomId, rawKey, writeToken, webUrl);
@@ -309,8 +349,15 @@ export class CollabHost {
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
 		};
+		// Session tap: a process-scoped room follows the user across `/resume`,
+		// `/new`, `/fork` and `/tree` instead of dying with the session it was
+		// started on. Installed alongside the entry tap so a single `#teardown`
+		// detaches both.
+		if (this.#followSession) {
+			this.#ctx.sessionManager.onSessionIdChanged = () => this.#scheduleSessionRebind();
+		}
 		this.#updateStatusSegment();
-		if (options.publishLink) await this.#publishLinkFile(relayUrl, options.view === true);
+		if (this.#publishLink) await this.#publishLinkFile();
 	}
 
 	/**
@@ -324,16 +371,22 @@ export class CollabHost {
 	 * The postmortem hook covers the signal paths that never reach
 	 * {@link #teardown} (`/exit`, SIGINT/SIGTERM/SIGHUP, uncaught exception).
 	 * An abrupt exit still leaks the record, which is why consumers treat `pid`
-	 * as a liveness heuristic and the next publish sweeps dead owners.
+	 * as a liveness heuristic and the next publish sweeps dead owners. It is
+	 * registered at most once: a rebind re-publishes the same pid's record, and
+	 * a second registration would outlive the `#teardown` that unregisters one.
+	 *
+	 * `startedAt` is the room's start, not the current session's, so a consumer
+	 * that shows uptime does not see it reset every time the user resumes.
 	 */
-	async #publishLinkFile(relayUrl: string, view: boolean): Promise<void> {
-		this.#unregisterLinkFileCleanup = postmortem.register("collab-link-file", () => unpublishCollabLink());
+	async #publishLinkFile(): Promise<void> {
+		this.#unregisterLinkFileCleanup ??= postmortem.register("collab-link-file", () => unpublishCollabLink());
+		const view = this.#publishView;
 		await publishCollabLink({
 			pid: process.pid,
 			cwd: this.#ctx.sessionManager.getCwd(),
 			sessionId: this.#sessionId,
-			startedAt: new Date().toISOString(),
-			relayUrl,
+			startedAt: this.#startedAt,
+			relayUrl: this.#relayUrl,
 			link: view ? undefined : this.#link,
 			webLink: view ? undefined : this.#webLink,
 			viewLink: this.#viewLink,
@@ -361,6 +414,9 @@ export class CollabHost {
 		// early-returns once `#stopped` is set.
 		this.#abortStart?.(new Error("collab stopped before the relay handshake completed"));
 		this.#ctx.sessionManager.onEntryAppended = undefined;
+		if (this.#followSession) this.#ctx.sessionManager.onSessionIdChanged = undefined;
+		clearTimeout(this.#rebindDebounce ?? undefined);
+		this.#rebindDebounce = null;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		for (const unsubscribe of this.#busUnsubscribers) unsubscribe();
@@ -391,9 +447,67 @@ export class CollabHost {
 		}
 	}
 
+	/**
+	 * Queue a rebind onto the session the manager has just adopted.
+	 *
+	 * Trailing debounce, for two reasons: the tap fires while AgentSession is
+	 * still restoring the rest of the transition (model, thinking level,
+	 * messages), and one transition can move the id repeatedly — `/tree` mints a
+	 * branch, a failed `switchSession` rolls back. Guests are therefore
+	 * re-welcomed once, from the session the user actually landed in.
+	 */
+	#scheduleSessionRebind(): void {
+		if (this.#stopped || !this.#followSession) return;
+		clearTimeout(this.#rebindDebounce ?? undefined);
+		this.#rebindDebounce = setTimeout(() => {
+			this.#rebindDebounce = null;
+			void this.#rebindToCurrentSession().catch(err =>
+				logger.warn("collab host session rebind failed", { error: String(err) }),
+			);
+		}, SESSION_REBIND_DEBOUNCE_MS);
+	}
+
+	/**
+	 * Point the room at the session that is loaded now, keeping the room id, key
+	 * and write token — the link a phone or supervisor already holds stays valid,
+	 * so remote access survives an in-session `/resume` instead of requiring a
+	 * relaunch with `omp resume`.
+	 *
+	 * Every guest gets the same welcome + snapshot train it would get on a
+	 * reconnect, which is the resync path both guest implementations already
+	 * take: the replica is rewritten wholesale, so nothing of the previous
+	 * session survives into it. Pending guest UI requests are settled
+	 * `unavailable` first — they belong to dialogs the switch already discarded,
+	 * and an answer arriving for one would be applied to the wrong session.
+	 */
+	async #rebindToCurrentSession(): Promise<void> {
+		if (this.#stopped || !this.#socket) return;
+		const sessionId = this.#ctx.sessionManager.getSessionId();
+		if (sessionId === this.#sessionId) return;
+		this.#sessionId = sessionId;
+		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
+		this.#pendingUi.clear();
+		// The state frame is deduped against the last one sent; the resumed
+		// session can legitimately produce an identical footer, and a guest that
+		// just re-synced must still receive one.
+		this.#lastStateJson = "";
+		for (const [peerId, peer] of this.#peers) this.#sendWelcome(peerId, peer.canWrite);
+		this.#scheduleStateBroadcast();
+		if (this.#publishLink) await this.#publishLinkFile();
+	}
+
 	#broadcast(frame: CollabFrame): void {
 		if (this.#stopped || !this.#socket) return;
 		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
+			// A session-following room drops this frame — it describes a session
+			// guests have not been welcomed into — and lets the queued rebind
+			// deliver it as part of the new snapshot. Reached only when a frame
+			// beats the debounce, or the tap never fired (a manager the room does
+			// not own, e.g. in tests).
+			if (this.#followSession) {
+				this.#scheduleSessionRebind();
+				return;
+			}
 			void this.stop("session switched");
 			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
 			return;
@@ -450,11 +564,30 @@ export class CollabHost {
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		this.#sendWelcome(fromPeer, canWrite);
+		this.#ctx.session.emitNotice(
+			"info",
+			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
+			"collab",
+		);
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
+	}
 
-		// Snapshot and send synchronously: no awaits between snapshot, welcome,
-		// and chunk sends, so subsequent broadcast frames (entry/event/state/bus)
-		// queue behind the snapshot on the same socket and the guest can't
-		// observe a gap between the snapshot fragment and live traffic.
+	/**
+	 * Send one peer the current session: `welcome` header/state/agents, then the
+	 * `snapshot-chunk` train, then any guest UI request still awaiting an answer.
+	 *
+	 * Snapshot and send synchronously: no awaits between snapshot, welcome, and
+	 * chunk sends, so subsequent broadcast frames (entry/event/state/bus) queue
+	 * behind the snapshot on the same socket and the guest can't observe a gap
+	 * between the snapshot fragment and live traffic.
+	 *
+	 * Used both for a joining guest's hello and for a rebind onto a newly loaded
+	 * session, which is why it takes `canWrite` rather than re-deriving it: a
+	 * rebind must not silently re-evaluate a peer's permission.
+	 */
+	#sendWelcome(fromPeer: number, canWrite: boolean): void {
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
 		if (JSON.stringify(snapshot).length > WELCOME_IMAGE_STRIP_THRESHOLD) {
 			let stripped = 0;
@@ -484,13 +617,6 @@ export class CollabHost {
 				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
 			}
 		}
-		this.#ctx.session.emitNotice(
-			"info",
-			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
-			"collab",
-		);
-		this.#updateStatusSegment();
-		this.#scheduleStateBroadcast();
 	}
 
 	/**

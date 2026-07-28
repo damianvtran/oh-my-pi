@@ -560,10 +560,18 @@ async function runInteractiveMode(
 	// Matched against the schema values rather than `!== "off"`: merged settings
 	// are not validated against the enum, so a typo or an unquoted YAML boolean
 	// would otherwise fall through to a full-control room the user never asked for.
+	// `followSession` keeps the room bound to the *process*: an in-session
+	// `/resume`, `/new`, `/fork` or `/tree` re-welcomes guests into the session
+	// the user moved to, so remote access does not silently end at the first
+	// resume and require a relaunch.
 	const autoStartCollab = settings.get("collab.autoStart");
 	const autoStartHosts = autoStartCollab === "full" || autoStartCollab === "view";
 	if (autoStartHosts && joinLink === undefined && !mode.collabHost && !mode.collabGuest) {
-		void startCollabHosting(mode, { view: autoStartCollab === "view", qr: false }).catch(() => {});
+		void startCollabHosting(mode, {
+			view: autoStartCollab === "view",
+			qr: false,
+			followSession: true,
+		}).catch(() => {});
 	}
 
 	if (initialMessage !== undefined) {
