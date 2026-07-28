@@ -47,6 +47,7 @@ import {
 	type GroupPrefix,
 	type GroupTypeMap,
 	getDefault,
+	isUserScoped,
 	SETTINGS_SCHEMA,
 	type SettingPath,
 	type SettingValue,
@@ -107,6 +108,26 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fromEntries(
 	(Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map(settingPath => [settingPath, settingPath.split(".")]),
 ) as unknown as Record<SettingPath, readonly string[]>;
+
+/** Settings the project layer may not set; see `UserScopedMarker`. */
+const USER_SCOPED_SETTING_PATHS: readonly SettingPath[] = (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(
+	isUserScoped,
+);
+
+/**
+ * Remove a nested value by path segments. An emptied parent is left in place:
+ * `#deepMerge` recurses object-vs-object, so a bare `collab: {}` in the project
+ * layer is indistinguishable from an absent one.
+ */
+function deleteByPath(obj: RawSettings, segments: readonly string[]): void {
+	let current: Record<string, unknown> = obj;
+	for (const segment of segments.slice(0, -1)) {
+		const next = current[segment];
+		if (typeof next !== "object" || next === null) return;
+		current = next as Record<string, unknown>;
+	}
+	delete current[segments[segments.length - 1]!];
+}
 
 /**
  * Set a nested value in an object by path segments.
@@ -2197,8 +2218,21 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	#projectSettingsForMerge(): RawSettings {
-		const projectRoles = getByPath(this.#project, ["modelRoles"]);
-		if (!isRecord(projectRoles)) return this.#project;
+		let project = this.#project;
+
+		// A `userScoped` setting may not come from the working directory — see
+		// `UserScopedMarker`. Dropped here rather than at each read so `get`,
+		// `omp config get`, and the settings panel all report the value that
+		// actually takes effect.
+		for (const path of USER_SCOPED_SETTING_PATHS) {
+			const segments = SETTING_PATH_SEGMENTS[path];
+			if (getByPath(project, segments) === undefined) continue;
+			if (project === this.#project) project = structuredClone(this.#project);
+			deleteByPath(project, segments);
+		}
+
+		const projectRoles = getByPath(project, ["modelRoles"]);
+		if (!isRecord(projectRoles)) return project;
 
 		let filteredRoles: Record<string, unknown> | undefined;
 		for (const role in projectRoles) {
@@ -2207,7 +2241,7 @@ export class Settings {
 			filteredRoles ??= { ...projectRoles };
 			delete filteredRoles[role];
 		}
-		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
+		return filteredRoles ? { ...project, modelRoles: filteredRoles } : project;
 	}
 
 	#rebuildMerged(): void {

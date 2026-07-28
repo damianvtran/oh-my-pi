@@ -48,9 +48,64 @@ function showCollabQrCode(ctx: InteractiveModeContext, webLink: string): void {
 	}
 }
 
-function showCollabLink(ctx: InteractiveModeContext, host: CollabHost, heading: string, view = false): void {
+function showCollabLink(
+	ctx: InteractiveModeContext,
+	host: CollabHost,
+	heading: string,
+	options: { view?: boolean; qr?: boolean } = {},
+): void {
+	const view = options.view === true;
 	ctx.showStatus(collabLinkHint(host, heading, view), { dim: false });
-	showCollabQrCode(ctx, view ? host.webViewLink : host.webLink);
+	if (options.qr !== false) showCollabQrCode(ctx, view ? host.webViewLink : host.webLink);
+}
+
+/**
+ * Resolve the relay, start hosting, and announce the link. Shared by `/collab`
+ * and by `collab.autoStart` so both paths build the room, publish the link
+ * file, and render the join hint through exactly one code path.
+ *
+ * `qr: false` is used by auto-start: it fires on every interactive launch, and a
+ * QR block per launch is noise, while the one-line hint stays useful. Errors are
+ * surfaced through `ctx.showError` and reported as `false` rather than thrown,
+ * because a relay that is down must not stop a session from starting.
+ *
+ * `ctx.collabHost` is claimed BEFORE the relay handshake, which can take up to
+ * `CONNECT_TIMEOUT_MS`. Auto-start runs unawaited while the TUI already accepts
+ * input, so publishing the slot late would let a `/collab` or `/join` typed in
+ * that window pass their `collabHost` guards and build a second, orphaned host
+ * that no `/collab stop` could ever reach. The slot is released again if the
+ * handshake fails, and only if it still points at this host — a caller that
+ * already replaced it wins.
+ */
+export async function startCollabHosting(
+	ctx: InteractiveModeContext,
+	options: { relay?: string; view?: boolean; qr?: boolean } = {},
+): Promise<boolean> {
+	const relayInput = options.relay || ctx.settings.get("collab.relayUrl") || "";
+	if (!relayInput) {
+		ctx.showError("No relay configured. Set collab.relayUrl in /settings or pass one: /collab relay.example.com");
+		return false;
+	}
+	// Scheme-less relay args default to wss (ws:// must be spelled out for localhost).
+	const relayUrl = relayInput.includes("://") ? relayInput : `wss://${relayInput}`;
+	const host = new CollabHost(ctx);
+	ctx.collabHost = host;
+	try {
+		await host.start(relayUrl, ctx.settings.get("collab.webUrl") || "", {
+			view: options.view,
+			publishLink: ctx.settings.get("collab.publishLink"),
+		});
+	} catch (err) {
+		// A `/collab stop` or `/leave` landing during the handshake already told the
+		// user the room is gone and replaced the slot; reporting a start failure on
+		// top of that is noise about a room they deliberately closed.
+		if (ctx.collabHost !== host) return false;
+		ctx.collabHost = undefined;
+		ctx.showError(`Failed to start collab session: ${errorMessage(err)}`);
+		return false;
+	}
+	showCollabLink(ctx, host, "Collab session started!", options);
+	return true;
 }
 
 export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -306,34 +361,13 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			const knownStartVerb = verb === "start" || verb === "view";
 			const view = verb === "view";
 			if (ctx.collabHost) {
-				showCollabLink(
-					ctx,
-					ctx.collabHost,
-					view ? "Read-only collab session active" : "Collab session active",
+				showCollabLink(ctx, ctx.collabHost, view ? "Read-only collab session active" : "Collab session active", {
 					view,
-				);
+				});
 				return;
 			}
 			const explicitUrl = knownStartVerb ? rest : args;
-			const relayInput = explicitUrl || ctx.settings.get("collab.relayUrl") || "";
-			if (!relayInput) {
-				ctx.showError(
-					"No relay configured. Set collab.relayUrl in /settings or pass one: /collab relay.example.com",
-				);
-				return;
-			}
-			// Scheme-less relay args default to wss (ws:// must be spelled out for localhost).
-			const relayUrl = relayInput.includes("://") ? relayInput : `wss://${relayInput}`;
-			const webUrl = ctx.settings.get("collab.webUrl") || "";
-			const host = new CollabHost(ctx);
-			try {
-				await host.start(relayUrl, webUrl);
-			} catch (err) {
-				ctx.showError(`Failed to start collab session: ${errorMessage(err)}`);
-				return;
-			}
-			ctx.collabHost = host;
-			showCollabLink(ctx, host, "Collab session started!", view);
+			await startCollabHosting(ctx, { relay: explicitUrl, view });
 		},
 	},
 	{

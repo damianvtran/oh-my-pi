@@ -253,38 +253,56 @@ interface CredentialMarker {
 	credential?: true;
 }
 
-interface BooleanDef extends CredentialMarker {
+/**
+ * Marks a setting the project layer may not set.
+ *
+ * Project settings come from files inside the working directory
+ * (`.omp/config.yml`, `.claude/settings.json`, …), i.e. from whatever
+ * repository the user happened to open. That is fine for preferences, but not
+ * for a setting whose effect is unattended outbound sharing of the live
+ * session. A marked key resolves from the user's global config, an explicit
+ * `--config` overlay, and runtime overrides only.
+ *
+ * Enforced once in `Settings` by dropping the key from the project layer before
+ * it is merged, so every reader — `get`, `omp config get`, the settings panel —
+ * sees the value that actually takes effect.
+ */
+interface UserScopedMarker {
+	userScoped?: true;
+}
+
+interface BooleanDef extends CredentialMarker, UserScopedMarker {
 	type: "boolean";
 	default: boolean | undefined;
 	ui?: UiBoolean;
 }
 
-interface StringDef extends CredentialMarker {
+interface StringDef extends CredentialMarker, UserScopedMarker {
 	type: "string";
 	default: string | undefined;
 	ui?: UiString;
 }
 
-interface NumberDef extends CredentialMarker {
+interface NumberDef extends CredentialMarker, UserScopedMarker {
 	type: "number";
 	default: number | undefined;
 	ui?: UiNumber;
 }
 
-interface EnumDef<T extends readonly string[]> extends CredentialMarker {
+interface EnumDef<T extends readonly string[]> extends CredentialMarker, UserScopedMarker {
 	type: "enum";
 	values: T;
 	default: T[number];
 	ui?: UiEnum<T>;
 }
 
-interface ArrayDef<T> extends CredentialMarker {
+interface ArrayDef<T> extends CredentialMarker, UserScopedMarker {
 	type: "array";
 	default: T[];
 	ui?: UiArray;
 }
 
-interface RecordDef<T> extends CredentialMarker {
+interface RecordDef<T> extends CredentialMarker, UserScopedMarker {
 	type: "record";
 	default: Record<string, T>;
 	ui?: UiBase;
@@ -2003,23 +2021,25 @@ export const SETTINGS_SCHEMA = {
 	"collab.relayUrl": {
 		type: "string",
 		default: DEFAULT_RELAY_URL,
+		userScoped: true,
 		ui: {
 			tab: "interaction",
 			group: "Collab",
 			label: "Relay URL",
-			description: "Relay used by /collab (wss://host[:port])",
+			description: "Relay used by /collab (wss://host[:port]). Ignored in project config.",
 		},
 	},
 
 	"collab.webUrl": {
 		type: "string",
 		default: "",
+		userScoped: true,
 		ui: {
 			tab: "interaction",
 			group: "Collab",
 			label: "Web UI URL",
 			description:
-				"Browser UI used by /collab links; empty derives from collab.relayUrl; explicit http:// is localhost-only",
+				"Browser UI used by /collab links; empty derives from collab.relayUrl; explicit http:// is localhost-only. Ignored in project config.",
 		},
 	},
 
@@ -2031,6 +2051,50 @@ export const SETTINGS_SCHEMA = {
 			group: "Collab",
 			label: "Display Name",
 			description: "Name shown to other collab participants (default: OS username)",
+		},
+	},
+
+	"collab.autoStart": {
+		type: "enum",
+		values: ["off", "full", "view"] as const,
+		default: "off",
+		userScoped: true,
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Auto-Start",
+			description:
+				"Host a collab room on every interactive session, without running /collab. Each session connects out to collab.relayUrl and replicates its transcript there. Ignored in project config.",
+			options: [
+				{
+					value: "off",
+					label: "Off",
+					description: "Sessions are private until you run /collab.",
+				},
+				{
+					value: "full",
+					label: "Full",
+					description: "Share the write link: anyone holding it can read the session and prompt the agent.",
+				},
+				{
+					value: "view",
+					label: "View",
+					description: "Share the read-only link. The room still exists; only the view link is handed out.",
+				},
+			],
+		},
+	},
+
+	"collab.publishLink": {
+		type: "boolean",
+		default: false,
+		userScoped: true,
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Publish Link File",
+			description:
+				"While hosting, write the room link to <config-root>/run/collab/<pid>.json so local tools can attach (0600; carries the write token unless the room is shared read-only). Ignored in project config.",
 		},
 	},
 
@@ -5632,6 +5696,15 @@ export function isCredential(path: SettingPath): boolean {
 	// both here keeps ONE accessor, so the two spellings cannot produce
 	// different behaviour on different surfaces.
 	return getUi(path)?.secret === true;
+}
+
+/**
+ * Whether `path` may only be set outside the project layer. See
+ * {@link UserScopedMarker}; `Settings` enforces it at merge time.
+ */
+export function isUserScoped(path: SettingPath): boolean {
+	const def = SETTINGS_SCHEMA[path];
+	return "userScoped" in def && def.userScoped === true;
 }
 
 /** Get UI metadata for a path (undefined if no UI) */

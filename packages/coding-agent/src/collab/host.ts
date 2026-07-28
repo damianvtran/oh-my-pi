@@ -12,7 +12,7 @@
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
 	CollabUiRequest,
@@ -30,6 +30,7 @@ import type { SessionEntry as StoredSessionEntry } from "../session/session-entr
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
+import { publishCollabLink, unpublishCollabLink } from "./link-file";
 import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
@@ -139,6 +140,10 @@ export class CollabHost {
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
 	#stopped = false;
+	/** Unregisters the postmortem cleanup; set only while a link file is published. */
+	#unregisterLinkFileCleanup?: () => void;
+	/** Rejects a `start()` blocked on the relay handshake; set only for that window. */
+	#abortStart?: (reason: Error) => void;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -208,7 +213,14 @@ export class CollabHost {
 		}
 	}
 
-	async start(relayUrl: string, webUrl = ""): Promise<void> {
+	/**
+	 * `options.view` shares the room read-only: the write token still exists (one
+	 * room, one key pair), it is simply not the link handed out or published.
+	 * `options.publishLink` opts into the `<config-root>/run/collab` discovery
+	 * record; the caller owns that policy decision so config scoping lives beside
+	 * the rest of it in `startCollabHosting`.
+	 */
+	async start(relayUrl: string, webUrl = "", options: { view?: boolean; publishLink?: boolean } = {}): Promise<void> {
 		const rawKey = generateRoomKey();
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
@@ -220,6 +232,12 @@ export class CollabHost {
 		const parsed = parseCollabLink(this.#link);
 		if ("error" in parsed) throw new Error(parsed.error);
 		const key = await importRoomKey(rawKey);
+		// Auto-start runs unawaited, so `/collab stop` and `/leave` can reach a host
+		// that is still starting. `#teardown` is `#stopped`-guarded and can only run
+		// once, so without this check the rest of `start()` would reinstall the
+		// session tap, the status segment and the link file on a torn-down host that
+		// nothing can stop again. Re-checked after every await below.
+		if (this.#stopped) throw new Error("collab stopped before the relay handshake completed");
 
 		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
 		this.#socket = socket;
@@ -256,6 +274,7 @@ export class CollabHost {
 			() => firstOpen.reject(new Error("timed out connecting to relay")),
 			CONNECT_TIMEOUT_MS,
 		);
+		this.#abortStart = firstOpen.reject;
 		try {
 			await firstOpen.promise;
 		} catch (err) {
@@ -265,6 +284,12 @@ export class CollabHost {
 			throw err;
 		} finally {
 			clearTimeout(timeout);
+			this.#abortStart = undefined;
+		}
+		if (this.#stopped) {
+			socket.close();
+			this.#socket = null;
+			throw new Error("collab stopped before the relay handshake completed");
 		}
 
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
@@ -285,6 +310,39 @@ export class CollabHost {
 			this.#scheduleStateBroadcast();
 		};
 		this.#updateStatusSegment();
+		if (options.publishLink) await this.#publishLinkFile(relayUrl, options.view === true);
+	}
+
+	/**
+	 * Publish the room to `<config-root>/run/collab/<pid>.json` so local
+	 * automation can attach without scraping the TUI.
+	 *
+	 * A room shared read-only publishes only the view links: the write token
+	 * still exists, but a user who chose the read-only share must not have the
+	 * steerable link written to disk behind their back.
+	 *
+	 * The postmortem hook covers the signal paths that never reach
+	 * {@link #teardown} (`/exit`, SIGINT/SIGTERM/SIGHUP, uncaught exception).
+	 * An abrupt exit still leaks the record, which is why consumers treat `pid`
+	 * as a liveness heuristic and the next publish sweeps dead owners.
+	 */
+	async #publishLinkFile(relayUrl: string, view: boolean): Promise<void> {
+		this.#unregisterLinkFileCleanup = postmortem.register("collab-link-file", () => unpublishCollabLink());
+		await publishCollabLink({
+			pid: process.pid,
+			cwd: this.#ctx.sessionManager.getCwd(),
+			sessionId: this.#sessionId,
+			startedAt: new Date().toISOString(),
+			relayUrl,
+			link: view ? undefined : this.#link,
+			webLink: view ? undefined : this.#webLink,
+			viewLink: this.#viewLink,
+			webViewLink: this.#webViewLink,
+		});
+		// A relay drop during the publish tears the host down and unregisters the
+		// cleanup hook, so the record that lands afterwards would advertise a dead
+		// room under a live pid and never be swept.
+		if (this.#stopped) await unpublishCollabLink();
 	}
 
 	/** Broadcast a goodbye, detach all taps, and close the socket. */
@@ -297,6 +355,11 @@ export class CollabHost {
 	async #teardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		// A `start()` still waiting on the handshake would otherwise hang for the
+		// full connect timeout and then report a failure for a room the user has
+		// already stopped. `socket.close()` below cannot settle it: `onClose`
+		// early-returns once `#stopped` is set.
+		this.#abortStart?.(new Error("collab stopped before the relay handshake completed"));
 		this.#ctx.sessionManager.onEntryAppended = undefined;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
@@ -315,9 +378,17 @@ export class CollabHost {
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
+		// Release the slot before the unpublish I/O: while that awaits, anything
+		// reading `ctx.collabHost` would otherwise see a host with no socket and
+		// print a join hint for a room that is already gone.
 		this.#ctx.collabHost = undefined;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
+		if (this.#unregisterLinkFileCleanup) {
+			this.#unregisterLinkFileCleanup();
+			this.#unregisterLinkFileCleanup = undefined;
+			await unpublishCollabLink();
+		}
 	}
 
 	#broadcast(frame: CollabFrame): void {

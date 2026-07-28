@@ -723,6 +723,13 @@
 - Fixed omp worktree clear prematurely deleting active task-isolation sandboxes owned by running subagents.
 - Fixed /vibe mode preventing the director from completing parent tasks after verifying worker results by keeping the built-in todo tool active.
 - Fixed numeric GitHub issue and pull request autocomplete being suppressed inside skill slash-command arguments.
+### Breaking Changes
+
+- `collab.relayUrl` and `collab.webUrl` can no longer be set by project config. They join the new `collab.autoStart`/`collab.publishLink` as **user-scoped** settings — a new `userScoped` schema marker enforced once in `Settings` by dropping the key from the project layer before the merge, so `get()`, `omp config get`, and the settings panel all report the value that actually takes effect. Project settings are read from files inside the working directory, so a cloned repository could otherwise point a session's relay — and its browser deep link, which carries the room key in its fragment — at a host of its choosing. Set these in global config or a `--config` overlay; `/collab <relay>` still takes a relay inline.
+
+### Added
+
+- Added `collab.autoStart` (`off` | `full` | `view`) to host a collab room as soon as an interactive session starts, and `collab.publishLink` to publish the active room to `<config-root>/run/collab/<pid>.json` (`0700` dir, `0600` record, exclusive staged create + atomic rename, dead-owner sweep) for both auto-started and manual `/collab` rooms. Together they let a local supervisor discover and drive every running omp without scraping the TUI for the link. Auto-start reuses the `/collab` code path minus the per-launch QR code, is skipped whenever `omp join` was requested, and never blocks or fails startup when the relay is unreachable. A room shared read-only publishes only its view links, so `view` mode never writes a write token to disk. Claiming the host slot before the relay handshake (so a `/collab` typed during it cannot build a second, unstoppable room) also required `CollabHost.start()` to abort when `/collab stop` or `/leave` lands mid-handshake.
 
 ## [17.1.7] - 2026-07-27
 

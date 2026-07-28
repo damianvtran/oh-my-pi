@@ -87,6 +87,7 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
+import { startCollabHosting } from "./slash-commands/builtin-collaboration";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
@@ -547,6 +548,22 @@ async function runInteractiveMode(
 	// `/join` so collab guards and error rendering stay in one place.
 	if (joinLink !== undefined) {
 		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
+	}
+
+	// `collab.autoStart` hosts the session without a keystroke, so a local
+	// supervisor can discover and drive every running omp (see
+	// `collab.publishLink`). Placed after the `omp join` dispatch above, and
+	// skipped whenever a join was requested at all: a process launched to join
+	// someone else's room must never end up hosting its own, including when the
+	// join failed. Deliberately not awaited — the relay handshake has a 15 s
+	// ceiling and an unreachable relay must not delay the prompt.
+	// Matched against the schema values rather than `!== "off"`: merged settings
+	// are not validated against the enum, so a typo or an unquoted YAML boolean
+	// would otherwise fall through to a full-control room the user never asked for.
+	const autoStartCollab = settings.get("collab.autoStart");
+	const autoStartHosts = autoStartCollab === "full" || autoStartCollab === "view";
+	if (autoStartHosts && joinLink === undefined && !mode.collabHost && !mode.collabGuest) {
+		void startCollabHosting(mode, { view: autoStartCollab === "view", qr: false }).catch(() => {});
 	}
 
 	if (initialMessage !== undefined) {
