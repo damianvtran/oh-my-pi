@@ -286,6 +286,7 @@ export class CollabGuestLink {
 				proto: COLLAB_PROTO,
 				name: collabDisplayName(this.#ctx),
 				writeToken: this.#writeToken,
+				client: "tui",
 			});
 		};
 		socket.onFrame = frame => {

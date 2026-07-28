@@ -83,8 +83,8 @@ the dev equivalent), with one difference that matters — it binds loopback.
 
 ### The portal
 
-`omp mobile serve` scans `<config-root>/run/collab/` every two seconds, joins
-each live record's room as a guest, and serves:
+`omp mobile serve` watches `<config-root>/run/collab/`, joins each live record's
+room as a guest, and serves:
 
 | Route | Purpose |
 |---|---|
@@ -110,6 +110,53 @@ and re-welcome the portal into the session you moved to (see
 [collab](./collab.md#unattended-hosting)). The portal treats a fresh `welcome` as
 a full replacement and re-reads the republished record, so the card renames
 itself instead of describing a session the host already left.
+
+### Session discovery
+
+A session becomes visible by **publishing its room**, and the portal reacts to
+that file appearing, so a session you start shows up in milliseconds. A two-second
+poll runs behind the watcher as a backstop (and re-arms the watcher if the
+directory is ever deleted); the portal creates the directory at startup so the
+very first session on a fresh machine is caught by the watcher too.
+
+**The relay cannot do this discovery, and that is by design.** It forwards sealed
+frames and never sees a room key, so it cannot join a room, enumerate what a room
+contains, or hand a key to the portal. The published record — readable only by
+your account — is the only place a key exists outside the host. Any design where
+the relay could register sessions for you would be a design where the relay could
+read them.
+
+Which leaves one honest gap: a session that publishes **nothing** (started before
+the services existed, or with `collab.autoStart` off) is invisible, and nothing
+outside a session can make it start hosting — an interactive TUI has no control
+channel. `omp mobile status` therefore lists those separately:
+
+```text
+unregistered sessions  (running, but hosting no room)
+  pid 4821    no room  /Users/me/oss/oh-my-pi/packages/coding-agent/dist/omp
+  → these started before the relay, or with collab.autoStart off. Restart them, or type /collab in each.
+```
+
+They are found in the process table and matched against the published records, so
+the two services and any `omp <subcommand>` invocation are excluded — only actual
+sessions are reported.
+
+### What a session shows when the portal attaches
+
+The host distinguishes the portal from a person, because "someone joined your
+session" is the wrong story for a service that makes it phone-reachable:
+
+```text
+collab: Mobile relay registered this session — reachable from your phone
+collab: Mobile relay disconnected — this session is no longer aggregated
+```
+
+A human guest still reads `<name> joined the collab session`. The distinction
+comes from a `client` kind the guest declares in its hello (`tui`, `web`,
+`mobile-portal`) — advisory only, never a permission: what a guest may *do* still
+comes from the write token alone. A guest too old to declare one gets the generic
+wording, which is also what a session running an older build will keep printing
+until it restarts.
 
 ## Auth
 

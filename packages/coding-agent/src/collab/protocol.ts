@@ -29,6 +29,7 @@ import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry, SessionHeader } from "../session/session-entries";
 
 export type {
+	CollabClientKind,
 	CollabPromptDetails,
 	CollabUiRequest,
 	CollabUiRequestDraft,

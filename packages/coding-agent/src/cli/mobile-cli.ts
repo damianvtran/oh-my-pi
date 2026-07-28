@@ -128,7 +128,7 @@ function printStatus(report: MobileStatusReport): void {
 	}
 	printHealth(report.health);
 
-	console.log(chalk.bold("\nlive sessions"));
+	console.log(chalk.bold("\nregistered sessions") + chalk.dim("  (publishing a room the portal joined)"));
 	if (report.sessions.length === 0) {
 		console.log(chalk.dim("  (none — start an omp session, or check collab.autoStart)"));
 	}
@@ -136,6 +136,21 @@ function printStatus(report: MobileStatusReport): void {
 		const alive = session.alive ? chalk.green("alive") : chalk.yellow("stale");
 		const mode = session.steerable ? "" : chalk.dim(" view-only");
 		console.log(`  pid ${String(session.pid).padEnd(7)} ${alive} ${session.cwd}${mode}`);
+	}
+
+	// A session that publishes nothing is invisible to the portal and, from the
+	// phone, indistinguishable from one that is not running. Nothing outside a
+	// session can make it host, so naming it — with the fix — is the whole feature.
+	if (report.unregistered.length > 0) {
+		console.log(chalk.bold("\nunregistered sessions") + chalk.dim("  (running, but hosting no room)"));
+		for (const session of report.unregistered) {
+			console.log(`  pid ${String(session.pid).padEnd(7)} ${chalk.yellow("no room")} ${chalk.dim(session.command)}`);
+		}
+		console.log(
+			chalk.dim(
+				"  → these started before the relay, or with collab.autoStart off. Restart them, or type /collab in each.",
+			),
+		);
 	}
 
 	console.log(chalk.dim("\nlogs"));
