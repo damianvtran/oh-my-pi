@@ -121,7 +121,15 @@ export class PortalGuest {
 		// Every (re)connect re-introduces us and the host answers with a fresh
 		// welcome, which replaces the projection wholesale — see #handleWelcome.
 		socket.onOpen = () =>
-			socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#displayName, writeToken: this.#writeToken });
+			socket.send({
+				t: "hello",
+				proto: COLLAB_PROTO,
+				name: this.#displayName,
+				writeToken: this.#writeToken,
+				// Lets the host say the session became phone-reachable instead of
+				// announcing a person joining a share.
+				client: "mobile-portal",
+			});
 		socket.onFrame = frame => this.#handleFrame(frame);
 		socket.onClose = (reason, willReconnect) => {
 			if (this.#closed) return;

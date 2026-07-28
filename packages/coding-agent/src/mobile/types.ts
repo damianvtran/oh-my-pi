@@ -118,6 +118,12 @@ export interface MobileStatusReport {
 	services: MobileServiceStatus[];
 	health: MobileHealth;
 	sessions: MobileSessionRow[];
+	/**
+	 * Live omp sessions publishing no collab room, so the portal cannot see them.
+	 * Discovered from the process table — nothing outside a session can make it
+	 * host, so the only useful thing to do about one is report it.
+	 */
+	unregistered: { pid: number; command: string }[];
 }
 
 // ── Portal view state ───────────────────────────────────────────────────────

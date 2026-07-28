@@ -35,6 +35,7 @@ import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
 	COLLAB_PROTO,
+	type CollabClientKind,
 	type CollabFrame,
 	type CollabParticipant,
 	type CollabPromptDetails,
@@ -130,6 +131,34 @@ const SESSION_REBIND_DEBOUNCE_MS = 250;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+type HelloFrame = Extract<CollabFrame, { t: "hello" }>;
+
+/**
+ * The mobile portal (`omp mobile serve`) joins every local room as a guest to
+ * aggregate it for a phone, so "someone joined" is the wrong story: nobody
+ * arrived, the session just became reachable from the user's phone.
+ *
+ * Keyed off the declared `client` kind ONLY. The display name is deliberately
+ * not a fallback signal: it is a self-chosen string, so name-matching would let
+ * any guest called "omp-mobile" impersonate the relay — and a notice the user
+ * may act on is worse fabricated than absent. A portal too old to send `client`
+ * simply gets the generic wording.
+ */
+function joinNotice(name: string, canWrite: boolean, client: CollabClientKind | undefined): string {
+	if (client === "mobile-portal") {
+		return canWrite
+			? "Mobile relay registered this session — reachable from your phone"
+			: "Mobile relay registered this session (read-only)";
+	}
+	return `${name} joined the collab session${canWrite ? "" : " (read-only)"}`;
+}
+
+/** Counterpart to {@link joinNotice}: the portal going away un-aggregates the session. */
+function leaveNotice(name: string, client: CollabClientKind | undefined): string {
+	if (client === "mobile-portal") return "Mobile relay disconnected — this session is no longer aggregated";
+	return `${name} left the collab session`;
+}
+
 export class CollabHost {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -140,7 +169,8 @@ export class CollabHost {
 	#writeToken: Uint8Array | null = null;
 	#sessionId = "";
 	#unsubscribe?: () => void;
-	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	/** `client` is remembered only so the leave notice can match the join wording. */
+	#peers = new Map<number, { name: string; canWrite: boolean; client?: CollabClientKind }>();
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
@@ -518,7 +548,7 @@ export class CollabHost {
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
 		switch (frame.t) {
 			case "hello":
-				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
+				this.#handleHello(frame, fromPeer);
 				break;
 			case "prompt":
 				this.#handlePrompt(frame.text, frame.images, fromPeer);
@@ -553,23 +583,19 @@ export class CollabHost {
 		this.#socket?.send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
 	}
 
-	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
-		if (proto !== COLLAB_PROTO) {
+	#handleHello(hello: HelloFrame, fromPeer: number): void {
+		if (hello.proto !== COLLAB_PROTO) {
 			this.#socket?.send(
-				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
+				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${hello.proto}` },
 				fromPeer,
 			);
 			return;
 		}
-		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
-		const canWrite = this.#verifyWriteToken(writeToken);
-		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		const cleanName = hello.name.trim().slice(0, 64) || `guest-${fromPeer}`;
+		const canWrite = this.#verifyWriteToken(hello.writeToken);
+		this.#peers.set(fromPeer, { name: cleanName, canWrite, client: hello.client });
 		this.#sendWelcome(fromPeer, canWrite);
-		this.#ctx.session.emitNotice(
-			"info",
-			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
-			"collab",
-		);
+		this.#ctx.session.emitNotice("info", joinNotice(cleanName, canWrite, hello.client), "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}
@@ -709,9 +735,9 @@ export class CollabHost {
 	}
 
 	#handlePeerLeft(peer: number): void {
-		const name = this.#peers.get(peer)?.name;
+		const gone = this.#peers.get(peer);
 		this.#peers.delete(peer);
-		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
+		if (gone) this.#ctx.session.emitNotice("info", leaveNotice(gone.name, gone.client), "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}

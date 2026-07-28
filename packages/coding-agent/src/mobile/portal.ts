@@ -11,6 +11,7 @@
  * it holds no session state of its own and cannot see a session that has not
  * published a link.
  */
+import * as fs2 from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
@@ -22,6 +23,12 @@ import portalHtml from "./portal-ui.html" with { type: "text" };
 const UI = portalHtml as unknown as string;
 
 const DEFAULT_SCAN_INTERVAL_MS = 2000;
+/**
+ * Coalescing window for link-directory events. A record is published as a staged
+ * write plus a rename (two events), and sessions often start in bursts, so a
+ * short debounce turns any of that into one scan while still feeling instant.
+ */
+const WATCH_DEBOUNCE_MS = 50;
 
 const COOKIE = "omp_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
@@ -86,14 +93,64 @@ class Portal implements PortalHandle {
 	readonly #subscribers = new Map<number, Set<(chunk: string) => void>>();
 	readonly #server: Bun.Server<undefined>;
 	#scanTimer: Timer | undefined;
+	/** Link-directory watcher; undefined until the directory exists. */
+	#watcher: fs2.FSWatcher | undefined;
+	#watchDebounce: Timer | undefined;
+	#stopped = false;
 
 	static async start(options: PortalOptions): Promise<Portal> {
 		const portal = new Portal(options);
+		// Create the link directory before watching it. Hosts create it when they
+		// publish, but a portal that starts first would otherwise have nothing to
+		// watch and would discover the first session only on the next poll — the
+		// one case where "instant" silently degraded to two seconds. Same 0700 as
+		// `collab/link-file.ts`, with the explicit chmod for the same reason: the
+		// creation mode is masked by the umask, and a directory left by an earlier
+		// run keeps whatever permissions it already had.
+		try {
+			await fs.mkdir(portal.#linkDir, { recursive: true, mode: 0o700 });
+			await fs.chmod(portal.#linkDir, 0o700);
+		} catch (err) {
+			logger.debug("mobile portal could not prepare the link directory", { error: String(err) });
+		}
 		// One scan before returning so `omp mobile status` and the phone's first
 		// load see the sessions that were already running.
 		await portal.#scan();
 		portal.#scanTimer = setInterval(() => void portal.#scan(), portal.#scanIntervalMs);
+		portal.#watchLinkDir();
 		return portal;
+	}
+
+	/**
+	 * Watch the link directory so a session that starts hosting is picked up in
+	 * milliseconds instead of on the next poll — the phone should show a session
+	 * you just started, not one you started two seconds ago.
+	 *
+	 * The poll stays as the backstop, and it re-installs this watcher if the
+	 * directory is ever deleted underneath us, so discovery cannot be lost
+	 * permanently by someone clearing `run/collab`.
+	 *
+	 * Publication is a staged write plus a rename, which is two events for one
+	 * record; the debounce collapses those, and a burst of sessions starting
+	 * together, into one scan.
+	 */
+	#watchLinkDir(): void {
+		if (this.#stopped || this.#watcher) return;
+		try {
+			this.#watcher = fs2.watch(this.#linkDir, () => {
+				clearTimeout(this.#watchDebounce);
+				this.#watchDebounce = setTimeout(() => void this.#scan(), WATCH_DEBOUNCE_MS);
+			});
+		} catch {
+			// Directory not there yet (or unwatchable): the poll retries.
+			return;
+		}
+		// A watcher on a directory that is later deleted goes silent rather than
+		// erroring; drop it so the poll re-installs one when the directory returns.
+		this.#watcher.on("error", () => {
+			this.#watcher?.close();
+			this.#watcher = undefined;
+		});
 	}
 
 	constructor(options: PortalOptions) {
@@ -116,8 +173,13 @@ class Portal implements PortalHandle {
 	}
 
 	async stop(): Promise<void> {
+		this.#stopped = true;
 		clearInterval(this.#scanTimer);
 		this.#scanTimer = undefined;
+		clearTimeout(this.#watchDebounce);
+		this.#watchDebounce = undefined;
+		this.#watcher?.close();
+		this.#watcher = undefined;
 		for (const entry of this.#attached.values()) entry.guest.close();
 		this.#attached.clear();
 		this.#subscribers.clear();
@@ -142,6 +204,10 @@ class Portal implements PortalHandle {
 		let names: string[] = [];
 		try {
 			names = await fs.readdir(this.#linkDir);
+			// The directory exists, so a watcher can be installed — this is how the
+			// poll upgrades a cold start (nothing has ever hosted) to instant
+			// discovery, and how it recovers a watcher lost to a deleted directory.
+			this.#watchLinkDir();
 		} catch {
 			names = [];
 		}

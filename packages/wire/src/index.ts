@@ -321,6 +321,13 @@ export type CollabUiRequestDraft =
 
 export type CollabUiRequest = CollabUiRequestDraft & { reqId: number };
 
+/**
+ * What kind of client a guest is, so a host can describe the peer accurately.
+ * `mobile-portal` is `omp mobile serve` aggregating a local session for a
+ * phone, which is a machine registering a relay — not a person joining a share.
+ */
+export type CollabClientKind = "tui" | "web" | "mobile-portal";
+
 export type GuestFrame =
 	| {
 			t: "hello";
@@ -332,6 +339,18 @@ export type GuestFrame =
 			 * read-only and rejects their mutating frames.
 			 */
 			writeToken?: string;
+			/**
+			 * Self-declared client kind, used only to word host-side notices.
+			 *
+			 * Optional because rooms are mixed-version: a guest built before this
+			 * field omits it, and a host built before it ignores it, so neither
+			 * side needs to match the other's build to join.
+			 *
+			 * Advisory only — the guest asserts its own kind, so it is trivially
+			 * forgeable and must never gate a permission. Capability comes from
+			 * `writeToken` alone and nothing about `client` may change that.
+			 */
+			client?: CollabClientKind;
 	  }
 	| { t: "prompt"; text: string; images?: ImageContent[] }
 	| { t: "ui-response"; reqId: number; value?: CollabUiResponseValue }

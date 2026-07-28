@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { isEnoent, logger, procmgr, ptree, VERSION } from "@oh-my-pi/pi-utils";
 import { type CollabLinkRecord, collabLinkDir } from "../collab/link-file";
 import { Settings, settings } from "../config/settings";
+import { findUnregisteredSessions } from "./discovery";
 import { probeMobileHealth, waitForHealthy } from "./health";
 import {
 	bootoutService,
@@ -479,6 +480,9 @@ export async function mobileStatus(options: { homeDir?: string } = {}): Promise<
 		services,
 		health,
 		sessions,
+		// Discovered after the records, so a session that publishes between the two
+		// reads shows up as registered rather than as a phantom "no room" row.
+		unregistered: await findUnregisteredSessions(sessions.map(row => row.pid)),
 	};
 }
 
