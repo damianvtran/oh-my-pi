@@ -49,6 +49,20 @@ describe("parseOmpSessionProcesses", () => {
 		expect(found).toEqual([]);
 	});
 
+	it("excludes omp's own worker processes", () => {
+		// omp re-spawns itself for eval kernels, tab workers, the daemon broker and
+		// more, with a `__omp_worker_*` selector instead of a subcommand. A busy
+		// machine has several, and reporting them as unreachable sessions is exactly
+		// the noise that makes a status line worth ignoring.
+		const found = parse([
+			" 1411 /Users/me/dist/omp __omp_worker_js_eval_process",
+			" 1412 /Users/me/dist/omp __omp_worker_daemon_broker",
+			" 1413 /Users/me/dist/omp __omp_worker_tab",
+			" 1414 /Users/me/dist/omp",
+		]);
+		expect(found.map(p => p.pid)).toEqual([1414]);
+	});
+
 	it("excludes this process, so `omp mobile status` never lists itself", () => {
 		expect(parse([" 999 /Users/me/dist/omp"])).toEqual([]);
 	});
