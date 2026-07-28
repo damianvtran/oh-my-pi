@@ -121,6 +121,10 @@ opposite contract and still ends on a session switch ("Collab ended: session
 switched") — its guests were invited to one specific session and must never be
 moved to another one silently.
 
+`omp mobile install` wires all of this up in one step — a loopback relay, a
+phone-facing portal that joins every published room, and these three settings.
+See [mobile.md](./mobile.md).
+
 `collab.autoStart`, `collab.publishLink`, `collab.relayUrl`, and `collab.webUrl` are **user-scoped**: a project config cannot set them, because project settings come from whatever repository you happened to open and must not be able to start sharing your session, redirect the relay, or point the browser link — which carries the room key in its fragment — at a page of the repository's choosing. Set them globally, in a `--config` overlay, or pass a relay inline (`/collab relay.example.com`).
 
 `collab.publishLink` publishes the active room while hosting, for **both** auto-started and manual `/collab` rooms:

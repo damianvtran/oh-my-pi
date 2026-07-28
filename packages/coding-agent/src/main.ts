@@ -59,6 +59,7 @@ import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
+import { ensureMobileServices } from "./mobile/ensure";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
@@ -573,6 +574,15 @@ async function runInteractiveMode(
 			followSession: true,
 		}).catch(() => {});
 	}
+
+	// Heal the mobile services (`omp mobile install`) if they are installed,
+	// enabled and not answering. launchd handles the normal cases; this covers a
+	// crash still inside `ThrottleInterval`, a manual `bootout`, and the first
+	// launch after an install. Unawaited and self-silencing: a relay that will not
+	// start costs phone access, never this session. Gated on the same
+	// `autoStartHosts` check, because a session that hosts no room has nothing for
+	// the portal to aggregate.
+	if (autoStartHosts) void ensureMobileServices().catch(() => {});
 
 	if (initialMessage !== undefined) {
 		session.maybeStartTitleGeneration(initialMessage);

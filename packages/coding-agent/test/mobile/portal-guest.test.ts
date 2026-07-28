@@ -1,0 +1,403 @@
+/**
+ * Contract: `PortalGuest` projects a live collab room into the flat view state
+ * the phone renders, and it projects the HOST's frames rather than a
+ * reimplementation of them. So this drives a real `CollabHost` over the
+ * in-process relay (see ../collab/helpers/in-memory-relay) with a real
+ * `CollabSocket` underneath the guest: sealing, enveloping, the hello→welcome
+ * handshake and the snapshot chunk train are all exercised, and only the TUI
+ * context and the transport are doubles.
+ *
+ * Three properties are load-bearing for the phone, and each one broke the
+ * out-of-repo predecessor this was ported from:
+ *  - a welcome plus its chunk train is a FULL REPLACEMENT, announced exactly
+ *    once as `onResync`;
+ *  - a rebind onto a resumed session (`collab.autoStart` rooms follow an
+ *    in-session `/resume`) must not splice two transcripts into one view, and
+ *    must not leave an ask on screen for a dialog the host already discarded;
+ *  - a streaming turn emits `message_update` per token, so identical thinking
+ *    updates must fold into one activity push instead of one SSE frame each.
+ *
+ * Every wait is on a signal the guest itself fired, never a delay: the host's
+ * rebind debounce is production timing and nothing here guesses its duration.
+ */
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
+import type { CollabSessionState, CollabUiRequest } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { PortalGuest } from "@oh-my-pi/pi-coding-agent/mobile/portal-guest";
+import type {
+	PortalActivity,
+	PortalGuestEvents,
+	TodoPhase,
+	TranscriptItem,
+} from "@oh-my-pi/pi-coding-agent/mobile/types";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { installInMemoryRelay, uninstallInMemoryRelay } from "../collab/helpers/in-memory-relay";
+
+const RELAY_URL = "ws://localhost:7779";
+
+const TODO_PHASES: TodoPhase[] = [{ name: "Port", tasks: [{ content: "move the guest", status: "in_progress" }] }];
+
+// ── Session fixtures ────────────────────────────────────────────────────────
+
+function messageEntry(id: string, message: AgentMessage): SessionEntry {
+	return { type: "message", id, parentId: null, timestamp: "2026-07-28T00:00:00Z", message };
+}
+
+function assistantMessage(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "test-model",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
+}
+
+/**
+ * A transcript with one of every shape the projection handles: user text, a
+ * thinking block, assistant text, a tool call whose result attaches to it, and
+ * a `todo` result whose `details` own the panel rather than the transcript.
+ */
+function sessionAEntries(): SessionEntry[] {
+	return [
+		messageEntry("a1", { role: "user", content: "port the guest", timestamp: 0 }),
+		messageEntry(
+			"a2",
+			assistantMessage([
+				{ type: "thinking", thinking: "weighing options" },
+				{ type: "text", text: "On it." },
+				{ type: "toolCall", id: "call-read", name: "read", arguments: { path: "a.ts" } },
+			]),
+		),
+		messageEntry("a3", {
+			role: "toolResult",
+			toolCallId: "call-read",
+			toolName: "read",
+			content: [{ type: "text", text: "file body" }],
+			isError: false,
+			timestamp: 0,
+		}),
+		messageEntry(
+			"a4",
+			assistantMessage([{ type: "toolCall", id: "call-todo", name: "todo", arguments: { op: "init" } }]),
+		),
+		messageEntry("a5", {
+			role: "toolResult",
+			toolCallId: "call-todo",
+			toolName: "todo",
+			content: [{ type: "text", text: "todo updated" }],
+			details: { phases: TODO_PHASES, storage: "session" },
+			isError: false,
+			timestamp: 0,
+		}),
+	];
+}
+
+/** A `message_update` shaped the way a streaming thinking block arrives. */
+function thinkingUpdate(thinking: string): AgentSessionEvent {
+	const message = assistantMessage([{ type: "thinking", thinking }]);
+	return {
+		type: "message_update",
+		message,
+		assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: thinking, partial: message },
+	};
+}
+
+// ── Host double ─────────────────────────────────────────────────────────────
+
+/** Mutable stand-in for the session the manager currently has loaded. */
+interface LoadedSession {
+	id: string;
+	cwd: string;
+	entries: SessionEntry[];
+}
+
+interface HostHarness {
+	ctx: InteractiveModeContext;
+	/** Feed an agent event into the host's subscribe tap, as AgentSession does. */
+	emit(event: AgentSessionEvent): void;
+}
+
+/**
+ * Minimal InteractiveModeContext double: only the members `CollabHost` touches,
+ * mirroring ../collab/session-rebind.test.ts. `sessionManager` reads through
+ * `loaded`, so {@link switchSession} reproduces what a resume does to the real
+ * manager — adopt a new id/cwd/transcript, then fire the `onSessionIdChanged`
+ * tap every id write funnels through.
+ */
+function makeHostHarness(loaded: LoadedSession): HostHarness {
+	let listener: ((event: AgentSessionEvent) => void) | undefined;
+	const ctx = {
+		settings: { get: () => "" },
+		sessionManager: {
+			getSessionId: () => loaded.id,
+			getCwd: () => loaded.cwd,
+			snapshotForReplication: () => ({
+				header: { type: "session", id: loaded.id, timestamp: "2026-07-28T00:00:00Z", cwd: loaded.cwd },
+				entries: loaded.entries,
+			}),
+			onEntryAppended: undefined,
+			onSessionIdChanged: undefined,
+		},
+		session: {
+			isStreaming: false,
+			queuedMessageCount: 0,
+			sessionName: "portal-test",
+			model: undefined,
+			thinkingLevel: undefined,
+			subscribe: (l: (event: AgentSessionEvent) => void) => {
+				listener = l;
+				return () => {
+					listener = undefined;
+				};
+			},
+			emitNotice: () => {},
+		},
+		eventBus: undefined,
+		statusLine: {
+			setCollabStatus: () => {},
+			invalidate: () => {},
+			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+		},
+		ui: { requestRender: () => {} },
+		showStatus: () => {},
+		collabHost: undefined,
+	};
+	return { ctx: ctx as unknown as InteractiveModeContext, emit: event => listener?.(event) };
+}
+
+function switchSession(ctx: InteractiveModeContext, loaded: LoadedSession, next: Partial<LoadedSession>): void {
+	Object.assign(loaded, next);
+	ctx.sessionManager.onSessionIdChanged?.(loaded.id);
+}
+
+// ── Guest observer ──────────────────────────────────────────────────────────
+
+/**
+ * Records everything the portal would react to and lets a test await it without
+ * a timer: every recorded callback re-checks the pending predicates, so a wait
+ * settles on the exact turn the guest fired the signal.
+ */
+class GuestWatch {
+	resyncs = 0;
+	entries = 0;
+	states: CollabSessionState[] = [];
+	activities: PortalActivity[] = [];
+	eventTypes: string[] = [];
+	asks: CollabUiRequest[] = [];
+	askEnds: number[] = [];
+	closes: string[] = [];
+	readonly handlers: PortalGuestEvents;
+	#pending: { satisfied: () => boolean; resolve: () => void }[] = [];
+
+	constructor() {
+		this.handlers = {
+			onResync: () => {
+				this.resyncs++;
+				this.#settle();
+			},
+			onEntry: () => {
+				this.entries++;
+				this.#settle();
+			},
+			onState: state => {
+				this.states.push(state);
+				this.#settle();
+			},
+			onActivity: activity => {
+				this.activities.push(activity);
+				this.#settle();
+			},
+			onEvent: event => {
+				this.eventTypes.push(event.type);
+				this.#settle();
+			},
+			onUiRequest: request => {
+				this.asks.push(request);
+				this.#settle();
+			},
+			onUiRequestEnd: reqId => {
+				this.askEnds.push(reqId);
+				this.#settle();
+			},
+			onClose: reason => {
+				this.closes.push(reason);
+				this.#settle();
+			},
+		};
+	}
+
+	until(satisfied: () => boolean): Promise<void> {
+		if (satisfied()) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#pending.push({ satisfied, resolve });
+		return promise;
+	}
+
+	#settle(): void {
+		for (const waiter of this.#pending.splice(0)) {
+			if (waiter.satisfied()) waiter.resolve();
+			else this.#pending.push(waiter);
+		}
+	}
+}
+
+/** Join as the portal does and wait for the first full snapshot. */
+async function joinGuest(link: string): Promise<{ guest: PortalGuest; watch: GuestWatch }> {
+	const watch = new GuestWatch();
+	const guest = new PortalGuest(watch.handlers, "portal-test");
+	await guest.connect(link);
+	await watch.until(() => watch.resyncs >= 1);
+	return { guest, watch };
+}
+
+// ── Lifecycle ───────────────────────────────────────────────────────────────
+
+beforeEach(() => installInMemoryRelay());
+afterEach(() => uninstallInMemoryRelay());
+
+describe("mobile portal guest", () => {
+	it("projects the host snapshot into transcript cards, todos and state", async () => {
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: sessionAEntries() };
+		const { ctx } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			// The chunk train's `final` frame is the only announcement a subscriber
+			// gets that everything it renders was replaced.
+			expect(watch.resyncs).toBe(1);
+			expect(guest.connected).toBe(true);
+			const expected: TranscriptItem[] = [
+				{ kind: "user", text: "port the guest" },
+				{ kind: "thinking", text: "weighing options" },
+				{ kind: "assistant", text: "On it." },
+				// The result attached to the call it answers, so the phone draws one card.
+				{
+					kind: "tool",
+					id: "call-read",
+					name: "read",
+					args: { path: "a.ts" },
+					output: "file body",
+					isError: false,
+				},
+				{
+					kind: "tool",
+					id: "call-todo",
+					name: "todo",
+					args: { op: "init" },
+					output: "todo updated",
+					isError: false,
+				},
+			];
+			expect(guest.transcript).toEqual(expected);
+			// The todo tool's result owns the panel, not the transcript.
+			expect(guest.todos).toEqual(TODO_PHASES);
+			expect(guest.state?.cwd).toBe("/tmp/project-a");
+			expect(guest.state?.sessionName).toBe("portal-test");
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+
+		expect(guest.connected).toBe(false);
+	});
+
+	it("replaces the projection when the host rebinds to a resumed session", async () => {
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: sessionAEntries() };
+		const { ctx } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		// Only a session-following room rebinds; a hand-shared `/collab` room ends.
+		await host.start(RELAY_URL, "", { followSession: true });
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			// An ask on the phone's screen when the switch happens.
+			const ask = host.requestGuestUi({ kind: "editor", title: "Name the branch", prefill: "" });
+			expect(ask).not.toBeNull();
+			await watch.until(() => watch.asks.length === 1);
+			const reqId = watch.asks[0]!.reqId;
+			expect(guest.pendingUi?.reqId).toBe(reqId);
+
+			// Resuming another session, from another project directory.
+			switchSession(ctx, loaded, {
+				id: "sess-b",
+				cwd: "/tmp/project-b",
+				entries: [messageEntry("b1", { role: "user", content: "resumed", timestamp: 0 })],
+			});
+
+			await watch.until(() => watch.resyncs === 2);
+			// Nothing of the previous session survives: an append would have left
+			// session A's five cards in front of session B's one.
+			expect(guest.transcript).toEqual([{ kind: "user", text: "resumed" }]);
+			expect(guest.todos).toEqual([]);
+			expect(guest.activity).toEqual({ working: false });
+			expect(guest.state?.cwd).toBe("/tmp/project-b");
+
+			// The ask is gone from the projection and the subscriber was told once.
+			// Both halves matter: this host settles pending asks `unavailable` before
+			// re-welcoming, so its own `ui-request-end` lands first, while the
+			// welcome's own drop covers a re-welcome that carries no end frame (a
+			// reconnect re-sends the ask *after* the welcome).
+			expect(guest.pendingUi).toBeUndefined();
+			expect(watch.askEnds).toEqual([reqId]);
+			expect(await ask).toEqual({ kind: "unavailable" });
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("folds repeated identical thinking updates into one activity push", async () => {
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
+		const harness = makeHostHarness(loaded);
+		const host = new CollabHost(harness.ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			// The welcome pushes the cleared activity; count from there.
+			const baseline = watch.activities.length;
+
+			const repeated = thinkingUpdate("weighing options carefully");
+			harness.emit(repeated);
+			harness.emit(repeated);
+			await watch.until(() => watch.eventTypes.length === 2);
+			expect(watch.eventTypes).toEqual(["message_update", "message_update"]);
+			// A streaming turn emits one of these per token; only the first changed
+			// anything the phone renders.
+			expect(watch.activities.length - baseline).toBe(1);
+			expect(guest.activity.thinking).toBe("weighing options carefully");
+
+			// A real change still pushes, so the dedupe is not "never fires".
+			harness.emit(thinkingUpdate("now writing the test"));
+			await watch.until(() => watch.eventTypes.length === 3);
+			expect(watch.activities.length - baseline).toBe(2);
+			expect(guest.activity.thinking).toBe("now writing the test");
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("rejects a link it cannot parse instead of dialing a bad relay", async () => {
+		const guest = new PortalGuest({});
+		await expect(guest.connect("not-a-collab-link")).rejects.toThrow(/collab link/i);
+		expect(guest.connected).toBe(false);
+	});
+});
