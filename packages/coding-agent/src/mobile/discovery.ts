@@ -20,6 +20,7 @@
 
 import * as path from "node:path";
 import { logger, ptree } from "@oh-my-pi/pi-utils";
+import { isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { commands } from "../cli-commands";
 
 /** One omp process seen in the process table. */
@@ -61,10 +62,14 @@ function subcommandNames(): Set<string> {
  * the classification is the part that is easy to get wrong.
  *
  * A line qualifies when the executable's basename is `omp` (that is the name omp
- * gives its own processes) and the first argument is not a subcommand. Both
- * halves matter: without the basename check a `grep omp` in someone's pipeline
- * counts, and without the subcommand check the portal, the relay, and whatever
- * `omp mobile status` you are currently running all count as sessions.
+ * gives its own processes) and the first argument is neither a subcommand nor a
+ * worker selector. All three checks earn their place: without the basename check
+ * a `grep omp` in someone's pipeline counts; without the subcommand check the
+ * portal, the relay, and whatever `omp mobile status` you are currently running
+ * count as sessions; and without the worker check every `eval` kernel, tab worker
+ * and daemon broker omp has re-spawned of itself gets reported as an unreachable
+ * session — which is what the first build of this did, because a worker's argv is
+ * an `__omp_worker_*` selector rather than a registered command.
  */
 export function parseOmpSessionProcesses(
 	psOutput: string,
@@ -89,7 +94,7 @@ export function parseOmpSessionProcesses(
 		if (executable === undefined) continue;
 		if (path.basename(executable) !== "omp") continue;
 		const firstArg = argv[1];
-		if (firstArg !== undefined && subcommands.has(firstArg)) continue;
+		if (firstArg !== undefined && (subcommands.has(firstArg) || isWorkerHostSelector(firstArg))) continue;
 		found.push({ pid, command });
 	}
 	return found;
