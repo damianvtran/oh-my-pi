@@ -106,6 +106,12 @@ From highest to lowest:
 
 A key that is unset at every layer resolves to its schema default at read time.
 
+### User-scoped settings
+
+A few settings are marked **user-scoped** in the schema and skip layer 3: a value written in project config is dropped before the merge, so it never reaches `get()`, `omp config get`, or the settings panel. Project settings come from files inside the working directory, i.e. from whatever repository was cloned, which must not be able to make a session share itself or choose where it shares to. Every other layer keeps its normal precedence.
+
+Currently user-scoped: `collab.autoStart`, `collab.publishLink`, `collab.relayUrl`, `collab.webUrl`. Set them in global config or in a `--config` overlay. `collab.relayUrl` additionally accepts an inline relay per call (`/collab relay.example.com`).
+
 ### Environment overrides
 
 Environment variables are **not** a single settings layer. Each is read by the feature that owns the value, usually as a per-machine override or fallback, and is never written back to `config.yml`. The ones that map directly onto a setting:

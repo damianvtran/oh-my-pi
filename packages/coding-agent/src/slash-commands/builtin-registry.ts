@@ -34,13 +34,7 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getAutocompleteDescription?: () => string | undefined;
 }
 
-const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
-	...BUILTIN_MODE_SLASH_COMMANDS,
-	...BUILTIN_COLLABORATION_SLASH_COMMANDS,
-	...BUILTIN_SESSION_SLASH_COMMANDS,
-	...BUILTIN_LIFECYCLE_SLASH_COMMANDS,
-	...BUILTIN_MARKETPLACE_SLASH_COMMANDS,
-	...BUILTIN_CONTROL_SLASH_COMMANDS,
+ @ours
 ];
 
 const BUILTIN_SLASH_COMMAND_LOOKUP = new Map<string, SlashCommandSpec>();

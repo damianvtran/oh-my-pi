@@ -100,15 +100,60 @@ When a guest joins during an assistant turn, that in-flight turn appears on the 
 
 Set `collab.webUrl` when the browser UI is hosted separately from the websocket relay. When empty, `/collab` derives `http(s)://host[:port]` from `collab.relayUrl`; explicit web UI URLs must use `https://` except for `http://localhost` development origins. The generated browser URL still carries the relay-specific collab link in the fragment.
 
+## Unattended hosting
+
+`/collab` is a keystroke, which makes it awkward for anything that wants every session reachable without a human typing. `collab.autoStart` hosts the session once startup finishes — `full` hands out the steerable link, `view` hands out the read-only one:
+
+```yaml
+collab:
+  autoStart: full
+  publishLink: true
+```
+
+Auto-start prints the same join hint as `/collab` but omits the QR code, since it fires on every launch. `omp join <link>` wins over it — that process is already a guest and never hosts on top of someone else's room. A relay that is unreachable reports the failure and leaves the session running normally: hosting never blocks or fails startup.
+
+`collab.autoStart`, `collab.publishLink`, `collab.relayUrl`, and `collab.webUrl` are **user-scoped**: a project config cannot set them, because project settings come from whatever repository you happened to open and must not be able to start sharing your session, redirect the relay, or point the browser link — which carries the room key in its fragment — at a page of the repository's choosing. Set them globally, in a `--config` overlay, or pass a relay inline (`/collab relay.example.com`).
+
+`collab.publishLink` publishes the active room while hosting, for **both** auto-started and manual `/collab` rooms:
+
+```
+<config-root>/run/collab/<pid>.json
+```
+
+```json
+{
+  "pid": 51234,
+  "cwd": "/Users/me/project",
+  "sessionId": "019fa62b-...",
+  "startedAt": "2026-07-27T18:22:31.004Z",
+  "relayUrl": "ws://localhost:7466",
+  "link": "ws://localhost:7466/r/<roomId>.<key+token>",
+  "webLink": "http://localhost:7466/#ws://localhost:7466/r/<roomId>.<key+token>",
+  "viewLink": "ws://localhost:7466/r/<roomId>.<key>",
+  "webViewLink": "http://localhost:7466/#ws://localhost:7466/r/<roomId>.<key>"
+}
+```
+
+A room shared read-only (`/collab view`, `collab.autoStart: view`) omits `link` and `webLink` and publishes only the view pair. The directory sits in the same `run/` namespace as the project brokers, so it follows `PI_CONFIG_DIR` and `--profile`; records are written atomically, the directory is `0700` and each record `0600`.
+
+> [!WARNING]
+> For a `full` room, `link` and `webLink` embed the room key **and** the write token: anything that can read the file can read the session and prompt the agent. The `0700` directory is the whole trust boundary — records are not authenticated, so any process running as you can read or forge one. Keep the setting off unless a same-user tool needs it, and never copy the file off the machine.
+
+Records are removed when hosting stops and on the signals omp traps, but an abrupt exit (`SIGKILL`, a bare `process.exit`, power loss) leaves one behind. Treat `pid` as a liveness **heuristic**: check the process is alive, and still tolerate a failed connect, because a recycled pid can make a stale record look live. Each publish sweeps records whose owner is gone, so the directory stays bounded while sessions keep starting.
+
+Consumers read the directory and join each record's link as an ordinary guest — see the guest capabilities above for what that grants.
+
 ## Settings
 
-| Setting               | Default               | Meaning                                                                                                        |
-| --------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `collab.relayUrl`     | `wss://my.omp.sh`     | Relay used by `/collab` when no relay is passed inline                                                         |
-| `collab.webUrl`       | empty                 | Browser UI URL for `/collab` links; empty derives from relay; explicit `http://` is allowed only for localhost |
-| `collab.displayName`  | OS username           | Name shown to other participants                                                                               |
-| `share.serverUrl`     | `https://my.omp.sh/s` | Share viewer/upload base used by `/share` (links are `<base>/<id>#<key>`)                                      |
-| `share.redactSecrets` | `true`                | Run the secret obfuscator over `/share` snapshots before upload                                                |
+| Setting               | Default               | Meaning                                                                                                                     |
+| --------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `collab.relayUrl`     | `wss://my.omp.sh`     | Relay used by `/collab` when no relay is passed inline. User-scoped                                                         |
+| `collab.webUrl`       | empty                 | Browser UI URL for `/collab` links; empty derives from relay; explicit `http://` is allowed only for localhost. User-scoped |
+| `collab.displayName`  | OS username           | Name shown to other participants                                                                                            |
+| `collab.autoStart`    | `off`                 | Host automatically at interactive session start (`off` \| `full` \| `view`). User-scoped                                    |
+| `collab.publishLink`  | `false`               | While hosting, publish the room to `<config-root>/run/collab/<pid>.json` (`0600`). User-scoped                              |
+| `share.serverUrl`     | `https://my.omp.sh/s` | Share viewer/upload base used by `/share` (links are `<base>/<id>#<key>`)                                                   |
+| `share.redactSecrets` | `true`                | Run the secret obfuscator over `/share` snapshots before upload                                                             |
 
 ## Self-hosting the relay
 
