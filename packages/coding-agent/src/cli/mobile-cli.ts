@@ -185,6 +185,7 @@ async function runLogs(args: MobileCommandArgs): Promise<void> {
 	});
 	const specs = args.flags.service ? [plan[args.flags.service]] : [plan.relay, plan.portal];
 	const lines = args.flags.lines ?? 40;
+	const files: { path: string; label: string }[] = [];
 	for (const spec of specs) {
 		console.log(chalk.bold(`\n${spec.label}`));
 		for (const file of [spec.logs.stdout, spec.logs.stderr]) {
@@ -194,10 +195,44 @@ async function runLogs(args: MobileCommandArgs): Promise<void> {
 			const tail = text.trimEnd().split("\n").slice(-lines).join("\n");
 			console.log(chalk.dim(`── ${file}`));
 			console.log(tail.length > 0 ? tail : chalk.dim("(empty)"));
+			files.push({ path: file, label: `${spec.name}${file.endsWith(".err.log") ? " stderr" : ""}` });
 		}
 	}
-	if (args.flags.follow) {
-		console.log(chalk.dim("\n--follow is not supported yet; use `tail -f` on the paths above."));
+	if (args.flags.follow) await followLogs(files);
+}
+
+/**
+ * Poll the log files for growth and print what was appended, prefixed with the
+ * service so an interleaved relay+portal stream stays readable.
+ *
+ * Polling rather than watching: launchd owns these files and truncates them on
+ * rotation, and a size that went *backwards* is exactly that case — re-reading
+ * from zero then is what keeps the stream honest instead of printing garbage
+ * forever. Runs until interrupted, which is the contract of a follow.
+ */
+async function followLogs(files: { path: string; label: string }[]): Promise<void> {
+	const offsets = new Map<string, number>();
+	for (const file of files) offsets.set(file.path, Bun.file(file.path).size);
+	console.log(chalk.dim("\n── following (ctrl-c to stop)"));
+	const stop = Promise.withResolvers<void>();
+	process.once("SIGINT", () => stop.resolve());
+	for (;;) {
+		for (const file of files) {
+			const handle = Bun.file(file.path);
+			const size = handle.size;
+			const previous = offsets.get(file.path) ?? 0;
+			if (size === previous) continue;
+			// A shrink means launchd rotated or truncated the file; restart from 0.
+			const from = size < previous ? 0 : previous;
+			const chunk = await handle.slice(from, size).text();
+			offsets.set(file.path, size);
+			for (const line of chunk.split("\n")) {
+				if (line.length > 0) console.log(`${chalk.dim(`[${file.label}]`)} ${line}`);
+			}
+		}
+		const tick = Bun.sleep(500);
+		const done = await Promise.race([stop.promise.then(() => true), tick.then(() => false)]);
+		if (done) return;
 	}
 }
 

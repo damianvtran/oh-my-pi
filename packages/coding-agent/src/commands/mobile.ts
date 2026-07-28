@@ -42,7 +42,7 @@ export default class Mobile extends Command {
 		"no-build": Flags.boolean({ description: "update: reinstall and restart without rebuilding the binary" }),
 		purge: Flags.boolean({ description: "uninstall: also delete the portal password from the Keychain" }),
 		lines: Flags.integer({ description: "logs: lines to show per file (default 40)" }),
-		follow: Flags.boolean({ description: "logs: keep streaming (prints the paths to tail)" }),
+		follow: Flags.boolean({ char: "f", description: "logs: keep streaming new output until interrupted" }),
 		"dry-run": Flags.boolean({ char: "n", description: "Show what would change without changing it" }),
 		json: Flags.boolean({ char: "j", description: "Output JSON" }),
 	};
