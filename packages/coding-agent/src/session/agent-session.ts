@@ -349,6 +349,16 @@ export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
+import type { DueWake, WakeSchedule } from "../wake/schedule";
+import { WakeScheduler } from "../wake/scheduler";
+import {
+	formatWakeChipText,
+	formatWakeDeliveryText,
+	getLatestWakeSchedulesFromEntries,
+	WAKE_PROMPT_MESSAGE_TYPE,
+	WAKE_SCHEDULES_CUSTOM_TYPE,
+	type WakePromptDetails,
+} from "../wake/store";
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
@@ -528,6 +538,7 @@ export class AgentSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
+	readonly #wake: WakeScheduler;
 	#replanTitleRefreshInFlight: Promise<void> | undefined = undefined;
 	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
 	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
@@ -1041,6 +1052,23 @@ export class AgentSession {
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 		};
 		this.#todo = new TodoTracker(todoHost);
+		// Scheduled wakeups: the scheduler owns the timers, this session owns
+		// delivery (a self-prompt) and persistence (a transcript entry), so a
+		// resumed session re-arms exactly what it had.
+		this.#wake = new WakeScheduler({
+			deliver: wake => this.#deliverWake(wake),
+			persist: schedules => {
+				this.sessionManager.appendCustomEntry(WAKE_SCHEDULES_CUSTOM_TYPE, { schedules });
+			},
+			onRetire: (schedule, reason) => {
+				if (reason === "cancelled") return;
+				this.emitNotice(
+					"info",
+					`Wake ${schedule.id} finished after ${schedule.firedCount + 1} ${schedule.firedCount === 0 ? "delivery" : "deliveries"}`,
+					"wake",
+				);
+			},
+		});
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
 		this.#asyncJobManager = config.asyncJobManager ?? config.ownedAsyncJobManager;
 		const modelControlsHost: ModelControlsHost = {
@@ -1398,6 +1426,7 @@ export class AgentSession {
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
+		this.#syncWakeSchedulesFromBranch();
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
 			setState: state => {
@@ -1547,7 +1576,12 @@ export class AgentSession {
 			resetPlanReference: () => {
 				this.#planReferenceSent = false;
 			},
-			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
+			syncTodoPhasesFromBranch: () => {
+				this.#todo.syncFromBranch();
+				// Wake schedules are branch state too: compaction and history
+				// rewrites move the entry that holds them.
+				this.#syncWakeSchedulesFromBranch();
+			},
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
@@ -1615,7 +1649,10 @@ export class AgentSession {
 			drainAndDetachAdvisorRecorders: () => this.#advisors.drainAndDetachRecorders(),
 			reattachAdvisorRecorderFeeds: () => this.#advisors.reattachRecorderFeeds(),
 			clearAdvisorCost: () => this.#advisors.clearCost(),
-			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
+			syncTodoPhasesFromBranch: () => {
+				this.#todo.syncFromBranch();
+				this.#syncWakeSchedulesFromBranch();
+			},
 		};
 		this.#handoff = new SessionHandoff(handoffHost);
 
@@ -4028,6 +4065,9 @@ export class AgentSession {
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
 		this.#fallbackExtensionTimers?.clearAll();
+		// Wakes cannot outlive the session that would run them; the persisted
+		// record stays, so resuming this session re-arms whatever was pending.
+		this.#wake.dispose();
 		this.abortRetry();
 		this.abortCompaction();
 		const postPromptDrain = this.#cancelPostPromptTasks();
@@ -6492,6 +6532,46 @@ export class AgentSession {
 		this.#todo.setPhases(phases);
 	}
 
+	/** Active scheduled wakeups for this session. */
+	getWakeSchedules(): WakeSchedule[] {
+		return [...this.#wake.schedules];
+	}
+
+	/** Replace the schedule list (create / cancel), persisting and re-arming it. */
+	setWakeSchedules(schedules: WakeSchedule[]): void {
+		this.#wake.update(schedules);
+	}
+
+	/** Re-read schedules from the current branch and re-arm. */
+	#syncWakeSchedulesFromBranch(): void {
+		this.#wake.load(getLatestWakeSchedulesFromEntries(this.sessionManager.getBranch()));
+	}
+
+	/**
+	 * Inject one due wake as a user-attributed prompt.
+	 *
+	 * `followUp` rather than `steer`: a clock has no business interrupting work
+	 * the agent is mid-way through, and the schedule already tolerates arriving
+	 * late. While idle this starts a turn immediately, which is the whole point.
+	 */
+	#deliverWake(wake: DueWake): void {
+		const details: WakePromptDetails = { id: wake.schedule.id, occurrence: wake.occurrence, final: wake.final };
+		if (wake.plannedTotal !== undefined) details.plannedTotal = wake.plannedTotal;
+		if (wake.schedule.everyMs !== undefined) details.everyMs = wake.schedule.everyMs;
+		this.promptCustomMessage(
+			{
+				customType: WAKE_PROMPT_MESSAGE_TYPE,
+				content: formatWakeDeliveryText(wake),
+				display: true,
+				details,
+				attribution: "user",
+			},
+			{ streamingBehavior: "followUp", queueChipText: formatWakeChipText(wake) },
+		).catch(error => {
+			logger.warn("wake prompt injection failed", { id: wake.schedule.id, error: String(error) });
+		});
+	}
+
 	#buildReplanTitleContext(): string {
 		return buildReplanTitleContext(this.agent.state.messages);
 	}
@@ -6749,6 +6829,8 @@ export class AgentSession {
 			this.#clearSessionScopedToolState();
 			this.#clearCheckpointRuntimeState();
 			this.setTodoPhases([]);
+			// A fresh session inherits no wakes; the new branch holds none either.
+			this.#wake.load([]);
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
@@ -7172,6 +7254,7 @@ export class AgentSession {
 		this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
+		this.#syncWakeSchedulesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
@@ -7840,6 +7923,7 @@ export class AgentSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#advisors.resetSessionState({ preserveCost: true });
 			this.#todo.syncFromBranch();
+			this.#syncWakeSchedulesFromBranch();
 			if (switchingToDifferentSession) {
 				this.#closeAllProviderSessions("session switch");
 			} else if (didReloadConversationChange) {
@@ -8005,6 +8089,7 @@ export class AgentSession {
 				this.#emit({ type: "model_changed" });
 			}
 			this.#todo.syncFromBranch();
+			this.#syncWakeSchedulesFromBranch();
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
@@ -8098,6 +8183,7 @@ export class AgentSession {
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();
 			this.#todo.syncFromBranch();
+			this.#syncWakeSchedulesFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
@@ -8229,6 +8315,7 @@ export class AgentSession {
 			});
 			this.sessionManager.appendMessage(sanitizeAssistantForReparentedHistory(assistantMessage));
 			this.#todo.syncFromBranch();
+			this.#syncWakeSchedulesFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
 			this.#memory.rekeyForCurrentSessionId();
@@ -8557,6 +8644,7 @@ export class AgentSession {
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
+		this.#syncWakeSchedulesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
 		this.#branchSummaryAbortController = undefined;
