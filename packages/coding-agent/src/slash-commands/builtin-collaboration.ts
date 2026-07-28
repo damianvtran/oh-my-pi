@@ -76,10 +76,15 @@ function showCollabLink(
  * that no `/collab stop` could ever reach. The slot is released again if the
  * handshake fails, and only if it still points at this host — a caller that
  * already replaced it wins.
+ *
+ * `followSession: true` is also auto-start's: it makes the room outlive session
+ * transitions, so an in-session `/resume` moves remote access to the resumed
+ * session instead of ending the room until the next launch. A hand-typed
+ * `/collab` leaves it off — its guests were invited to one specific session.
  */
 export async function startCollabHosting(
 	ctx: InteractiveModeContext,
-	options: { relay?: string; view?: boolean; qr?: boolean } = {},
+	options: { relay?: string; view?: boolean; qr?: boolean; followSession?: boolean } = {},
 ): Promise<boolean> {
 	const relayInput = options.relay || ctx.settings.get("collab.relayUrl") || "";
 	if (!relayInput) {
@@ -94,6 +99,7 @@ export async function startCollabHosting(
 		await host.start(relayUrl, ctx.settings.get("collab.webUrl") || "", {
 			view: options.view,
 			publishLink: ctx.settings.get("collab.publishLink"),
+			followSession: options.followSession,
 		});
 	} catch (err) {
 		// A `/collab stop` or `/leave` landing during the handshake already told the

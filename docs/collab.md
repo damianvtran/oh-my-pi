@@ -112,6 +112,15 @@ collab:
 
 Auto-start prints the same join hint as `/collab` but omits the QR code, since it fires on every launch. `omp join <link>` wins over it — that process is already a guest and never hosts on top of someone else's room. A relay that is unreachable reports the failure and leaves the session running normally: hosting never blocks or fails startup.
 
+An auto-started room is scoped to the **process**, not to one session: `/resume`,
+`/new`, `/fork` and `/tree` rebind it to the session you moved to and re-welcome
+every guest there, keeping the same room id, key and published link. A supervisor
+or phone that already holds the link stays attached across a resume instead of
+losing the session until the next launch. A hand-typed `/collab` room keeps the
+opposite contract and still ends on a session switch ("Collab ended: session
+switched") — its guests were invited to one specific session and must never be
+moved to another one silently.
+
 `collab.autoStart`, `collab.publishLink`, `collab.relayUrl`, and `collab.webUrl` are **user-scoped**: a project config cannot set them, because project settings come from whatever repository you happened to open and must not be able to start sharing your session, redirect the relay, or point the browser link — which carries the room key in its fragment — at a page of the repository's choosing. Set them globally, in a `--config` overlay, or pass a relay inline (`/collab relay.example.com`).
 
 `collab.publishLink` publishes the active room while hosting, for **both** auto-started and manual `/collab` rooms:
@@ -141,7 +150,7 @@ A room shared read-only (`/collab view`, `collab.autoStart: view`) omits `link` 
 
 Records are removed when hosting stops and on the signals omp traps, but an abrupt exit (`SIGKILL`, a bare `process.exit`, power loss) leaves one behind. Treat `pid` as a liveness **heuristic**: check the process is alive, and still tolerate a failed connect, because a recycled pid can make a stale record look live. Each publish sweeps records whose owner is gone, so the directory stays bounded while sessions keep starting.
 
-Consumers read the directory and join each record's link as an ordinary guest — see the guest capabilities above for what that grants.
+Consumers read the directory and join each record's link as an ordinary guest — see the guest capabilities above for what that grants. `sessionId` and `cwd` describe the session the room is bound to **right now**: an auto-started room republishes them when it rebinds, under an unchanged link, so re-read the record instead of caching the first values you saw. `startedAt` is the room's start and does not move across a rebind.
 
 ## Settings
 

@@ -44,7 +44,13 @@ export interface CollabLinkRecord {
 	pid: number;
 	/** Host working directory, for display and for picking a session. */
 	cwd: string;
-	/** Session id the room is bound to; collab stops when the session switches. */
+	/**
+	 * Session the room is currently bound to. A room started by
+	 * `collab.autoStart` follows the process: it rebinds and republishes this
+	 * field when the user resumes, clears, forks or branches, so a consumer must
+	 * re-read the record rather than caching the first value it saw. A
+	 * hand-shared `/collab` room instead stops when the session switches.
+	 */
 	sessionId: string;
 	/** ISO timestamp of when hosting started. */
 	startedAt: string;
