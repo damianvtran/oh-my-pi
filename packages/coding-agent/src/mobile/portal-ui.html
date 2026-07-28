@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0f0b14" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#faf9fb" media="(prefers-color-scheme: light)">
+<title>omp</title>
+<style>
+/* Palette and type lifted verbatim from omp's own web surfaces:
+   packages/coding-agent/src/export/html/web-palette.ts (the vars omp injects on
+   :root for share/export pages) and template.css (the "dense devtool aesthetic"
+   — mono type, hairlines via color-mix, small radii, whisper hovers). Keeping
+   the same tokens means this portal and an omp /share page are the same product. */
+:root {
+  color-scheme: dark;
+  --bg: #0f0b14; --bg-raised: #16111c; --bg-inset: #09060c; --bg-overlay: #211b28;
+  --fg: #e6e3ea; --fg-muted: #a49faa; --fg-faint: #6e6974;
+  --accent: #ed4abf; --accent-muted: oklch(0.674 0.23 341 / 18%);
+  --ok: #68ca80; --err: #f05653; --warn: #e4b33f; --link: #5ad8e5;
+  --border: oklch(1 0 0 / 9%); --border-strong: oklch(1 0 0 / 13%);
+  --ring: oklch(0.817 0.112 205 / 70%);
+}
+/* Light: explicit `data-theme` override first, then the system fallback —
+   same two-tier shape as collab-web's tokens.css. */
+[data-theme="light"] {
+    color-scheme: light;
+    --bg: oklch(0.985 0.004 307); --bg-raised: oklch(1 0 0);
+    --bg-inset: oklch(0.95 0.006 307); --bg-overlay: oklch(0.965 0.006 307);
+    --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.58 0.025 307);
+    --accent: oklch(0.62 0.23 341); --accent-muted: oklch(0.62 0.23 341 / 14%);
+    --ok: oklch(0.55 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
+    --link: #0f7a88;
+    --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
+    --ring: oklch(0.58 0.13 230 / 70%);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: oklch(0.985 0.004 307); --bg-raised: oklch(1 0 0);
+    --bg-inset: oklch(0.95 0.006 307); --bg-overlay: oklch(0.965 0.006 307);
+    --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.58 0.025 307);
+    --accent: oklch(0.62 0.23 341); --accent-muted: oklch(0.62 0.23 341 / 14%);
+    --ok: oklch(0.55 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
+    --link: #0f7a88;
+    --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
+    --ring: oklch(0.58 0.13 230 / 70%);
+  }
+}
+:root {
+  --hairline: color-mix(in srgb, var(--fg) 10%, transparent);
+  --hover-wash: color-mix(in srgb, var(--fg) 5%, transparent);
+  --radius-card: 8px; --radius-ctl: 6px;
+  --line-height: 18px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+/* `hidden` must beat the layout display values below. */
+[hidden] { display: none !important; }
+html { height: 100%; -webkit-text-size-adjust: 100%; scrollbar-width: thin;
+       scrollbar-color: color-mix(in srgb, var(--fg) 22%, transparent) transparent; }
+body {
+  height: 100%;
+  font: 400 12px/var(--line-height) ui-monospace, "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  color: var(--fg); background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior-y: none;
+}
+button, input { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+button { cursor: pointer; background: none; border: 0; }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+input { caret-color: var(--accent); }
+
+/* ── frame ───────────────────────────────────────────────────────────── */
+#app { display: grid; grid-template-rows: auto minmax(0,1fr) auto; height: 100dvh; }
+
+header {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px; padding-top: calc(8px + env(safe-area-inset-top, 0px));
+  border-bottom: 1px solid var(--hairline); background: var(--bg);
+}
+.brand { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.brand b { font-weight: 650; letter-spacing: 0.01em; }
+.brand .sub { color: var(--fg-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn {
+  padding: 3px 9px; color: var(--fg-muted); background: var(--bg-raised);
+  border: 1px solid var(--hairline); border-radius: var(--radius-ctl);
+  transition: background .14s ease, color .14s ease, border-color .14s ease;
+}
+.btn:hover { background: var(--hover-wash); color: var(--fg); border-color: var(--border-strong); }
+.btn:active { transform: scale(.97); }
+.btn-accent { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+.btn-stop { color: var(--err); }
+
+main { overflow-y: auto; overscroll-behavior: contain; }
+.wrap { max-width: 880px; margin: 0 auto; padding: 10px 12px 16px; }
+
+/* ── session list ────────────────────────────────────────────────────── */
+.card {
+  display: block; width: 100%; text-align: left;
+  padding: 10px 12px; margin-bottom: 8px;
+  background: color-mix(in srgb, var(--bg-raised) 60%, var(--bg));
+  border: 1px solid var(--hairline); border-radius: var(--radius-card);
+  transition: background .14s ease, border-color .14s ease;
+}
+.card:hover { background: var(--bg-raised); border-color: var(--border-strong); }
+.card-top { display: flex; align-items: baseline; gap: 8px; }
+.card-name { font-weight: 650; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-cwd { color: var(--fg-faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta { display: flex; flex-wrap: wrap; gap: 3px 14px; margin-top: 4px; font-size: 11px; color: var(--fg-muted); }
+.meta .k { color: var(--fg-faint); }
+.empty { padding: 24px 12px; color: var(--fg-faint); text-align: center; }
+
+/* status dot — mirrors the TUI's ● run-state marker */
+.dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); }
+.dot.run { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.dot.ask { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+/* context gauge — the footer bar from the TUI status line */
+.gauge { flex: none; width: 54px; height: 4px; border-radius: 999px; background: var(--bg-inset); overflow: hidden; }
+.gauge i { display: block; height: 100%; min-width: 2px; background: var(--accent); }
+
+/* markdown tables — box-drawn like the TUI (boxSharp glyphs), so they stay a
+   grid instead of reflowing into a web table. Scrolls horizontally rather than
+   crushing columns on a narrow screen. */
+pre.tbl {
+  margin: 8px 0; padding: 0; overflow-x: auto; overscroll-behavior-x: contain;
+  background: none; border: 0; border-radius: 0;
+  font: inherit; line-height: 1.35; color: var(--fg-muted); white-space: pre;
+  -webkit-overflow-scrolling: touch;
+}
+/* The box-drawn grid only lines up if every glyph shares one advance width, and
+   the UA stylesheet gives <code> its own `monospace` family — a different font
+   from the body stack, which shears the right border wherever a cell contains
+   inline code. Inheriting the family and size is what keeps the table square. */
+pre.tbl b, pre.tbl code { font-family: inherit; font-size: inherit; letter-spacing: inherit; }
+pre.tbl b { color: var(--fg); font-weight: 650; }
+pre.tbl code { padding: 0; background: none; color: var(--link); }
+
+/* working line — the TUI's spinner + intent above the composer, with the live
+   thinking trace beneath it. Present only while the agent is actually running. */
+.working {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 10px; margin: 8px 0 0;
+  border: 1px solid var(--border); border-left: 2px solid var(--accent);
+  border-radius: var(--radius); background: var(--bg-raised);
+}
+.working .spin { flex: none; color: var(--accent); width: 1ch; }
+.working .txt { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.working .what { color: var(--fg); overflow-wrap: anywhere; }
+.working .trace {
+  color: var(--fg-faint); font-size: 11px; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.working .trace::before { content: "✺ "; color: var(--fg-faint); }
+
+/* card activity line — what each session is doing, in the list view */
+.card-act { display: flex; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--fg-muted); }
+.card-act .spin { flex: none; color: var(--accent); }
+.card-act .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── transcript: TUI cards ───────────────────────────────────────────────
+   Mirrors how the terminal draws a turn: assistant prose is bare, a tool call
+   is a rounded hairline box with an inline `Output` divider and a dim meta
+   footer, thinking is a dim block behind a ✺ marker, and todos are a tree with
+   ├ │ └ guides. Glyphs are the same ones omp's unicode symbol preset uses
+   (packages/coding-agent/src/modes/theme/theme.ts → UNICODE_SYMBOLS). */
+.turn { margin: 10px 0; }
+.turn:first-child { margin-top: 0; }
+
+/* user prompt — the TUI's ❯ badge line */
+.user-line { color: var(--fg); }
+.user-line::before { content: "❯ "; color: var(--accent); }
+
+/* assistant prose — no chrome, like the terminal */
+.md { color: var(--fg); }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3 { margin: 12px 0 4px; font-size: 12px; font-weight: 650; color: var(--accent); }
+.md h1::before { content: "# "; color: var(--fg-faint); font-weight: 400; }
+.md h2::before { content: "## "; color: var(--fg-faint); font-weight: 400; }
+.md h3::before { content: "### "; color: var(--fg-faint); font-weight: 400; }
+.md p { margin: 4px 0; }
+.md ul, .md ol { margin: 4px 0; padding-left: 0; list-style: none; }
+.md li { padding-left: 16px; position: relative; }
+.md ul > li::before { content: "•"; position: absolute; left: 4px; color: var(--accent); }
+.md ol { counter-reset: n; }
+.md ol > li { counter-increment: n; }
+.md ol > li::before { content: counter(n) "."; position: absolute; left: 0; color: var(--accent); }
+.md b, .md strong { font-weight: 650; color: var(--fg); }
+.md em { font-style: italic; color: var(--fg-muted); }
+.md a { color: var(--link); }
+.md code { padding: 0 3px; color: var(--link); background: var(--bg-inset); border-radius: 3px; }
+.md hr { margin: 8px 0; border: 0; border-top: 1px solid var(--hairline); }
+.md blockquote { margin: 4px 0; padding-left: 9px; border-left: 2px solid var(--hairline); color: var(--fg-muted); }
+.md pre {
+  margin: 6px 0; padding: 8px 10px; overflow-x: auto;
+  background: var(--bg-inset); border: 1px solid var(--hairline); border-radius: var(--radius-card);
+}
+.md pre code { padding: 0; background: none; color: var(--fg); }
+
+/* tool call — the rounded box the TUI draws around every action */
+.tool {
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: var(--radius-card); overflow: hidden;
+}
+.tool.err { border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+.tool-head { padding: 6px 10px; color: var(--fg); overflow-wrap: anywhere; }
+.tool-head .sigil { color: var(--accent); }
+.tool-head .arg { color: var(--fg-muted); }
+/* the `├─ Output ───┤` divider, as a rule with an inline label */
+.tool-div {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 10px; color: var(--fg-faint); font-size: 11px;
+}
+.tool-div::after { content: ""; flex: 1; border-top: 1px solid var(--hairline); }
+.tool-body { padding: 4px 10px 6px; color: var(--fg-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-body.clip { max-height: 168px; overflow: hidden; }
+.tool-more { padding: 0 10px 6px; color: var(--fg-faint); font-size: 11px; }
+.tool-more button { color: var(--link); text-decoration: underline; }
+
+/* thinking — dim, behind the ✺ marker the TUI uses */
+.think { color: var(--fg-faint); white-space: pre-wrap; overflow-wrap: anywhere; }
+.think::before { content: "✺ "; color: var(--fg-muted); }
+
+/* todos — the tree panel, with omp's guides and strikethrough completions */
+.todos { margin: 10px 0; }
+.todos-h { font-weight: 650; color: var(--accent); }
+.todos-h .count { color: var(--fg-faint); font-weight: 400; }
+.phase { color: var(--fg); font-weight: 650; }
+.phase .count { color: var(--fg-faint); font-weight: 400; }
+.guide { color: var(--fg-faint); }
+.task { color: var(--fg-faint); }
+.task.now { color: var(--fg); }
+.task.done { color: var(--ok); text-decoration: line-through; }
+.task.blocked { color: var(--warn); }
+
+/* ── ask / approval prompt ───────────────────────────────────────────── */
+#ask {
+  margin: 0 0 10px; padding: 10px 12px;
+  background: var(--bg-raised);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  border-radius: var(--radius-card);
+}
+#ask .q { color: var(--warn); font-weight: 650; margin-bottom: 8px; }
+#ask .opt {
+  display: block; width: 100%; text-align: left; padding: 6px 10px; margin-top: 4px;
+  background: var(--bg); border: 1px solid var(--hairline); border-radius: var(--radius-ctl);
+}
+#ask .opt:hover { background: var(--hover-wash); border-color: var(--border-strong); }
+#ask .opt::before { content: "› "; color: var(--accent); }
+
+/* ── composer ────────────────────────────────────────────────────────── */
+footer {
+  padding: 8px 12px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--hairline); background: var(--bg);
+}
+/* Same 880px column as `.wrap`, so the input lines up with the transcript. */
+footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
+.prompt { color: var(--accent); flex: none; }
+#msg {
+  flex: 1; min-width: 0; padding: 6px 8px;
+  background: var(--bg-inset); border: 1px solid var(--hairline);
+  border-radius: var(--radius-ctl); color: var(--fg);
+}
+#msg::placeholder { color: var(--fg-faint); }
+
+@media (max-width: 640px) {
+  .wrap { padding: 8px 10px 14px; }
+  .card-cwd { display: none; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand"><b>omp</b><span class="sub" id="sub">sessions</span></div>
+    <div style="display:flex;gap:6px">
+      <button class="btn" id="back" hidden>← all</button>
+      <button class="btn btn-stop" id="stop" hidden>esc</button>
+    </div>
+  </header>
+  <main><div class="wrap"><div id="list"></div><div id="detail" hidden><div id="ask" hidden></div><div id="log"></div><div id="todos"></div><div id="working" class="working" hidden></div></div></div></main>
+  <footer id="composer" hidden>
+    <div class="wrap">
+      <span class="prompt">›</span>
+      <input id="msg" placeholder="steer this session" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="btn btn-accent" id="send">send</button>
+    </div>
+  </footer>
+</div>
+<script>
+// `?theme=light|dark` pins the palette; otherwise the OS preference decides.
+const pinned = new URLSearchParams(location.search).get("theme");
+if (pinned === "light" || pinned === "dark") document.documentElement.dataset.theme = pinned;
+
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/[<&]/g, c => (c === "<" ? "&lt;" : "&amp;"));
+
+/* Plain-text width of an inline-markdown cell. Column widths must be measured
+   on what the eye sees, not on the markup, or every bold cell over-pads. */
+const plain = t =>
+  String(t)
+    .replace(/\[([^\]]+)\]\((?:https?:[^)\s]+)\)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*\n]+)\*/g, "$1");
+
+/* Split a table row on unescaped pipes, dropping the leading/trailing ones. */
+const splitRow = line =>
+  line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split(/(?<!\\)\|/)
+    .map(c => c.trim().replace(/\\\|/g, "|"));
+
+/* Greedy wrap on word boundaries, matching how the TUI wraps a table cell. */
+function wrapCell(text, width) {
+  const words = plain(text).split(/\s+/).filter(Boolean);
+  if (!words.length) return [""];
+  const lines = [];
+  let cur = "";
+  for (const w of words) {
+    if (!cur) cur = w;
+    else if (cur.length + 1 + w.length <= width) cur += ` ${w}`;
+    else { lines.push(cur); cur = w; }
+    while (cur.length > width) { lines.push(cur.slice(0, width)); cur = cur.slice(width); }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/* Widest column we will render before wrapping. Wide enough for a real sentence,
+   narrow enough that a three-column table still fits a phone without scrolling. */
+const MAX_COL = 34;
+
+/* Render a GFM table as a box-drawn terminal table, using the same glyphs and
+   layout as omp's TUI (`boxSharp`: bordered, header separated by a tee row).
+   HTML <table> would reflow into something that reads nothing like the terminal,
+   so this emits a monospace block and lets it scroll horizontally instead. */
+function renderTable(header, aligns, rows, inline) {
+  const cols = header.length;
+  const widths = [];
+  for (let c = 0; c < cols; c++) {
+    const cells = [header[c], ...rows.map(r => r[c] ?? "")];
+    const longestWord = Math.max(...cells.flatMap(x => plain(x).split(/\s+/).map(w => w.length)), 1);
+    const widest = Math.max(...cells.map(x => plain(x).length), 1);
+    // Never wrap tighter than the longest single word: mid-word breaks are worse
+    // than a slightly wider column.
+    widths.push(Math.max(Math.min(widest, MAX_COL), Math.min(longestWord, MAX_COL)));
+  }
+
+  const pad = (text, w, align) => {
+    const slack = Math.max(0, w - plain(text).length);
+    const left = align === "right" ? slack : align === "center" ? Math.floor(slack / 2) : 0;
+    return " ".repeat(left) + inline(text) + " ".repeat(slack - left);
+  };
+  const line = (l, mid, r) => l + widths.map(w => "─".repeat(w + 2)).join(mid) + r;
+  const body = (cells, bold) => {
+    const wrapped = cells.map((cell, c) => wrapCell(cell, widths[c]));
+    const height = Math.max(...wrapped.map(w => w.length));
+    const out = [];
+    for (let i = 0; i < height; i++) {
+      const parts = wrapped.map((w, c) => {
+        // Only the first visual line carries inline markup; continuation lines are
+        // already plain text from the wrapper.
+        const raw = w[i] ?? "";
+        const cell = i === 0 && w.length === 1 ? cells[c] : raw;
+        const rendered = pad(cell, widths[c], aligns[c]);
+        return bold ? `<b>${rendered}</b>` : rendered;
+      });
+      out.push(`│ ${parts.join(" │ ")} │`);
+    }
+    return out;
+  };
+  const html = [
+    line("┌", "┬", "┐"),
+    ...body(header, true),
+    line("├", "┼", "┤"),
+    ...rows.flatMap(r => body(header.map((_, c) => r[c] ?? ""), false)),
+    line("└", "┴", "┘"),
+  ].join("\n");
+  return `<pre class="tbl">${html}</pre>`;
+}
+
+/* Small markdown renderer covering what agents actually emit. Deliberately not
+   a full parser: headings, lists, quotes, rules, fenced/inline code, bold and
+   italic — styled to read like the terminal rather than like a web page. */
+function md(src) {
+  const out = [];
+  const lines = String(src).split("\n");
+  let list = null, para = [], fence = null, code = [];
+  const inline = t =>
+    esc(t)
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+      .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  const flushPara = () => { if (para.length) { out.push(`<p>${inline(para.join(" "))}</p>`); para = []; } };
+  const flushList = () => { if (list) { out.push(`<${list.tag}>${list.items.map(i => `<li>${inline(i)}</li>`).join("")}</${list.tag}>`); list = null; } };
+  const flush = () => { flushPara(); flushList(); };
+
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li];
+    const line = raw.replace(/\s+$/, "");
+    const fenceMark = /^\s*```(\w*)\s*$/.exec(line);
+    if (fence !== null) {
+      if (fenceMark) { out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`); fence = null; code = []; }
+      else code.push(raw);
+      continue;
+    }
+    if (fenceMark) { flush(); fence = fenceMark[1] || ""; continue; }
+    if (!line.trim()) { flush(); continue; }
+    // GFM table: a header row immediately followed by a delimiter row. Checked
+    // before the horizontal-rule and list branches, whose patterns a delimiter
+    // row like `|---|---|` would otherwise partially match.
+    if (line.includes("|") && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[li + 1] ?? "") && (lines[li + 1] ?? "").includes("|")) {
+      const header = splitRow(line);
+      const delim = splitRow(lines[li + 1]);
+      if (delim.length === header.length && delim.every(d => /^:?-+:?$/.test(d))) {
+        flush();
+        const aligns = delim.map(d =>
+          d.startsWith(":") && d.endsWith(":") ? "center" : d.endsWith(":") ? "right" : "left",
+        );
+        const rows = [];
+        li += 2;
+        while (li < lines.length && lines[li].includes("|") && lines[li].trim()) {
+          rows.push(splitRow(lines[li]));
+          li++;
+        }
+        li--; // the loop's own increment consumes the terminating line
+        out.push(renderTable(header, aligns, rows, inline));
+        continue;
+      }
+    }
+    const h = /^(#{1,3})\s+(.*)$/.exec(line);
+    if (h) { flush(); out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); continue; }
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { flush(); out.push("<hr>"); continue; }
+    const q = /^>\s?(.*)$/.exec(line);
+    if (q) { flush(); out.push(`<blockquote>${inline(q[1])}</blockquote>`); continue; }
+    const ul = /^\s*[-*+]\s+(.*)$/.exec(line);
+    const ol = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (ul || ol) {
+      flushPara();
+      const tag = ul ? "ul" : "ol";
+      if (!list || list.tag !== tag) { flushList(); list = { tag, items: [] }; }
+      list.items.push((ul ?? ol)[1]);
+      continue;
+    }
+    flushList();
+    para.push(line.trim());
+  }
+  if (fence !== null && code.length) out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`);
+  flush();
+  return out.join("");
+}
+
+/* One-line argument summary, the way the TUI titles a tool card. */
+const TOOL_ARG = { read: "path", write: "path", edit: "path", bash: "command", glob: "path", grep: "pattern", task: "task", todo: "op", web_search: "query" };
+function toolTitle(item) {
+  const key = TOOL_ARG[item.name];
+  const raw = key ? item.args?.[key] : undefined;
+  const arg = typeof raw === "string" ? raw : "";
+  const label = item.name === "bash" ? "$" : `• ${item.name}`;
+  return { label, arg: arg.length > 160 ? `${arg.slice(0, 160)}…` : arg };
+}
+
+const TODO_GLYPH = { pending: "☐", in_progress: "◐", completed: "☑", abandoned: "☒", blocked: "⚠" };
+
+function renderTodos(phases) {
+  if (!phases?.length) return "";
+  const all = phases.flatMap(p => p.tasks);
+  const done = all.filter(t => t.status === "completed").length;
+  const rows = phases.map((p, pi) => {
+    const last = pi === phases.length - 1;
+    const pdone = p.tasks.filter(t => t.status === "completed").length;
+    const head = `<div><span class="guide">${last ? "└" : "├"} </span><span class="phase">${esc(p.name)}<span class="count"> · ${pdone}/${p.tasks.length}</span></span></div>`;
+    const tasks = p.tasks.map((t, ti) => {
+      const cls = t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : t.status === "blocked" ? "blocked" : "";
+      const branch = ti === p.tasks.length - 1 ? "└" : "├";
+      return `<div><span class="guide">${last ? "  " : "│ "} ${branch} </span><span class="task ${cls}">${TODO_GLYPH[t.status] ?? "☐"} ${esc(t.content)}</span></div>`;
+    }).join("");
+    return head + tasks;
+  }).join("");
+  return `<div class="todos"><div class="todos-h">Todos<span class="count"> · ${done}/${all.length}</span></div>${rows}</div>`;
+}
+
+function renderTranscript(items) {
+  return items.map((it, i) => {
+    if (it.kind === "user") return `<div class="turn"><div class="user-line">${esc(it.text)}</div></div>`;
+    if (it.kind === "assistant") return `<div class="turn"><div class="md">${md(it.text)}</div></div>`;
+    if (it.kind === "thinking") return `<div class="turn"><div class="think">${esc(it.text)}</div></div>`;
+    const { label, arg } = toolTitle(it);
+    const body = it.output ?? "";
+    const clip = body.split("\n").length > 9;
+    return `<div class="turn"><div class="tool ${it.isError ? "err" : ""}">
+      <div class="tool-head"><span class="sigil">${esc(label)}</span> <span class="arg">${esc(arg)}</span></div>
+      ${body ? `<div class="tool-div">${it.isError ? "Error" : "Output"}</div>
+      <div class="tool-body ${clip ? "clip" : ""}" data-body="${i}">${esc(body)}</div>
+      ${clip ? `<div class="tool-more"><button data-expand="${i}">… expand</button></div>` : ""}` : ""}
+    </div></div>`;
+  }).join("");
+}
+
+let current = null, es = null;
+
+/* Spinner frames from omp's unicode preset (SPINNER_FRAMES.status). A single
+   shared timer drives every spinner on the page: one interval, no per-element
+   state, and it stops dead when nothing is running so an idle phone does not
+   repaint 12 times a second. */
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+let spinTick = 0, spinTimer = null;
+function tickSpinners() {
+  const nodes = document.querySelectorAll(".spin");
+  if (!nodes.length) { clearInterval(spinTimer); spinTimer = null; return; }
+  const frame = SPINNER[spinTick++ % SPINNER.length];
+  for (const n of nodes) n.textContent = frame;
+}
+function ensureSpinner() {
+  if (!spinTimer && document.querySelector(".spin")) spinTimer = setInterval(tickSpinners, 80);
+}
+
+/* The TUI's working line: spinner + the current tool-call intent, with the live
+   thinking trace under it. omp falls back to "Working…" before any intent
+   arrives, so the phone shows motion from the first token rather than a blank. */
+function renderWorking(activity) {
+  const box = $("working");
+  if (!activity?.working) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML =
+    `<span class="spin">${SPINNER[0]}</span><div class="txt">` +
+    `<span class="what">${esc(activity.intent || "Working…")}</span>` +
+    (activity.thinking ? `<span class="trace">${esc(activity.thinking)}</span>` : "") +
+    `</div>`;
+  ensureSpinner();
+}
+
+async function refresh() {
+  if (current !== null) return;
+  const res = await api("/api/sessions");
+  if (!res.ok) return;
+  const sessions = await res.json();
+  $("list").innerHTML = sessions.length
+    ? sessions.map(s => {
+        const pct = s.context ? s.context.percent : 0;
+        const state = s.needsAttention ? "ask" : s.streaming ? "run" : "";
+        return `<button class="card" data-pid="${s.pid}">
+          <div class="card-top">
+            <span class="dot ${state}"></span>
+            <span class="card-name">${esc(s.name)}</span>
+            <span class="card-cwd">${esc(s.cwd)}</span>
+          </div>
+          <div class="meta">
+            <span>${esc(s.model ?? "?")}</span>
+            <span class="k">${s.needsAttention ? "needs answer" : s.streaming ? "working" : "idle"}</span>
+            ${s.queued ? `<span class="k">${s.queued} queued</span>` : ""}
+            <span class="k" style="display:flex;align-items:center;gap:5px">
+              <span class="gauge"><i style="width:${Math.min(100, pct).toFixed(0)}%"></i></span>${pct.toFixed(1)}%
+            </span>
+            <span class="k">pid ${s.pid}</span>
+          </div>
+          ${
+            s.activity?.working
+              ? `<div class="card-act"><span class="spin">${SPINNER[0]}</span><span class="what">${esc(s.activity.intent || "Working…")}</span></div>`
+              : ""
+          }
+        </button>`;
+      }).join("")
+    : `<div class="empty">no live omp sessions</div>`;
+  ensureSpinner();
+  for (const el of document.querySelectorAll(".card[data-pid]")) el.onclick = () => open(Number(el.dataset.pid));
+}
+
+function open(pid) {
+  current = pid;
+  if (location.hash !== `#${pid}`) location.hash = `#${pid}`;
+  $("list").hidden = true; $("detail").hidden = false;
+  $("back").hidden = false; $("stop").hidden = false; $("composer").hidden = false;
+  $("log").textContent = "";
+  renderWorking(null);
+  es = new EventSource(`/api/sessions/${pid}/events`);
+  es.addEventListener("state", e => {
+    const s = JSON.parse(e.data);
+    const label = innerWidth <= 640 ? (s.cwd ?? "").split("/").pop() || String(pid) : (s.cwd ?? String(pid));
+    $("sub").textContent = `${label} · ${s.isStreaming ? "working" : "idle"}`;
+  });
+  es.addEventListener("transcript", e => {
+    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 40;
+    $("log").innerHTML = renderTranscript(JSON.parse(e.data));
+    for (const b of $("log").querySelectorAll("[data-expand]")) {
+      b.onclick = () => {
+        $("log").querySelector(`[data-body="${b.dataset.expand}"]`)?.classList.remove("clip");
+        b.parentElement.remove();
+      };
+    }
+    if (atBottom) main.scrollTop = main.scrollHeight;
+  });
+  es.addEventListener("todos", e => {
+    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
+    $("todos").innerHTML = renderTodos(JSON.parse(e.data));
+    if (atBottom) main.scrollTop = main.scrollHeight;
+  });
+  es.addEventListener("activity", e => {
+    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
+    renderWorking(JSON.parse(e.data));
+    if (atBottom) main.scrollTop = main.scrollHeight;
+  });
+  es.addEventListener("ui-request", e => showAsk(JSON.parse(e.data)));
+  es.addEventListener("ui-request-end", () => { $("ask").hidden = true; });
+  // EventSource retries transport errors on its own but gives up permanently on
+  // an HTTP error such as a 401 from an expired cookie — that is the signal to
+  // re-authenticate rather than sit on a stream that will never resume.
+  es.onerror = () => {
+    if (es?.readyState === EventSource.CLOSED) {
+      location.href = `/login?next=${encodeURIComponent(location.pathname + location.hash)}`;
+    }
+  };
+}
+
+function showAsk(req) {
+  const box = $("ask");
+  box.hidden = false;
+  const opts = (req.options ?? []).map(o => (typeof o === "string" ? o : o.label));
+  box.innerHTML = `<div class="q">${esc(req.title)}</div>` +
+    opts.map(o => `<button class="opt" data-v="${esc(o)}">${esc(o)}</button>`).join("");
+  for (const b of box.querySelectorAll("button")) {
+    b.onclick = async () => {
+      await post(`/api/sessions/${current}/ui/${req.reqId}`, { value: b.dataset.v });
+      box.hidden = true;
+    };
+  }
+}
+
+const main = document.querySelector("main");
+/* Every request funnels through here so an expired cookie lands on the login
+   page instead of failing silently — the SPA would otherwise just stop updating
+   with no visible cause. */
+async function api(url, init) {
+  const res = await fetch(url, init);
+  if (res.status === 401) location.href = `/login?next=${encodeURIComponent(location.pathname + location.hash)}`;
+  return res;
+}
+const post = (url, body) =>
+  api(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+
+$("back").onclick = () => {
+  es?.close(); es = null; current = null;
+  $("list").hidden = false; $("detail").hidden = true;
+  $("back").hidden = true; $("stop").hidden = true; $("composer").hidden = true;
+  $("ask").hidden = true; $("todos").innerHTML = ""; $("sub").textContent = "sessions";
+  renderWorking(null);
+  if (location.hash) history.replaceState(null, "", location.pathname);
+  refresh();
+};
+$("send").onclick = async () => {
+  const text = $("msg").value.trim();
+  if (!text) return;
+  $("msg").value = "";
+  await post(`/api/sessions/${current}/prompt`, { text });
+};
+$("msg").onkeydown = e => { if (e.key === "Enter") $("send").click(); };
+$("stop").onclick = () => post(`/api/sessions/${current}/interrupt`);
+
+// Deep link: #<pid> opens that session directly, so a push notification or a
+// bookmark can land on the session that needs an answer.
+async function boot() {
+  await refresh();
+  const pid = Number(location.hash.slice(1));
+  if (Number.isInteger(pid) && pid > 0 && document.querySelector(`.card[data-pid="${pid}"]`)) open(pid);
+}
+boot();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
