@@ -43,7 +43,7 @@ creates.
 | `omp mobile status` | Install state, settings, launchd state, endpoint probes, live sessions, log paths |
 | `omp mobile start` \| `stop` \| `restart` | Service control; `--service relay\|portal` narrows it |
 | `omp mobile update` | Rebuild the binary from its checkout, reinstall the jobs, restart, verify |
-| `omp mobile logs` | Tail both services' stdout/stderr (`--service`, `--lines`) |
+| `omp mobile logs` | Tail both services’ stdout/stderr (`--service`, `--lines`, `--follow`) |
 | `omp mobile password` | Rotate the portal password and restart the portal |
 | `omp mobile uninstall` | Unload and delete both LaunchAgents (`--purge` also deletes the password) |
 | `omp mobile serve` \| `relay` | Run one service in the foreground — what the LaunchAgents run |

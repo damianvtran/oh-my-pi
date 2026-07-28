@@ -27,14 +27,25 @@ import { ptree } from "@oh-my-pi/pi-utils";
 
 interface ExecCall {
 	command: string[];
-	stdin?: string;
+	/** Whatever was handed to the child's stdin, read through ptree's real option name. */
+	input?: string;
 }
 
-/** Script `ptree.exec` per invocation, recording what was asked for. */
+/**
+ * Script `ptree.exec` per invocation, recording what was asked for.
+ *
+ * The recorded field is read as `ExecOptions["input"]`, typed against ptree's own
+ * interface rather than a hand-written shape. That matters: the first version of
+ * this module passed the secret as `stdin`, which `ExecOptions` does not accept —
+ * an object spread hid it from the type checker and a loosely-typed stub hid it
+ * from this test, so the password write only failed when a human ran it. Reading
+ * the real option makes the same mistake fail here.
+ */
 function stubExec(handler: (call: ExecCall, index: number) => { exitCode?: number; stdout?: string; stderr?: string }) {
 	const calls: ExecCall[] = [];
-	spyOn(ptree, "exec").mockImplementation(((command: string[], options?: { stdin?: string }) => {
-		const call: ExecCall = { command, stdin: options?.stdin };
+	spyOn(ptree, "exec").mockImplementation(((command: string[], options?: ptree.ExecOptions) => {
+		const input = options?.input;
+		const call: ExecCall = { command, input: typeof input === "string" ? input : input?.toString() };
 		const result = handler(call, calls.length);
 		calls.push(call);
 		return Promise.resolve({
@@ -125,11 +136,12 @@ describe("portal password storage", () => {
 		// `security -i` reads its command line from stdin, so the secret only ever
 		// exists on a pipe. Anything else would be readable via `ps`.
 		expect(call?.command.join(" ")).not.toContain(secret);
-		expect(call?.stdin).toContain(secret);
-		expect(call?.stdin).toContain("add-generic-password");
-		expect(call?.stdin).toContain('"tester"');
-		expect(call?.stdin).toContain('"omp-mobile"');
-		expect(call?.stdin?.endsWith("\n")).toBe(true);
+		expect(call?.input).toContain(secret);
+		expect(call?.input).toContain("add-generic-password");
+		expect(call?.input).toContain('"tester"');
+		expect(call?.input).toContain('"omp-mobile"');
+		// `security -i` reads one command per line, so the newline is what makes it execute.
+		expect(call?.input?.endsWith("\n")).toBe(true);
 	});
 
 	it("escapes a password that would otherwise break out of the security command line", async () => {
@@ -139,7 +151,7 @@ describe("portal password storage", () => {
 
 		// `security -i` parses its own mini command line, so an unescaped quote would
 		// terminate the argument and the rest would be read as further arguments.
-		expect(calls[0]?.stdin).toContain('"a\\"b\\\\c"');
+		expect(calls[0]?.input).toContain('"a\\"b\\\\c"');
 	});
 
 	it("treats a missing Keychain item as absent rather than an error", async () => {

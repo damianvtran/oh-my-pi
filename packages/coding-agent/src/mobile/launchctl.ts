@@ -35,13 +35,19 @@ export function guiDomain(): string {
 	return `gui/${process.getuid?.() ?? os.userInfo().uid}`;
 }
 
-async function run(command: string[], timeoutMs: number, stdin?: string): Promise<CommandOutcome> {
+/**
+ * `input` is spelled out rather than spread in: `ExecOptions` deliberately omits
+ * `stdin` in favour of it, and an object spread would let a wrong key through
+ * excess-property checking — which is exactly how a broken `stdin` first shipped
+ * here, invisible to both the type checker and a mocked test.
+ */
+async function run(command: string[], timeoutMs: number, input?: string): Promise<CommandOutcome> {
 	const result = await ptree.exec(command, {
 		signal: ptree.combineSignals(timeoutMs),
 		allowNonZero: true,
 		allowAbort: true,
 		stderr: "full",
-		...(stdin === undefined ? {} : { stdin }),
+		input,
 	});
 	return {
 		ok: result.exitCode === 0,
