@@ -67,7 +67,7 @@ body {
   -webkit-font-smoothing: antialiased;
   overscroll-behavior-y: none;
 }
-button, input { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+button, input, select { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 button { cursor: pointer; background: none; border: 0; }
 :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
@@ -261,15 +261,18 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
   border-radius: var(--radius-card);
 }
 .nf-title { font-weight: 650; color: var(--fg); margin-bottom: 8px; }
+.nf-field { display: grid; gap: 4px; margin-top: 8px; }
+.nf-field > span { color: var(--fg-faint); font-size: 11px; }
 .nf-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
-.nf-row:first-of-type { margin-top: 0; }
-#newdir {
-  flex: 1; min-width: 0; padding: 6px 8px;
+#newsuggest, #newdir {
+  width: 100%; min-width: 0; min-height: 38px; padding: 8px;
   background: var(--bg-inset); border: 1px solid var(--hairline);
   border-radius: var(--radius-ctl); color: var(--fg);
 }
+#newsuggest { appearance: auto; }
 #newdir::placeholder { color: var(--fg-faint); }
-.nf-status { font-size: 11px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nf-actions .btn { min-height: 36px; padding-inline: 12px; }
+.nf-status { min-width: 0; font-size: 11px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nf-status.err { color: var(--err); white-space: normal; }
 
 /* ── composer ────────────────────────────────────────────────────────── */
@@ -305,11 +308,15 @@ footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
   </header>
   <main><div class="wrap"><div id="newform" hidden>
     <div class="nf-title">start a new session</div>
-    <div class="nf-row">
-      <input id="newdir" list="dirs" placeholder="directory (~/ works)" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
-      <datalist id="dirs"></datalist>
-    </div>
-    <div class="nf-row">
+    <label class="nf-field">
+      <span>suggested directory</span>
+      <select id="newsuggest"><option value="">loading suggestions…</option></select>
+    </label>
+    <label class="nf-field">
+      <span>directory</span>
+      <input id="newdir" placeholder="~/ or an absolute path" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </label>
+    <div class="nf-row nf-actions">
       <button class="btn btn-accent" id="start">start</button>
       <button class="btn" id="cancelnew">cancel</button>
       <span class="nf-status" id="newstatus"></span>
@@ -713,9 +720,85 @@ $("resume").onclick = async () => {
   await post(`/api/sessions/${current}/resume`);
 };
 
-/* New-session form. The session itself shows up through ordinary discovery
-   (the nanny's room publishes, the portal attaches), so a successful start
-   only has to wait for the next refresh — there is no handle to poll. */
+/* New-session form. Successful choices are remembered by this browser: the
+   portal may restart or be reached through a tunnel, but the phone should still
+   open on the directory it last used. Only successful starts are persisted, so
+   a typo never becomes the next default. */
+const DIRECTORY_MEMORY_KEY = "omp.mobile.directories.v1";
+const DIRECTORY_MEMORY_LIMIT = 8;
+
+function loadDirectoryMemory() {
+  try {
+    const value = JSON.parse(localStorage.getItem(DIRECTORY_MEMORY_KEY) ?? "null");
+    const recent = Array.isArray(value?.recent)
+      ? value.recent.filter(dir => typeof dir === "string" && dir.trim()).slice(0, DIRECTORY_MEMORY_LIMIT)
+      : [];
+    return { last: typeof value?.last === "string" ? value.last : "", recent };
+  } catch {
+    return { last: "", recent: [] };
+  }
+}
+function rememberDirectory(cwd) {
+  const memory = loadDirectoryMemory();
+  const recent = [cwd, ...memory.recent.filter(dir => dir !== cwd)].slice(0, DIRECTORY_MEMORY_LIMIT);
+  try { localStorage.setItem(DIRECTORY_MEMORY_KEY, JSON.stringify({ last: cwd, recent })); } catch {}
+}
+function addDirectoryGroup(select, label, directories, seen) {
+  const choices = directories.filter(dir => typeof dir === "string" && dir && !seen.has(dir));
+  if (!choices.length) return;
+  const group = document.createElement("optgroup");
+  group.label = label;
+  for (const dir of choices) {
+    seen.add(dir);
+    const option = document.createElement("option");
+    option.value = dir;
+    option.textContent = dir;
+    group.append(option);
+  }
+  select.append(group);
+}
+function renderDirectorySuggestions(suggestions) {
+  const select = $("newsuggest");
+  const input = $("newdir");
+  const memory = loadDirectoryMemory();
+  const home = typeof suggestions?.home === "string" ? suggestions.home : "";
+  const recent = Array.isArray(suggestions?.recent) ? suggestions.recent : [];
+  const seen = new Set();
+  select.replaceChildren();
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "choose a saved or recent directory";
+  select.append(placeholder);
+  if (home) {
+    seen.add(home);
+    const option = document.createElement("option");
+    option.value = home;
+    option.textContent = `home — ${home}`;
+    select.append(option);
+  }
+  addDirectoryGroup(select, "recently selected on this phone", memory.recent, seen);
+  addDirectoryGroup(select, "recent omp sessions", recent, seen);
+
+  const preferred = memory.last || home;
+  input.value = preferred;
+  select.value = seen.has(preferred) ? preferred : "";
+}
+async function loadDirectorySuggestions() {
+  const memory = loadDirectoryMemory();
+  $("newdir").value = memory.last;
+  const select = $("newsuggest");
+  select.replaceChildren();
+  const loading = document.createElement("option");
+  loading.value = ""; loading.textContent = "loading suggestions…";
+  select.append(loading);
+  const res = await api("/api/directories");
+  if (!res.ok) {
+    loading.textContent = "type a directory below";
+    return;
+  }
+  renderDirectorySuggestions(await res.json());
+}
 function hideNewForm() {
   $("newform").hidden = true;
   const st = $("newstatus");
@@ -723,22 +806,26 @@ function hideNewForm() {
 }
 $("new").onclick = async () => {
   $("newform").hidden = false;
-  $("newdir").focus();
-  const res = await api("/api/directories");
-  if (!res.ok) return;
-  $("dirs").innerHTML = (await res.json()).map(d => `<option value="${esc(d)}">`).join("");
+  await loadDirectorySuggestions();
+  $("newsuggest").focus();
 };
 $("cancelnew").onclick = hideNewForm;
+$("newsuggest").onchange = () => {
+  if ($("newsuggest").value) $("newdir").value = $("newsuggest").value;
+};
+$("newdir").oninput = () => { $("newsuggest").value = $("newdir").value; };
 $("start").onclick = async () => {
   const cwd = $("newdir").value.trim();
   const st = $("newstatus");
   st.classList.remove("err");
   if (!cwd) { st.textContent = "pick a directory first"; st.classList.add("err"); return; }
   st.textContent = "starting…";
+  $("start").disabled = true;
   const res = await post("/api/sessions/start", { cwd });
+  $("start").disabled = false;
   if (res.ok) {
+    rememberDirectory(cwd);
     st.textContent = "started — the session appears below in a moment";
-    $("newdir").value = "";
     setTimeout(hideNewForm, 1500);
     setTimeout(refresh, 1000);
     return;

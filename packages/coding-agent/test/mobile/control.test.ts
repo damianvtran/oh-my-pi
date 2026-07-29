@@ -10,7 +10,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildHostArgv, validateSessionCwd } from "@oh-my-pi/pi-coding-agent/mobile/control";
+import { buildHostArgv, listDirectorySuggestions, validateSessionCwd } from "@oh-my-pi/pi-coding-agent/mobile/control";
 
 describe("mobile session control", () => {
 	it("accepts an existing absolute directory and normalizes it", async () => {
@@ -55,5 +55,17 @@ describe("mobile session control", () => {
 			"--cwd",
 			"/tmp/work",
 		]);
+	});
+
+	it("offers home as its own choice and never repeats it among the recent directories", async () => {
+		const suggestions = await listDirectorySuggestions();
+
+		expect(suggestions.home).toBe(os.homedir());
+		expect(suggestions.recent).not.toContain(os.homedir());
+		// Deleted directories would be dead ends on a phone that cannot browse.
+		for (const dir of suggestions.recent) {
+			expect(await fs.stat(dir).then(stat => stat.isDirectory())).toBe(true);
+		}
+		expect(new Set(suggestions.recent).size).toBe(suggestions.recent.length);
 	});
 });

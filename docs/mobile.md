@@ -98,7 +98,7 @@ room as a guest, and serves:
 | `POST /api/sessions/:pid/resume` | The play button: send the hidden internal continue prompt |
 | `POST /api/sessions/:pid/ui/:reqId` | Answer an `ask` dialog (`{value}`) |
 | `GET /api/sessions/:pid/{transcript,todos}` | Snapshot fetches for a cold page load |
-| `GET /api/directories` | Recent session directories for the new-session form |
+| `GET /api/directories` | Picker choices for the new-session form: `{home, recent[]}` |
 | `POST /api/sessions/start` | Start a session in a directory (`{cwd}`) — see below |
 
 ### Stop and resume
@@ -140,6 +140,17 @@ The directory is validated before anything spawns: absolute (with `~`
 expansion), existing, and a directory. Relative input is rejected rather than
 resolved — the portal's own working directory under launchd is unpredictable,
 so resolving would start sessions in places you never meant.
+
+Picking the directory is the part a phone keyboard is worst at, so typing is
+the fallback rather than the interface. `GET /api/directories` answers with the
+home directory as a named choice plus the working directories of recent omp
+sessions, and the form offers a native select — a full-height wheel on iOS and
+Android — above the free-text field. Successful starts are also remembered in
+the browser's `localStorage` under `omp.mobile.directories.v1`, listed as
+"recently selected on this phone", and the last one is prefilled when the form
+opens, so the common case is open, tap start. Only successful starts are
+remembered, so a rejected typo never becomes the next default, and the memory
+is per-browser: it survives portal restarts and never leaves the phone.
 
 The phone view mirrors the TUI rather than inventing a web idiom: the spinner and
 its activity line come from the same `agent_start` / `tool_execution_start` /

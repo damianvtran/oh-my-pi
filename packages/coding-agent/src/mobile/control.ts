@@ -34,7 +34,7 @@ import { isDarwin, submitSessionHostJob } from "./launchctl";
 import { mobileRuntimeDir } from "./paths";
 import { resolveOmpLaunchArgv } from "./service";
 import { readMobileState } from "./state";
-import type { PortalControl } from "./types";
+import type { PortalControl, PortalDirectorySuggestions } from "./types";
 
 /**
  * caffeinate wraps the nanny the same way it wraps both services (see
@@ -76,14 +76,14 @@ export async function validateSessionCwd(input: string): Promise<string> {
 }
 
 /**
- * Recent session directories for the new-session form's suggestions, most
- * recent first, capped, with entries whose directory has since been deleted
- * dropped. `$HOME` is always present: starting a session at the home directory
- * is the sensible default when nothing recent fits.
+ * Home plus recent session directories for the new-session picker. Deleted
+ * directories are dropped before they reach the phone; home has its own named
+ * choice rather than being an indistinguishable path in the recent list.
  */
-export async function listRecentDirectories(limit = 8): Promise<string[]> {
+export async function listDirectorySuggestions(limit = 8): Promise<PortalDirectorySuggestions> {
+	const home = os.homedir();
 	const sessions = await listAllSessions(new FileSessionStorage()).catch(() => []);
-	const seen = new Set<string>();
+	const seen = new Set<string>([home]);
 	const candidates: string[] = [];
 	for (const session of sessions) {
 		if (!session.cwd || seen.has(session.cwd)) continue;
@@ -91,7 +91,7 @@ export async function listRecentDirectories(limit = 8): Promise<string[]> {
 		candidates.push(session.cwd);
 		if (candidates.length >= limit) break;
 	}
-	const existing: string[] = [];
+	const recent: string[] = [];
 	for (const dir of candidates) {
 		if (
 			await fs.stat(dir).then(
@@ -99,11 +99,9 @@ export async function listRecentDirectories(limit = 8): Promise<string[]> {
 				() => false,
 			)
 		)
-			existing.push(dir);
+			recent.push(dir);
 	}
-	const home = os.homedir();
-	if (!existing.includes(home)) existing.push(home);
-	return existing;
+	return { home, recent };
 }
 
 /** argv that runs the nanny for one spawned session: `omp mobile host --cwd <dir>`. */
@@ -152,7 +150,7 @@ export function defaultPortalControl(log: (msg: string) => void): PortalControl 
 			const launchArgv = (await readMobileState())?.launchArgv ?? resolveOmpLaunchArgv();
 			return spawnSessionHost(launchArgv, dir, log);
 		},
-		listDirectories: () => listRecentDirectories(),
+		listDirectories: () => listDirectorySuggestions(),
 	};
 }
 

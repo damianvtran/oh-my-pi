@@ -24,7 +24,7 @@ let cookie = "";
 let configRoot = "";
 const originalConfigDir = process.env.PI_CONFIG_DIR;
 
-const DIRECTORIES = ["/tmp/project-a", "/tmp/project-b"];
+const DIRECTORIES = { home: "/Users/tester", recent: ["/tmp/project-a", "/tmp/project-b"] };
 
 /** Records spawns and refuses relative paths the way the real validation does. */
 interface FakeControl extends PortalControl {
