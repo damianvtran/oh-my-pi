@@ -18,7 +18,7 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { importRoomKey } from "../collab/crypto";
 import type { CollabFrame, CollabSessionState, CollabUiRequest } from "../collab/protocol";
-import { COLLAB_PROTO, parseCollabLink } from "../collab/protocol";
+import { COLLAB_PROMPT_MESSAGE_TYPE, COLLAB_PROTO, parseCollabLink } from "../collab/protocol";
 import { CollabSocket } from "../collab/relay-client";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { SessionEntry } from "../session/session-entries";
@@ -255,16 +255,27 @@ export class PortalGuest {
 	 * calls, thinking, and todos can be drawn the way the terminal draws them.
 	 */
 	#absorb(entry: SessionEntry): void {
+		// A prompt sent by a guest — the phone's own composer included — is stored
+		// as a `custom_message` entry, not a plain user message: the host attributes
+		// it so the TUI can name who steered. Handling only `message` entries is
+		// why the phone showed no card for anything typed on the phone; the agent
+		// appeared to answer a question that was never asked. This branch is also
+		// where the resume marker is filtered in practice, because the play
+		// button's prompt travels this same path.
+		if (entry.type === "custom_message") {
+			if (entry.customType !== COLLAB_PROMPT_MESSAGE_TYPE || !entry.display) return;
+			const text = collectText(entry.content);
+			if (text && !text.startsWith(INTERNAL_RESUME_MARKER)) this.#push({ kind: "user", text });
+			return;
+		}
 		if (entry.type !== "message") return;
 		const message = entry.message;
 		switch (message.role) {
 			case "user": {
 				const text = collectText(message.content);
-				// The portal's own resume prompt is real (host, transcript and every
-				// other guest see it) but is not a card the phone renders — the play
-				// button would otherwise redraw the instruction it just sent. Only
-				// the exact marker prefix is dropped; a hand-typed "continue" has no
-				// marker and always shows.
+				// A user message typed at the terminal is an ordinary card. The
+				// portal's own resume prompt is dropped by its exact marker prefix
+				// only, so a hand-typed "continue" always shows.
 				if (text && !text.startsWith(INTERNAL_RESUME_MARKER)) this.#push({ kind: "user", text });
 				return;
 			}
