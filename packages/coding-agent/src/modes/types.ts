@@ -306,6 +306,14 @@ export interface InteractiveModeContext {
 	 * delivery error should leave the signature set untouched.
 	 */
 	withLocalSubmission<T>(text: string, fn: () => Promise<T>, options?: { imageCount?: number }): Promise<T>;
+	/**
+	 * Start automatic session titling from a prompt that is about to run, when the
+	 * session is still unnamed. Both turn-starting seams call it — the editor and
+	 * `CollabHost`'s guest prompts — so a session steered only from the mobile
+	 * portal or the web client is titled like any other. No-ops for already-named
+	 * sessions, local slash commands, `PI_NO_TITLE` and low-signal input.
+	 */
+	startAutoTitleGeneration(text: string): void;
 	/** Clears bookkeeping for an optimistic local user message once the matching session event arrives. */
 	clearOptimisticUserMessage(): void;
 	/** Replaces the raw optimistic user render with the canonical message emitted by the session. */
