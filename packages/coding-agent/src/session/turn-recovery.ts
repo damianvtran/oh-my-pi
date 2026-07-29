@@ -276,14 +276,22 @@ export class TurnRecovery {
 
 	/** Closes a successful retry saga and annotates recovered persisted errors. */
 	async onAssistantSettledSuccessfully(message: AssistantMessage): Promise<void> {
-		if (
-			message.stopReason === "error" ||
-			message.stopReason === "aborted" ||
-			this.#isEmptyAssistantStop(message) ||
-			this.#retryAttempt === 0
-		) {
+		if (message.stopReason === "error" || message.stopReason === "aborted" || this.#isEmptyAssistantStop(message)) {
 			return;
 		}
+		// A model that just served a turn has demonstrably recovered, so forget its
+		// flap history. Without this the probe arm set by the move that brought us
+		// here stays latched: an unrelated failure hours later would be scored as a
+		// bounce, and repeated succeed/fail cycles would ratchet the escalation
+		// multiplier to its cap and push the entry past the climb's strike ceiling.
+		// This runs for every good turn, not only for ones that closed a retry saga.
+		const settledModel = this.#host.model();
+		if (settledModel) {
+			this.#retryFallbackFlaps.delete(
+				this.#retryFallbackFlapKey(formatRetryFallbackSelector(settledModel, this.#host.thinkingLevel())),
+			);
+		}
+		if (this.#retryAttempt === 0) return;
 		const model = this.#host.model();
 		if (this.#activeRetryFallback && model) {
 			await this.#host.emitSessionEvent({
@@ -1173,8 +1181,13 @@ export class TurnRecovery {
 			RETRY_FALLBACK_MAX_COOLDOWN_MS,
 		);
 		// Never shorten a window already promised: a failure inside an open window
-		// must not hand the model back early.
-		const suppressedUntilMs = Math.max(nowMs + escalatedMs, previous?.suppressedUntilMs ?? 0);
+		// must not hand the model back early. Cycling-only, exactly like the
+		// escalation above — upstream's last-write-wins timing is what the kill
+		// switch has to reproduce, and a later shorter cooldown freeing the model
+		// early only matters once something may reverse onto it.
+		const suppressedUntilMs = this.#retryFallbackCycleEnabled()
+			? Math.max(nowMs + escalatedMs, previous?.suppressedUntilMs ?? 0)
+			: nowMs + escalatedMs;
 		this.#pruneRetryFallbackFlaps(nowMs);
 		this.#retryFallbackFlaps.set(flapKey, { strikes, suppressedUntilMs, probing: false });
 		this.#host.modelRegistry.suppressSelector(currentSelector, suppressedUntilMs);
@@ -1779,6 +1792,12 @@ export class TurnRecovery {
 		const active = this.#activeRetryFallback;
 		if (!active) return;
 		if (!this.#retryFallbackReversalAllowed()) return;
+		// `#retryAttempt` is the in-flight proxy: non-zero from the moment a burst
+		// enters #handleRetryableError until it settles, including across the
+		// continues the burst schedules. It can also stay latched when a turn is
+		// aborted mid-stream (no settle path resets it), which costs at most one
+		// skipped climb and heals on the next good turn — a skipped climb is the
+		// safe direction to fail.
 		if (this.#retryAttempt > 0) return;
 		if (Date.now() - this.#lastRetryFallbackAppliedAtMs < RETRY_FALLBACK_CLIMB_DWELL_MS) return;
 		const candidates = this.findRetryFallbackPrecedingCandidates(active.role, currentSelector);
