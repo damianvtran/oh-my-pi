@@ -41,8 +41,8 @@
     --accent-text: oklch(0.55 0.22 341);
     --accent-solid: oklch(0.52 0.21 341);
     --warn-text: oklch(0.47 0.13 85);
-    --ok: oklch(0.55 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
-    --link: #0f7a88;
+    --ok: oklch(0.52 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
+    --link: oklch(0.45 0.09 210);
     --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
     --ring: oklch(0.58 0.13 230 / 70%);
 }
@@ -56,8 +56,8 @@
     --accent-text: oklch(0.55 0.22 341);
     --accent-solid: oklch(0.52 0.21 341);
     --warn-text: oklch(0.47 0.13 85);
-    --ok: oklch(0.55 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
-    --link: #0f7a88;
+    --ok: oklch(0.52 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
+    --link: oklch(0.45 0.09 210);
     --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
     --ring: oklch(0.58 0.13 230 / 70%);
   }
@@ -248,8 +248,13 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 .tool-div::after { content: ""; flex: 1; border-top: 1px solid var(--hairline); }
 .tool-body { padding: 4px 10px 6px; color: var(--fg-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-body.clip { max-height: 168px; overflow: hidden; }
-.tool-more { padding: 0 10px 6px; color: var(--fg-faint); font-size: 11px; }
-.tool-more button { color: var(--link); text-decoration: underline; }
+.tool-more { padding: 0 10px; color: var(--fg-faint); font-size: 11px; }
+/* The last control under the 44px floor: it reveals the rest of a tool's output,
+   which on a phone is a thing people reach for mid-turn. */
+.tool-more button {
+  display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px;
+  color: var(--link); text-decoration: underline;
+}
 
 /* thinking — dim, behind the ✺ marker the TUI uses */
 .think { color: var(--fg-faint); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -265,7 +270,7 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 .task { color: var(--fg-faint); }
 .task.now { color: var(--fg); }
 .task.done { color: var(--ok); text-decoration: line-through; }
-.task.blocked { color: var(--warn); }
+.task.blocked { color: var(--warn-text); }
 
 /* ── ask / approval prompt ───────────────────────────────────────────── */
 #ask {
@@ -274,7 +279,9 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
   border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
   border-radius: var(--radius-card);
 }
-#ask .q { color: var(--warn); font-weight: 650; margin-bottom: 8px; }
+/* `--warn-text`, not `--warn`: this is the highest-stakes sentence in the app and
+   it is 12px text, where the dot/border colour does not carry enough contrast. */
+#ask .q { color: var(--warn-text); font-weight: 650; margin-bottom: 8px; }
 /* Same 44px floor as `.btn`: these authorise a tool call, and a mis-tap here —
    "yes, and don't ask again" is one row from "no" — is not recoverable the way a
    mis-tapped stop is. */
@@ -380,7 +387,11 @@ footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
     <div class="wrap">
       <span class="prompt">›</span>
       <input id="msg" placeholder="steer this session" enterkeyhint="send" autocomplete="off" autocapitalize="off" spellcheck="false">
-      <button class="btn btn-stop" id="turn" hidden title="stop the current turn — the session stays open">stop</button>
+      <!-- No `hidden` attribute: this slot is hidden with `visibility` so the row's
+           geometry never depends on turn state, and `[hidden]`'s
+           `display:none !important` would win over that and blank the control in
+           every state. `renderTurnControl` owns its visibility from the first frame. -->
+      <button class="btn btn-stop" id="turn" style="visibility:hidden" title="stop the current turn — the session stays open">stop</button>
       <button class="btn btn-accent" id="send">send</button>
     </div>
   </footer>
@@ -582,6 +593,13 @@ function renderTodos(phases) {
   return `<div class="todos"><div class="todos-h">Todos<span class="count"> · ${done}/${all.length}</span></div>${rows}</div>`;
 }
 
+/* Tool outputs the user expanded. The transcript is re-rendered wholesale on every
+   frame, so an expansion that lived only as a removed class disappeared on the
+   next token — unusable exactly while a turn is running, which is when someone
+   wants to read what the agent is doing. Keyed by tool call id, not by index, so
+   the set survives cards falling off the front of the cap. */
+let expandedTools = new Set();
+
 function renderTranscript(items) {
   return items.map((it, i) => {
     if (it.kind === "user") {
@@ -592,14 +610,17 @@ function renderTranscript(items) {
     }
     if (it.kind === "assistant") return `<div class="turn"><div class="md">${md(it.text)}</div></div>`;
     if (it.kind === "thinking") return `<div class="turn"><div class="think">${esc(it.text)}</div></div>`;
+    // The seam where a turn was cut short. It comes from the projection, so it sits
+    // at the point the stop happened and stays there once the work resumes.
+    if (it.kind === "stopped") return `<div class="stopped">⨯ stopped here</div>`;
     const { label, arg } = toolTitle(it);
     const body = it.output ?? "";
-    const clip = body.split("\n").length > 9;
+    const clip = body.split("\n").length > 9 && !expandedTools.has(it.id);
     return `<div class="turn"><div class="tool ${it.isError ? "err" : ""}">
       <div class="tool-head"><span class="sigil">${esc(label)}</span> <span class="arg">${esc(arg)}</span></div>
       ${body ? `<div class="tool-div">${it.isError ? "Error" : "Output"}</div>
       <div class="tool-body ${clip ? "clip" : ""}" data-body="${i}">${esc(body)}</div>
-      ${clip ? `<div class="tool-more"><button data-expand="${i}">… expand</button></div>` : ""}` : ""}
+      ${clip ? `<div class="tool-more"><button data-expand="${esc(it.id)}">… expand</button></div>` : ""}` : ""}
     </div></div>`;
   }).join("");
 }
@@ -641,6 +662,19 @@ function renderWorking(activity) {
    one that was already running. */
 let lastSessions = [];
 
+/* Relative age for a card. The list sorts by recency, and with several sessions in
+   one directory the cards were distinguishable only by pid — this is both the
+   missing discriminator and the visible expression of the sort. */
+function ageOf(startedAt) {
+  const started = Date.parse(startedAt ?? "");
+  if (!Number.isFinite(started)) return "";
+  const mins = Math.max(0, Math.round((Date.now() - started) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.round(mins / 60);
+  return hours < 24 ? `${hours}h` : `${Math.round(hours / 24)}d`;
+}
+
 async function refresh() {
   if (current !== null) return;
   const res = await api("/api/sessions");
@@ -668,6 +702,7 @@ async function refresh() {
             <span class="k" style="display:flex;align-items:center;gap:5px">
               <span class="gauge"><i style="width:${Math.min(100, pct).toFixed(0)}%"></i></span>${pct.toFixed(1)}%
             </span>
+            <span class="k">${esc(ageOf(s.startedAt))}</span>
             <span class="k">pid ${s.pid}</span>
           </div>
           ${
@@ -719,33 +754,10 @@ function renderHeader() {
   $("sub").textContent = `${label} · ${state}`;
 }
 
-/* The abort itself leaves no card in the transcript — the host records a stop as
-   an assistant `stopReason`, not an entry — so a prompt whose turn was killed
-   before it emitted text read as the agent ignoring the user, and a resumed turn
-   ran straight on from the truncated one. This keeps the boundary in place: live
-   while stopped, then demoted to a quiet "stopped, then resumed" so scrolling
-   back through the session still shows where the seam was. */
-function renderStopMarker() {
-  const existing = $("log").querySelector(".stopped");
-  if (!interrupted || streaming) {
-    if (existing && !existing.dataset.resumed) {
-      existing.dataset.resumed = "1";
-      existing.textContent = "⨯ stopped, then resumed";
-      existing.style.color = "var(--fg-faint)";
-    }
-    return;
-  }
-  if (existing) {
-    delete existing.dataset.resumed;
-    existing.textContent = "⨯ stopped — the session is still open";
-    existing.style.removeProperty("color");
-    return;
-  }
-  const marker = document.createElement("div");
-  marker.className = "stopped";
-  marker.textContent = "⨯ stopped — the session is still open";
-  $("log").append(marker);
-}
+/* The seam now lives in the transcript itself (a `stopped` item derived from the
+   aborted assistant message), so nothing here reaches into the DOM to place it.
+   What stays live is the reassurance that the session survived a stop, and that
+   belongs to the header word and the resume button rather than to history. */
 
 /* One control, three states. Stop and resume are the two halves of "the turn",
    are mutually exclusive, and live in the same composer slot next to send —
@@ -827,11 +839,13 @@ function open(pid) {
     }
     for (const b of $("log").querySelectorAll("[data-expand]")) {
       b.onclick = () => {
-        $("log").querySelector(`[data-body="${b.dataset.expand}"]`)?.classList.remove("clip");
+        // Remember it, then let the ordinary render path apply it: the next frame
+        // would otherwise re-clip the body.
+        expandedTools.add(b.dataset.expand);
+        b.closest(".tool")?.querySelector(".tool-body")?.classList.remove("clip");
         b.parentElement.remove();
       };
     }
-    renderStopMarker();
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
   es.addEventListener("todos", e => {
@@ -849,7 +863,6 @@ function open(pid) {
     streaming = Boolean(a.working);
     renderHeader();
     renderTurnControl(streaming, interrupted && !a.working);
-    renderStopMarker();
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
   es.addEventListener("ui-request", e => showAsk(JSON.parse(e.data)));
@@ -1153,6 +1166,11 @@ $("start").onclick = async () => {
   $("start").disabled = true;
   let res;
   try {
+    // Snapshot what is running *now*, not at the last 2s poll: a session another
+    // client started inside that window would otherwise be adopted as this start's
+    // arrival, which is the same misroute the cwd-only match caused.
+    const running = await api("/api/sessions").then(r => (r.ok ? r.json() : []), () => []);
+    awaitingKnownPids = new Set(running.map(s => s.pid));
     res = await post("/api/sessions/start", { cwd });
   } catch {
     // A rejected fetch (dropped tunnel, portal restarting) must not leave the form
@@ -1168,12 +1186,11 @@ $("start").onclick = async () => {
     const body = await res.json().catch(() => ({}));
     const resolved = typeof body.cwd === "string" && body.cwd ? body.cwd : cwd;
     rememberDirectory(resolved);
-    // Snapshot what is already running: the arrival has to be a session that was
-    // not there before, or a directory that already hosts one would match first
-    // and drop the user into the wrong agent.
+    // `awaitingKnownPids` was snapshotted just before the request: the arrival has
+    // to be a session that was not there then, or a directory that already hosts
+    // one would match first and drop the user into the wrong agent.
     awaitingCwd = resolved;
     awaitingSince = Date.now();
-    awaitingKnownPids = new Set(lastSessions.map(s => s.pid));
     // Deliberately left disabled: the session takes a few seconds to appear, and
     // a second tap in that window starts a second agent in the same directory.
     st.textContent = "starting — opening the session as soon as it appears";
@@ -1188,12 +1205,29 @@ $("start").onclick = async () => {
 };
 $("newdir").onkeydown = e => { if (e.key === "Enter") $("start").click(); };
 
-// Deep link: #<pid> opens that session directly, so a push notification or a
-// bookmark can land on the session that needs an answer.
+/* Deep link: #<pid> opens that session directly, so a push notification or a
+   bookmark can land on the session that needs an answer. The hash is also the
+   only handle the platform back gesture has: without listening for it, iOS
+   swipe-back left the URL pointing at the list while the session view stayed
+   mounted with its stream open. */
+function applyHash() {
+  const pid = Number(location.hash.slice(1));
+  const wanted = Number.isInteger(pid) && pid > 0 ? pid : null;
+  if (wanted === current) return;
+  if (wanted === null) {
+    if (current !== null) $("back").click();
+    return;
+  }
+  if (document.querySelector(`.card[data-pid="${wanted}"]`) || current !== null) open(wanted);
+}
+addEventListener("hashchange", applyHash);
+/* The header label switches between basename and full path on width, so a rotation
+   has to re-render it: an idle session may never push another frame. */
+addEventListener("resize", renderHeader);
+
 async function boot() {
   await refresh();
-  const pid = Number(location.hash.slice(1));
-  if (Number.isInteger(pid) && pid > 0 && document.querySelector(`.card[data-pid="${pid}"]`)) open(pid);
+  applyHash();
 }
 boot();
 setInterval(refresh, 2000);

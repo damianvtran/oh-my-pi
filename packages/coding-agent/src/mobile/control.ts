@@ -143,29 +143,45 @@ export function buildHostArgv(launchArgv: string[], cwd: string): string[] {
 }
 
 /**
+ * Environment variables that decide which config root — and therefore which
+ * collab link directory — a session resolves.
+ *
+ * `PI_CONFIG_DIR` is only the explicit spelling. `--profile work` never sets it:
+ * omp's bootstrap writes `OMP_PROFILE`/`PI_PROFILE` instead, so carrying just
+ * `PI_CONFIG_DIR` left a profile-scoped portal watching
+ * `~/.omp/profiles/work/run/collab` while the session it started published to
+ * `~/.omp/run/collab` — an unattended agent the portal can never see.
+ */
+const CONFIG_ROOT_ENV_KEYS = ["PI_CONFIG_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+
+/**
+ * Command for the submitted launchd job.
+ *
+ * Pure and exported so the variable list is a testable contract: a submitted job
+ * inherits nothing from the submitting process, and the previous one-variable
+ * version looked complete precisely because nothing asserted it.
+ */
+export function buildSessionJobCommand(hostArgv: string[], env: Record<string, string | undefined>): string[] {
+	const carried = CONFIG_ROOT_ENV_KEYS.flatMap(key => (env[key] ? [`${key}=${env[key]}`] : []));
+	const wrapped = [CAFFEINATE, "-dims", ...hostArgv];
+	return carried.length > 0 ? [ENV_BIN, ...carried, ...wrapped] : wrapped;
+}
+
+/**
  * Start one nanny beyond the portal's process lifetime.
  *
  * On macOS, `launchctl submit` is the load-bearing boundary: launchd creates a
  * sibling job, so restarting the portal job cannot include the nanny in its
  * teardown. The submitted job removes its own launchd label when the nanny
  * exits. Other platforms have no launchd service lifecycle to escape, so a
- * detached POSIX process with ignored stdio is the portable fallback.
- *
- * A submitted job inherits nothing from the submitting process, so the profile
- * selection has to be carried over by hand: `PI_CONFIG_DIR` decides which config
- * root the session resolves, and therefore which link directory it publishes to.
- * Without it a `PI_CONFIG_DIR=… omp mobile serve` portal would start sessions
- * that publish where its own watcher is not looking, and the phone would wait
- * forever for a session that is running fine.
+ * detached POSIX process with ignored stdio is the portable fallback — and it
+ * inherits the environment, so it needs no `env` prefix.
  */
 export async function spawnSessionHost(launchArgv: string[], cwd: string, log: (msg: string) => void): Promise<void> {
 	const hostArgv = buildHostArgv(launchArgv, cwd);
 	if (isDarwin()) {
 		const label = `${SESSION_JOB_LABEL_PREFIX}${process.pid}.${Date.now().toString(36)}.${crypto.randomUUID().slice(0, 8)}`;
-		const configDir = process.env.PI_CONFIG_DIR;
-		const command = configDir
-			? [ENV_BIN, `PI_CONFIG_DIR=${configDir}`, CAFFEINATE, "-dims", ...hostArgv]
-			: [CAFFEINATE, "-dims", ...hostArgv];
+		const command = buildSessionJobCommand(hostArgv, process.env);
 		const result = await submitSessionHostJob(label, command, mobileRuntimeDir());
 		if (!result.ok) {
 			log(`session host submit failed label=${label} cwd=${cwd} code=${result.exitCode} ${result.stderr}`);

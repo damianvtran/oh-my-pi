@@ -99,6 +99,11 @@ export class PortalGuest {
 	 * {@link markInterrupted}.
 	 */
 	#optimisticInterrupt = false;
+	/**
+	 * True between a welcome and its final snapshot chunk, i.e. while entries being
+	 * absorbed are replayed history rather than live news.
+	 */
+	#replayingSnapshot = false;
 
 	constructor(events: PortalGuestEvents, displayName = DEFAULT_DISPLAY_NAME) {
 		this.#events = events;
@@ -228,6 +233,7 @@ export class PortalGuest {
 				// The final chunk completes the snapshot: everything a subscriber
 				// renders is now current, and nothing else announces that.
 				if (frame.final) {
+					this.#replayingSnapshot = false;
 					// The snapshot can only rebuild `interrupted` from a persisted
 					// aborted entry, so an abort this portal made before the turn's
 					// first token has to be re-applied here or a reconnect drops the
@@ -278,6 +284,7 @@ export class PortalGuest {
 	 * on screen for a dialog the host already discarded.
 	 */
 	#handleWelcome(state: CollabSessionState): void {
+		this.#replayingSnapshot = true;
 		const staleUi = this.pendingUi;
 		this.transcript = [];
 		this.todos = [];
@@ -347,10 +354,13 @@ export class PortalGuest {
 				// after `agent_end` — or any snapshot replay after a reconnect — left
 				// the phone with no resume button until something unrelated changed.
 				const interrupted = message.stopReason === "aborted";
-				// An assistant entry that did not abort is the authoritative answer to
-				// the optimistic flag: the turn produced real output and ended on its
-				// own terms.
-				if (!interrupted) this.#optimisticInterrupt = false;
+				// A completed assistant turn is the authoritative answer to the
+				// optimistic flag — but only a LIVE one. A welcome replays history that
+				// predates the abort, so clearing on a replayed entry dropped the very
+				// affordance the flag exists to carry across the reconnect (and left the
+				// flag working only for sessions that had never completed a turn, which
+				// is why a test built on an empty transcript passed).
+				if (!interrupted && !this.#replayingSnapshot) this.#optimisticInterrupt = false;
 				if (interrupted !== this.activity.interrupted) {
 					this.activity = { ...this.activity, interrupted };
 					this.#events.onActivity?.(this.activity);
@@ -362,6 +372,12 @@ export class PortalGuest {
 					else if (part.type === "toolCall")
 						this.#push({ kind: "tool", id: part.id, name: part.name, args: part.arguments });
 				}
+				// The seam belongs in the transcript, not in live UI state: an abort is
+				// a fact about this point in the conversation, so it has to sit where it
+				// happened and survive re-renders and reconnects. A turn aborted before
+				// its first token contributes no other card at all, which is what made
+				// it read as the agent ignoring the prompt above it.
+				if (interrupted && this.transcript.at(-1)?.kind !== "stopped") this.#push({ kind: "stopped" });
 				return;
 			}
 			case "toolResult": {

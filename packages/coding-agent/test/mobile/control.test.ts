@@ -16,7 +16,12 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildHostArgv, listDirectorySuggestions, validateSessionCwd } from "@oh-my-pi/pi-coding-agent/mobile/control";
+import {
+	buildHostArgv,
+	buildSessionJobCommand,
+	listDirectorySuggestions,
+	validateSessionCwd,
+} from "@oh-my-pi/pi-coding-agent/mobile/control";
 import { __resetDirsFromEnvForTests, getAgentDir, getConfigRootDir } from "@oh-my-pi/pi-utils";
 
 const originalConfigDir = process.env.PI_CONFIG_DIR;
@@ -145,5 +150,33 @@ describe("mobile session control", () => {
 		// the existence check returned an empty list here while a live directory sat
 		// one place further down.
 		expect(await listDirectorySuggestions(1)).toEqual({ home: os.homedir(), recent: [liveDirs[0]] });
+	});
+});
+
+describe("submitted job command", () => {
+	const hostArgv = ["/usr/local/bin/omp", "mobile", "host", "--cwd", "/tmp/work"];
+
+	it("carries every variable that decides the config root, not just PI_CONFIG_DIR", () => {
+		// `--profile work` never sets PI_CONFIG_DIR: the bootstrap writes
+		// OMP_PROFILE/PI_PROFILE instead. Carrying only the first left a
+		// profile-scoped portal watching one link directory while the session it
+		// started published to another, so the session never appeared.
+		expect(buildSessionJobCommand(hostArgv, { OMP_PROFILE: "work", PI_PROFILE: "work" })).toEqual([
+			"/usr/bin/env",
+			"OMP_PROFILE=work",
+			"PI_PROFILE=work",
+			"/usr/bin/caffeinate",
+			"-dims",
+			...hostArgv,
+		]);
+	});
+
+	it("passes a value containing spaces and an equals sign through as one argument", () => {
+		const command = buildSessionJobCommand(hostArgv, { PI_CONFIG_DIR: ".omp cfg=x" });
+		expect(command[1]).toBe("PI_CONFIG_DIR=.omp cfg=x");
+	});
+
+	it("omits the env wrapper entirely when nothing needs carrying", () => {
+		expect(buildSessionJobCommand(hostArgv, {})).toEqual(["/usr/bin/caffeinate", "-dims", ...hostArgv]);
 	});
 });

@@ -610,9 +610,18 @@ describe("mobile portal guest — stop and resume", () => {
 			guest.markInterrupted();
 			expect(guest.activity.interrupted).toBe(true);
 
-			// Rebinding the room replays a welcome plus a fresh snapshot train.
+			// Rebinding replays a welcome plus a fresh snapshot train, and the tail it
+			// replays contains a *completed* turn. That history predates the abort, so
+			// it must not answer it — the flag survived only for sessions with no
+			// completed turn before this was distinguished from a live entry.
 			const rebound = watch.resyncs;
-			switchSession(harness.ctx, loaded, { id: "sess-b", entries: [] });
+			switchSession(harness.ctx, loaded, {
+				id: "sess-b",
+				entries: [
+					messageEntry("h1", { role: "user", content: "earlier work", timestamp: 0 }),
+					messageEntry("h2", assistantMessage([{ type: "text", text: "finished earlier" }])),
+				],
+			});
 			await watch.until(() => watch.resyncs > rebound);
 			expect(guest.activity.interrupted).toBe(true);
 
@@ -620,6 +629,53 @@ describe("mobile portal guest — stop and resume", () => {
 			harness.emit({ type: "agent_start" } as unknown as AgentSessionEvent);
 			await watch.until(() => guest.activity.working === true);
 			expect(guest.activity.interrupted).toBe(false);
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("marks the seam in the transcript where a turn was cut short", async () => {
+		// The seam has to be part of the projection, not live UI state: it belongs at
+		// the point the stop happened, and it has to survive a resume and a reconnect
+		// so a resumed turn does not read as one continuous answer.
+		const loaded: LoadedSession = {
+			id: "sess-a",
+			cwd: "/tmp/project-a",
+			entries: [
+				messageEntry("u1", { role: "user", content: "count to 100", timestamp: 0 }),
+				messageEntry("a1", { ...assistantMessage([{ type: "text", text: "1, 2, 3" }]), stopReason: "aborted" }),
+			],
+		};
+		const { ctx } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			// Replayed from the snapshot, in place, after the truncated answer.
+			expect(guest.transcript).toEqual([
+				{ kind: "user", text: "count to 100" },
+				{ kind: "assistant", text: "1, 2, 3" },
+				{ kind: "stopped" },
+			]);
+
+			// Resuming appends to it rather than erasing it.
+			ctx.sessionManager.onEntryAppended?.(
+				messageEntry("a2", assistantMessage([{ type: "text", text: "4, 5, 6" }])),
+			);
+			await watch.until(() => guest.transcript.length === 4);
+			expect(guest.transcript.at(-1)).toEqual({ kind: "assistant", text: "4, 5, 6" });
+			expect(guest.transcript.filter(i => i.kind === "stopped")).toHaveLength(1);
+
+			// A second aborted entry in the same place does not stack seams.
+			ctx.sessionManager.onEntryAppended?.(
+				messageEntry("a3", { ...assistantMessage([{ type: "text", text: "7" }]), stopReason: "aborted" }),
+			);
+			await watch.until(() => guest.transcript.length === 6);
+			ctx.sessionManager.onEntryAppended?.(messageEntry("a4", { ...assistantMessage([]), stopReason: "aborted" }));
+			await watch.until(() => watch.entries >= 3);
+			expect(guest.transcript.filter(i => i.kind === "stopped")).toHaveLength(2);
 		} finally {
 			guest.close();
 			await host.stop("test over");
