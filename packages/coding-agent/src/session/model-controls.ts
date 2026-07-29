@@ -54,7 +54,7 @@ export interface ModelControlsHost {
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
-	clearActiveRetryFallback(): void;
+	clearActiveRetryFallback(forgetSelector?: string): void;
 	clearInheritedProviderPromptCacheKey(): void;
 	magicKeywordEnabled(keyword: "orchestrate" | "ultrathink" | "workflow"): boolean;
 	emit(event: AgentSessionEvent): void;
@@ -219,7 +219,7 @@ export class ModelControls {
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
-		this.#host.clearActiveRetryFallback();
+		this.#host.clearActiveRetryFallback(formatModelStringWithRouting(targetModel));
 		await this.#host.setModelWithProviderSessionReset(targetModel);
 		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
 		if (options?.persist) {
@@ -264,7 +264,7 @@ export class ModelControls {
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
-		this.#host.clearActiveRetryFallback();
+		this.#host.clearActiveRetryFallback(formatModelStringWithRouting(targetModel));
 		await this.#host.setModelWithProviderSessionReset(targetModel);
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
@@ -424,7 +424,7 @@ export class ModelControls {
 
 		// Apply model
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
-		this.#host.clearActiveRetryFallback();
+		this.#host.clearActiveRetryFallback(formatModelStringWithRouting(next.model));
 		await this.#host.setModelWithProviderSessionReset(next.model);
 		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
@@ -455,7 +455,7 @@ export class ModelControls {
 		}
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
-		this.#host.clearActiveRetryFallback();
+		this.#host.clearActiveRetryFallback(formatModelStringWithRouting(nextModel));
 		await this.#host.setModelWithProviderSessionReset(nextModel);
 		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
