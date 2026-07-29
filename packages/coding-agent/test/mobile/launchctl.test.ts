@@ -21,6 +21,7 @@ import {
 	bootstrapService,
 	LAUNCHD_EEXIST,
 	readKeychainPassword,
+	reapStaleSessionJobs,
 	submitSessionHostJob,
 	writeKeychainPassword,
 } from "@oh-my-pi/pi-coding-agent/mobile/launchctl";
@@ -131,15 +132,63 @@ describe("submitSessionHostJob", () => {
 		const label = "sh.omp.mobile-session.123.example";
 		const command = ["/usr/bin/caffeinate", "-dims", "/tmp/omp $(touch nope)", "mobile", "host", "--cwd", "/tmp/a b"];
 
-		const result = await submitSessionHostJob(label, command);
+		const result = await submitSessionHostJob(label, command, "/tmp/run-mobile");
 
 		expect(result.ok).toBe(true);
 		const submitted = calls[0]?.command ?? [];
-		expect(submitted.slice(0, 7)).toEqual(["/bin/launchctl", "submit", "-l", label, "--", "/bin/sh", "-c"]);
-		expect(submitted[7]).toContain('"$@"');
-		expect(submitted[7]).toContain('remove "$label"');
-		expect(submitted[7]).not.toContain(command[2]);
-		expect(submitted.slice(8)).toEqual(["omp-mobile-host-job", label, ...command]);
+		const logFile = "/tmp/run-mobile/session-jobs.log";
+		// `-o`/`-e` are what make a wrapper that cannot exec its command visible:
+		// `submit` itself exits 0 either way.
+		expect(submitted.slice(0, 11)).toEqual([
+			"/bin/launchctl",
+			"submit",
+			"-l",
+			label,
+			"-o",
+			logFile,
+			"-e",
+			logFile,
+			"--",
+			"/bin/sh",
+			"-c",
+		]);
+		expect(submitted[11]).toContain('"$@"');
+		expect(submitted[11]).toContain('remove "$label"');
+		expect(submitted[11]).not.toContain(command[2]);
+		expect(submitted.slice(12)).toEqual(["omp-mobile-host-job", label, ...command]);
+	});
+});
+
+describe("reapStaleSessionJobs", () => {
+	it("removes only prefixed labels launchd lists with no running pid", async () => {
+		// `launchctl list` columns are PID, last exit status, label. A one-shot job
+		// that should have removed itself and shows no pid is a leak; one with a pid
+		// is a live session and must be left alone.
+		const calls = stubExec(call =>
+			call.command[1] === "list"
+				? {
+						stdout: [
+							"PID\tStatus\tLabel",
+							"4242\t0\tsh.omp.mobile-session.1.live",
+							"-\t0\tsh.omp.mobile-session.1.dead",
+							"-\t0\tsh.omp.mobile-portal",
+							"-\t0\tcom.apple.something",
+						].join("\n"),
+					}
+				: {},
+		);
+
+		const removed = await reapStaleSessionJobs("sh.omp.mobile-session.");
+
+		expect(removed).toEqual(["sh.omp.mobile-session.1.dead"]);
+		expect(calls.filter(call => call.command[1] === "remove").map(call => call.command[2])).toEqual([
+			"sh.omp.mobile-session.1.dead",
+		]);
+	});
+
+	it("reports nothing rather than throwing when launchctl list fails", async () => {
+		stubExec(() => ({ exitCode: 1, stderr: "nope" }));
+		expect(await reapStaleSessionJobs("sh.omp.mobile-session.")).toEqual([]);
 	});
 });
 

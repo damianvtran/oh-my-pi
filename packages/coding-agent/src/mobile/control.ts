@@ -29,19 +29,34 @@ import * as path from "node:path";
 import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { listAllSessions } from "../session/session-listing";
-import { FileSessionStorage } from "../session/session-storage";
+import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
 import { isDarwin, submitSessionHostJob } from "./launchctl";
-import { mobileRuntimeDir } from "./paths";
-import { resolveOmpLaunchArgv } from "./service";
+import { mobileRuntimeDir, SESSION_JOB_LABEL_PREFIX } from "./paths";
+import { launchEnvironment, resolveOmpLaunchArgv } from "./service";
 import { readMobileState } from "./state";
 import type { PortalControl, PortalDirectorySuggestions } from "./types";
 
 /**
  * caffeinate wraps the nanny the same way it wraps both services (see
  * service.ts): a phone-spawned session is by definition unattended, so the
- * machine must not doze off mid-task. macOS-only, matching the services.
+ * machine must not doze off mid-task. It is not redundant with the portal's own
+ * caffeinate: `omp mobile stop` (or an update between the two jobs) ends the
+ * portal's assertion while a phone-started session is still working, and the
+ * whole point of the sibling-job design is that the session does not depend on
+ * the portal being up. macOS-only, matching the services.
  */
 const CAFFEINATE = "/usr/bin/caffeinate";
+
+/**
+ * How long `{home, recent}` is reused before rescanning the session store.
+ *
+ * `listAllSessions` stats every session file and re-reads the head and tail of
+ * any that changed, which is a lot of work for the one field this needs. The
+ * answer only changes when a session starts, so a few seconds of staleness is
+ * invisible on a phone while removing the scan from every tap of "+ new".
+ */
+const SUGGESTION_TTL_MS = 5_000;
+let suggestionCache: { at: number; value: PortalDirectorySuggestions } | undefined;
 
 /**
  * PTY size for a spawned session. Nobody ever looks at this terminal — output
@@ -76,36 +91,56 @@ export async function validateSessionCwd(input: string): Promise<string> {
 }
 
 /**
- * Home plus recent session directories for the new-session picker. Deleted
- * directories are dropped before they reach the phone; home has its own named
- * choice rather than being an indistinguishable path in the recent list.
+ * Home plus recent session directories for the new-session picker.
+ *
+ * Existence is checked *before* the cap, not after: scratch directories under
+ * `/tmp`, deleted worktrees and removed checkouts are exactly the most recently
+ * used ones, so filtering afterwards let dead entries eat every slot and could
+ * hand the phone an empty list while live directories sat just past the cut.
+ *
+ * `storage` is injectable so tests can pin ordering, dedupe and the existence
+ * rule against a fixture instead of whatever sessions the developer happens to
+ * have.
  */
-export async function listDirectorySuggestions(limit = 8): Promise<PortalDirectorySuggestions> {
+export async function listDirectorySuggestions(
+	limit = 8,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<PortalDirectorySuggestions> {
 	const home = os.homedir();
-	const sessions = await listAllSessions(new FileSessionStorage()).catch(() => []);
+	const sessions = await listAllSessions(storage).catch(() => []);
 	const seen = new Set<string>([home]);
-	const candidates: string[] = [];
+	const recent: string[] = [];
 	for (const session of sessions) {
 		if (!session.cwd || seen.has(session.cwd)) continue;
 		seen.add(session.cwd);
-		candidates.push(session.cwd);
-		if (candidates.length >= limit) break;
-	}
-	const recent: string[] = [];
-	for (const dir of candidates) {
-		if (
-			await fs.stat(dir).then(
-				s => s.isDirectory(),
-				() => false,
-			)
-		)
-			recent.push(dir);
+		const isDir = await fs.stat(session.cwd).then(
+			s => s.isDirectory(),
+			() => false,
+		);
+		if (!isDir) continue;
+		recent.push(session.cwd);
+		if (recent.length >= limit) break;
 	}
 	return { home, recent };
 }
 
-/** argv that runs the nanny for one spawned session: `omp mobile host --cwd <dir>`. */
+/** Cached view of {@link listDirectorySuggestions} for the portal's route. */
+async function cachedDirectorySuggestions(): Promise<PortalDirectorySuggestions> {
+	const now = Date.now();
+	if (suggestionCache && now - suggestionCache.at < SUGGESTION_TTL_MS) return suggestionCache.value;
+	const value = await listDirectorySuggestions();
+	suggestionCache = { at: now, value };
+	return value;
+}
+
+/**
+ * argv that runs the nanny for one spawned session: `omp mobile host --cwd
+ * <dir>`. The empty-argv guard lives here so both spawn paths get it: a
+ * truncated install record passes `readMobileState`'s shape check as `[]`, which
+ * would otherwise make the literal string "mobile" the executable.
+ */
 export function buildHostArgv(launchArgv: string[], cwd: string): string[] {
+	if (launchArgv.length === 0) throw new Error("mobile: cannot resolve the omp launch argv");
 	return [...launchArgv, "mobile", "host", "--cwd", cwd];
 }
 
@@ -121,8 +156,8 @@ export function buildHostArgv(launchArgv: string[], cwd: string): string[] {
 export async function spawnSessionHost(launchArgv: string[], cwd: string, log: (msg: string) => void): Promise<void> {
 	const hostArgv = buildHostArgv(launchArgv, cwd);
 	if (isDarwin()) {
-		const label = `sh.omp.mobile-session.${process.pid}.${Date.now().toString(36)}.${crypto.randomUUID().slice(0, 8)}`;
-		const result = await submitSessionHostJob(label, [CAFFEINATE, "-dims", ...hostArgv]);
+		const label = `${SESSION_JOB_LABEL_PREFIX}${process.pid}.${Date.now().toString(36)}.${crypto.randomUUID().slice(0, 8)}`;
+		const result = await submitSessionHostJob(label, [CAFFEINATE, "-dims", ...hostArgv], mobileRuntimeDir());
 		if (!result.ok) {
 			log(`session host submit failed label=${label} cwd=${cwd} code=${result.exitCode} ${result.stderr}`);
 			throw new Error("could not start session host");
@@ -148,9 +183,13 @@ export function defaultPortalControl(log: (msg: string) => void): PortalControl 
 		async startSession(cwd) {
 			const dir = await validateSessionCwd(cwd);
 			const launchArgv = (await readMobileState())?.launchArgv ?? resolveOmpLaunchArgv();
-			return spawnSessionHost(launchArgv, dir, log);
+			await spawnSessionHost(launchArgv, dir, log);
+			// The resolved path goes back to the phone so its remembered list holds
+			// what the server actually used: `~/x` and `/Users/me/x` are one entry,
+			// and the picker can preselect it.
+			return dir;
 		},
-		listDirectories: () => listDirectorySuggestions(),
+		listDirectories: () => cachedDirectorySuggestions(),
 	};
 }
 
@@ -164,11 +203,16 @@ export function defaultPortalControl(log: (msg: string) => void): PortalControl 
  * and nothing appeared" is debuggable after the fact; two short lines per
  * spawned session cannot grow meaningfully.
  *
- * The child inherits this process's environment, which is the portal's launchd
- * environment. That is deliberate rather than a gap: it is the same
- * PATH/HOME/profile context the install record was written from, so a
- * profile-scoped install spawns sessions that publish to the link directory
- * this profile's portal actually watches.
+ * The child's environment is built explicitly rather than inherited. On macOS
+ * this nanny is created by launchd (`launchctl submit`), not forked from the
+ * portal, and a launchd job inherits almost nothing: a phone-started session was
+ * observed running with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so its `bash` tool
+ * calls could not see bun, homebrew or `~/.local/bin` — a session that looks
+ * healthy in the room and then fails at the first real command. `launchEnvironment`
+ * is the same set the service plists spell out for exactly this reason; anything
+ * already in this process's environment (a profile's `PI_CONFIG_DIR`, for
+ * instance) is kept underneath it so a profile-scoped install still publishes to
+ * the link directory its own portal watches.
  */
 export async function runSessionHost(cwd: string): Promise<number> {
 	const dir = await validateSessionCwd(cwd);
@@ -185,7 +229,14 @@ export async function runSessionHost(cwd: string): Promise<number> {
 	await note(`spawn cwd=${dir}`);
 	let result: PtyRunResult;
 	try {
-		result = await pty.startArgv({ application, args, cwd: dir, cols: PTY_COLS, rows: PTY_ROWS });
+		result = await pty.startArgv({
+			application,
+			args,
+			cwd: dir,
+			cols: PTY_COLS,
+			rows: PTY_ROWS,
+			env: { ...(process.env as Record<string, string>), ...launchEnvironment(os.homedir()) },
+		});
 	} catch (err) {
 		await note(`spawn failed cwd=${dir}: ${err instanceof Error ? err.message : String(err)}`);
 		logger.warn("mobile session host failed to start", { cwd: dir, error: String(err) });

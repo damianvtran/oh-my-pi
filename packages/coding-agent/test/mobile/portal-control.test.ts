@@ -35,9 +35,12 @@ function fakeControl(): FakeControl {
 	const started: string[] = [];
 	return {
 		started,
-		async startSession(cwd: string): Promise<void> {
+		async startSession(cwd: string): Promise<string> {
 			if (!cwd.startsWith("/")) throw new Error("directory must be an absolute path (~/ is fine)");
 			started.push(cwd);
+			// The real control answers with the normalized path; mimic that so the
+			// route's contract with the phone is exercised, not just its status code.
+			return cwd.replace(/\/+$/, "");
 		},
 		listDirectories: async () => DIRECTORIES,
 	};
@@ -109,15 +112,17 @@ describe("portal session control routes", () => {
 		expect(await res.json()).toEqual(DIRECTORIES);
 	});
 
-	it("spawns a session nanny for a valid directory", async () => {
+	it("spawns a session nanny for a valid directory and answers with the resolved path", async () => {
 		const res = await api("/api/sessions/start", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ cwd: "/tmp/project-a" }),
+			body: JSON.stringify({ cwd: "/tmp/project-a/" }),
 		});
 		expect(res.status).toBe(201);
-		expect(await res.json()).toEqual({ ok: true });
-		expect(control.started).toEqual(["/tmp/project-a"]);
+		// The resolved path is what the phone remembers, so a trailing slash or a
+		// `~` never splits one directory into two entries in its picker.
+		expect(await res.json()).toEqual({ ok: true, cwd: "/tmp/project-a" });
+		expect(control.started).toEqual(["/tmp/project-a/"]);
 	});
 
 	it("answers a validation failure in words the phone can show", async () => {

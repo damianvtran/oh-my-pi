@@ -158,8 +158,12 @@ export interface PortalDirectorySuggestions {
  * `defaultPortalControl` in `control.ts`.
  */
 export interface PortalControl {
-	/** Validate the directory and spawn a session nanny in it. Throws with a phone-safe message on bad input. */
-	startSession(cwd: string): Promise<void>;
+	/**
+	 * Validate the directory and spawn a session nanny in it, answering with the
+	 * resolved absolute path so the phone remembers what the server used rather
+	 * than what was typed. Throws with a phone-safe message on bad input.
+	 */
+	startSession(cwd: string): Promise<string>;
 	/** Home plus recent session directories for the new-session picker. */
 	listDirectories(): Promise<PortalDirectorySuggestions>;
 }
@@ -170,7 +174,8 @@ export interface PortalControl {
 // TUI-shaped cards, so tool calls stay structured instead of flattened to text.
 
 export type TranscriptItem =
-	| { kind: "user"; text: string }
+	/** `from` names another room participant; absent when this portal sent it. */
+	| { kind: "user"; text: string; from?: string }
 	| { kind: "assistant"; text: string }
 	| { kind: "thinking"; text: string }
 	| { kind: "tool"; id: string; name: string; args: Record<string, unknown>; output?: string; isError?: boolean };

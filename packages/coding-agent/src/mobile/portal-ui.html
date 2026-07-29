@@ -18,6 +18,10 @@
   --bg: #0f0b14; --bg-raised: #16111c; --bg-inset: #09060c; --bg-overlay: #211b28;
   --fg: #e6e3ea; --fg-muted: #a49faa; --fg-faint: #6e6974;
   --accent: #ed4abf; --accent-muted: oklch(0.674 0.23 341 / 18%);
+  /* Fill colour for filled buttons. Split from `--accent` because the label sits
+     on top of it: `--accent` is tuned for text and borders on the page
+     background, where it is already legible. */
+  --accent-solid: #ed4abf;
   --ok: #68ca80; --err: #f05653; --warn: #e4b33f; --link: #5ad8e5;
   --border: oklch(1 0 0 / 9%); --border-strong: oklch(1 0 0 / 13%);
   --ring: oklch(0.817 0.112 205 / 70%);
@@ -30,6 +34,9 @@
     --bg-inset: oklch(0.95 0.006 307); --bg-overlay: oklch(0.965 0.006 307);
     --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.58 0.025 307);
     --accent: oklch(0.62 0.23 341); --accent-muted: oklch(0.62 0.23 341 / 14%);
+    /* Darker than `--accent`: white-on-accent is 3.94:1 in this palette, below
+       the 4.5:1 AA floor for 12px labels. */
+    --accent-solid: oklch(0.52 0.21 341);
     --ok: oklch(0.55 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
     --link: #0f7a88;
     --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
@@ -42,6 +49,7 @@
     --bg-inset: oklch(0.95 0.006 307); --bg-overlay: oklch(0.965 0.006 307);
     --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.58 0.025 307);
     --accent: oklch(0.62 0.23 341); --accent-muted: oklch(0.62 0.23 341 / 14%);
+    --accent-solid: oklch(0.52 0.21 341);
     --ok: oklch(0.55 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
     --link: #0f7a88;
     --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
@@ -84,15 +92,30 @@ header {
 .brand { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .brand b { font-weight: 650; letter-spacing: 0.01em; }
 .brand .sub { color: var(--fg-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* One control scale for the whole app. 44px is the iOS minimum and this surface
+   is phone-only, so the pill keeps its dense look while the tap target is a
+   thumb's worth of it — the header buttons used to be 26px tall and 6px apart,
+   which put `stop` one mis-tap away from navigating out of the session. */
 .btn {
-  padding: 3px 9px; color: var(--fg-muted); background: var(--bg-raised);
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px; padding: 3px 12px;
+  color: var(--fg-muted); background: var(--bg-raised);
   border: 1px solid var(--hairline); border-radius: var(--radius-ctl);
   transition: background .14s ease, color .14s ease, border-color .14s ease;
 }
 .btn:hover { background: var(--hover-wash); color: var(--fg); border-color: var(--border-strong); }
 .btn:active { transform: scale(.97); }
-.btn-accent { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+/* `--accent-solid` rather than `--accent`: white-on-accent measured 3.94:1 in the
+   light palette, under the 4.5:1 floor for 12px text. */
+.btn-accent { color: var(--bg); background: var(--accent-solid); border-color: var(--accent-solid); }
 .btn-stop { color: var(--err); }
+.btn-go { color: var(--ok); }
+/* A disabled control must not keep offering hover and press feedback: the start
+   button spends a whole request round trip disabled, which on a phone tunnel is
+   exactly when a second tap happens. */
+.btn:disabled { opacity: .55; cursor: default; }
+.btn:disabled:active { transform: none; }
+.btn:disabled:hover { background: var(--bg-raised); color: var(--fg-muted); border-color: var(--hairline); }
 
 main { overflow-y: auto; overscroll-behavior: contain; }
 .wrap { max-width: 880px; margin: 0 auto; padding: 10px 12px 16px; }
@@ -146,7 +169,7 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
   display: flex; align-items: flex-start; gap: 8px;
   padding: 8px 10px; margin: 8px 0 0;
   border: 1px solid var(--border); border-left: 2px solid var(--accent);
-  border-radius: var(--radius); background: var(--bg-raised);
+  border-radius: var(--radius-card); background: var(--bg-raised);
 }
 .working .spin { flex: none; color: var(--accent); width: 1ch; }
 .working .txt { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -262,18 +285,36 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 }
 .nf-title { font-weight: 650; color: var(--fg); margin-bottom: 8px; }
 .nf-field { display: grid; gap: 4px; margin-top: 8px; }
-.nf-field > span { color: var(--fg-faint); font-size: 11px; }
+/* `--fg-muted`, not `--fg-faint`: these are the form's only labels, and at 11px
+   faint measured 3.55:1 — structure the user needs, below the contrast floor. */
+.nf-field > span { color: var(--fg-muted); font-size: 11px; }
 .nf-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 #newsuggest, #newdir {
-  width: 100%; min-width: 0; min-height: 38px; padding: 8px;
+  width: 100%; min-width: 0; min-height: 44px; padding: 8px;
   background: var(--bg-inset); border: 1px solid var(--hairline);
   border-radius: var(--radius-ctl); color: var(--fg);
 }
 #newsuggest { appearance: auto; }
 #newdir::placeholder { color: var(--fg-faint); }
-.nf-actions .btn { min-height: 36px; padding-inline: 12px; }
-.nf-status { min-width: 0; font-size: 11px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.nf-status.err { color: var(--err); white-space: normal; }
+/* The primary needs to be the wider of the two: `cancel` is the longer word and
+   would otherwise be the physically larger button. */
+.nf-actions .btn-accent { min-width: 96px; }
+/* Its own line, and wrapping: sharing the button row truncated the one message
+   that matters after committing ("started — the session appear…"). */
+.nf-status { margin-top: 8px; font-size: 11px; color: var(--fg-muted); }
+.nf-status.err { color: var(--err); }
+
+/* Interruption marker in the transcript's own idiom (same hairline rule as a
+   tool's `Output` divider). Without it an aborted turn left no trace at all: a
+   prompt with no answer read as the agent ignoring the user, and a resumed turn
+   ran straight on from the truncated one with no boundary. */
+.stopped {
+  display: flex; align-items: center; gap: 8px;
+  margin: 10px 0; color: var(--warn); font-size: 11px;
+}
+.stopped::after { content: ""; flex: 1; border-top: 1px solid var(--hairline); }
+/* A prompt another participant sent, named so it does not read as the phone's own. */
+.user-from { color: var(--fg-faint); }
 
 /* ── composer ────────────────────────────────────────────────────────── */
 footer {
@@ -284,11 +325,14 @@ footer {
 footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
 .prompt { color: var(--accent); flex: none; }
 #msg {
-  flex: 1; min-width: 0; padding: 6px 8px;
+  flex: 1; min-width: 0; min-height: 44px; padding: 6px 8px;
   background: var(--bg-inset); border: 1px solid var(--hairline);
   border-radius: var(--radius-ctl); color: var(--fg);
 }
 #msg::placeholder { color: var(--fg-faint); }
+/* Stop and resume are two states of one control, so they share one fixed slot:
+   the row's geometry cannot shift under a thumb that is already reaching for it. */
+#turn { flex: none; min-width: 84px; }
 
 @media (max-width: 640px) {
   .wrap { padding: 8px 10px 14px; }
@@ -302,31 +346,30 @@ footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
     <div class="brand"><b>omp</b><span class="sub" id="sub">sessions</span></div>
     <div style="display:flex;gap:6px">
       <button class="btn" id="back" hidden>← all</button>
-      <button class="btn btn-stop" id="stop" hidden>stop</button>
-      <button class="btn" id="new">+ new</button>
+      <button class="btn" id="new" aria-expanded="false" aria-controls="newform">+ new</button>
     </div>
   </header>
   <main><div class="wrap"><div id="newform" hidden>
     <div class="nf-title">start a new session</div>
     <label class="nf-field">
-      <span>suggested directory</span>
-      <select id="newsuggest"><option value="">loading suggestions…</option></select>
-    </label>
-    <label class="nf-field">
       <span>directory</span>
-      <input id="newdir" placeholder="~/ or an absolute path" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <select id="newsuggest"><option value="">loading…</option></select>
+    </label>
+    <label class="nf-field" id="newdirfield" hidden>
+      <span>path</span>
+      <input id="newdir" placeholder="~/ or an absolute path" enterkeyhint="go" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
     </label>
     <div class="nf-row nf-actions">
       <button class="btn btn-accent" id="start">start</button>
       <button class="btn" id="cancelnew">cancel</button>
-      <span class="nf-status" id="newstatus"></span>
     </div>
+    <div class="nf-status" id="newstatus" role="status" aria-live="polite"></div>
   </div><div id="list"></div><div id="detail" hidden><div id="ask" hidden></div><div id="log"></div><div id="todos"></div><div id="working" class="working" hidden></div></div></div></main>
   <footer id="composer" hidden>
     <div class="wrap">
       <span class="prompt">›</span>
-      <input id="msg" placeholder="steer this session" autocomplete="off" autocapitalize="off" spellcheck="false">
-      <button class="btn btn-accent" id="resume" hidden>▶ resume</button>
+      <input id="msg" placeholder="steer this session" enterkeyhint="send" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="btn btn-stop" id="turn" hidden title="stop the current turn — the session stays open">stop</button>
       <button class="btn btn-accent" id="send">send</button>
     </div>
   </footer>
@@ -530,7 +573,12 @@ function renderTodos(phases) {
 
 function renderTranscript(items) {
   return items.map((it, i) => {
-    if (it.kind === "user") return `<div class="turn"><div class="user-line">${esc(it.text)}</div></div>`;
+    if (it.kind === "user") {
+      // `from` is only set for a prompt another participant sent, so an unnamed
+      // card is unambiguously this phone's own.
+      const who = it.from ? `<span class="user-from">${esc(it.from)} </span>` : "";
+      return `<div class="turn"><div class="user-line">${who}${esc(it.text)}</div></div>`;
+    }
     if (it.kind === "assistant") return `<div class="turn"><div class="md">${md(it.text)}</div></div>`;
     if (it.kind === "thinking") return `<div class="turn"><div class="think">${esc(it.text)}</div></div>`;
     const { label, arg } = toolTitle(it);
@@ -609,9 +657,78 @@ async function refresh() {
           }
         </button>`;
       }).join("")
-    : `<div class="empty">no live omp sessions</div>`;
+    : `<div class="empty">no live sessions yet — tap “+ new” to start one</div>`;
   ensureSpinner();
+  // A session started from the phone takes a few seconds to publish its room, and
+  // it lands in an unsorted list of look-alike cards. The user asked for that one
+  // session, so open it the moment it exists rather than making them hunt for it.
+  if (awaitingCwd) {
+    const arrived = sessions.find(s => s.cwd === awaitingCwd);
+    if (arrived) {
+      awaitingCwd = "";
+      $("start").disabled = false;
+      open(arrived.pid);
+      return;
+    }
+  }
   for (const el of document.querySelectorAll(".card[data-pid]")) el.onclick = () => open(Number(el.dataset.pid));
+}
+
+/* Turn state for the open session, mirrored from the SSE frames so the header
+   word, the turn control and the transcript marker all read the same truth. */
+let streaming = false, interrupted = false;
+
+/* The abort itself leaves no card in the transcript — the host records a stop as
+   an assistant `stopReason`, not an entry — so a prompt whose turn was killed
+   before it emitted text read as the agent ignoring the user, and a resumed turn
+   ran straight on from the truncated one. This appends the boundary the story
+   needs, and removes it as soon as work resumes. */
+function renderStopMarker() {
+  const existing = $("log").querySelector(".stopped");
+  if (!interrupted || streaming) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  const marker = document.createElement("div");
+  marker.className = "stopped";
+  marker.textContent = "⨯ stopped — the session is still open";
+  $("log").append(marker);
+}
+
+/* One control, three states. Stop and resume are the two halves of "the turn",
+   are mutually exclusive, and live in the same composer slot next to send —
+   putting stop in the far top corner meant the most time-critical button in the
+   app sat at the least reachable point, 6px from the button that navigates away.
+   `send` keeps the single accent fill so the row never shows two primaries. */
+function renderTurnControl(streaming, interrupted) {
+  const turn = $("turn");
+  turn.disabled = false;
+  if (streaming) {
+    turn.hidden = false;
+    turn.textContent = "stop";
+    turn.className = "btn btn-stop";
+    turn.title = "stop the current turn — the session stays open";
+    return;
+  }
+  if (interrupted) {
+    turn.hidden = false;
+    turn.textContent = "resume";
+    turn.className = "btn btn-go";
+    turn.title = "continue the turn you stopped";
+    return;
+  }
+  turn.hidden = true;
+}
+
+/* An empty transcript is the guaranteed first screen of a phone-started session,
+   so it has to say something: which directory the session is in (the header
+   truncates it to a basename on a narrow screen) and what to do next. */
+function renderEmptyLog(cwd) {
+  $("log").innerHTML = `<div class="empty">no messages yet — send the first instruction below${
+    cwd ? `<div class="card-cwd" style="display:block;margin-top:6px">${esc(cwd)}</div>` : ""
+  }</div>`;
+  $("msg").placeholder = "what should it work on?";
 }
 
 function open(pid) {
@@ -619,29 +736,42 @@ function open(pid) {
   if (location.hash !== `#${pid}`) location.hash = `#${pid}`;
   $("list").hidden = true; $("detail").hidden = false;
   $("back").hidden = false; $("composer").hidden = false;
-  // Stop and resume are state-driven: stop only exists while a turn runs, and
-  // resume only after a turn was cancelled — both toggle on the SSE snapshot
-  // that arrives right after connect.
-  $("stop").hidden = true; $("resume").hidden = true; $("new").hidden = true;
+  hideNewForm();
+  // The turn control is state-driven: the SSE snapshot arrives right after
+  // connect and decides between stop, resume, and neither.
+  renderTurnControl(false, false);
+  $("new").hidden = true;
   $("log").textContent = "";
+  $("msg").placeholder = "steer this session";
+  interrupted = false;
   renderWorking(null);
   es = new EventSource(`/api/sessions/${pid}/events`);
   es.addEventListener("state", e => {
     const s = JSON.parse(e.data);
     const label = innerWidth <= 640 ? (s.cwd ?? "").split("/").pop() || String(pid) : (s.cwd ?? String(pid));
-    $("sub").textContent = `${label} · ${s.isStreaming ? "working" : "idle"}`;
-    // Stop is the Escape key: meaningful only while a turn is running.
-    $("stop").hidden = !s.isStreaming;
+    // "stopped" is a third state, not a flavour of idle: after pressing stop the
+    // header used to read exactly like a turn that finished on its own.
+    const state = s.isStreaming ? "working" : interrupted ? "stopped" : "idle";
+    $("sub").textContent = `${label} · ${state}`;
+    streaming = s.isStreaming;
+    renderTurnControl(streaming, interrupted && !streaming);
+    if (!$("log").querySelector(".turn")) renderEmptyLog(s.cwd);
   });
   es.addEventListener("transcript", e => {
     const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 40;
-    $("log").innerHTML = renderTranscript(JSON.parse(e.data));
+    const items = JSON.parse(e.data);
+    if (items.length === 0) renderEmptyLog();
+    else {
+      $("log").innerHTML = renderTranscript(items);
+      $("msg").placeholder = "steer this session";
+    }
     for (const b of $("log").querySelectorAll("[data-expand]")) {
       b.onclick = () => {
         $("log").querySelector(`[data-body="${b.dataset.expand}"]`)?.classList.remove("clip");
         b.parentElement.remove();
       };
     }
+    renderStopMarker();
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
   es.addEventListener("todos", e => {
@@ -655,7 +785,10 @@ function open(pid) {
     renderWorking(a);
     // Resume exists only for a cancelled turn. Ordinary idle means the work
     // finished, so the composer alone is the way back in.
-    $("resume").hidden = !(a.interrupted && !a.working);
+    interrupted = Boolean(a.interrupted);
+    streaming = Boolean(a.working);
+    renderTurnControl(streaming, interrupted && !a.working);
+    renderStopMarker();
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
   es.addEventListener("ui-request", e => showAsk(JSON.parse(e.data)));
@@ -699,9 +832,10 @@ const post = (url, body) =>
 $("back").onclick = () => {
   es?.close(); es = null; current = null;
   $("list").hidden = false; $("detail").hidden = true;
-  $("back").hidden = true; $("stop").hidden = true; $("resume").hidden = true; $("composer").hidden = true;
+  $("back").hidden = true; $("turn").hidden = true; $("composer").hidden = true;
   $("new").hidden = false;
   $("ask").hidden = true; $("todos").innerHTML = ""; $("sub").textContent = "sessions";
+  streaming = false; interrupted = false;
   renderWorking(null);
   if (location.hash) history.replaceState(null, "", location.pathname);
   refresh();
@@ -713,11 +847,24 @@ $("send").onclick = async () => {
   await post(`/api/sessions/${current}/prompt`, { text });
 };
 $("msg").onkeydown = e => { if (e.key === "Enter") $("send").click(); };
-$("stop").onclick = () => post(`/api/sessions/${current}/interrupt`);
-$("resume").onclick = async () => {
-  // Optimistic: the agent_start that answers the prompt would hide it anyway.
-  $("resume").hidden = true;
-  await post(`/api/sessions/${current}/resume`);
+
+/* The one turn control: stop while a turn runs, resume after one was stopped.
+   Both give immediate feedback by disabling — over a phone tunnel the round trip
+   is visible, and an unacknowledged tap invites a second one — and both restore
+   themselves if the request fails, since a stop that never landed must not leave
+   the phone believing it did. */
+$("turn").onclick = async () => {
+  const turn = $("turn");
+  const wasStreaming = streaming;
+  turn.disabled = true;
+  const res = await post(`/api/sessions/${current}/${wasStreaming ? "interrupt" : "resume"}`).catch(() => null);
+  if (!res?.ok) {
+    turn.disabled = false;
+    return;
+  }
+  // The answering SSE frame decides what the control becomes; hide the resume
+  // affordance now so a second tap cannot queue a second continue.
+  if (!wasStreaming) turn.hidden = true;
 };
 
 /* New-session form. Successful choices are remembered by this browser: the
@@ -726,6 +873,12 @@ $("resume").onclick = async () => {
    a typo never becomes the next default. */
 const DIRECTORY_MEMORY_KEY = "omp.mobile.directories.v1";
 const DIRECTORY_MEMORY_LIMIT = 8;
+/** Sentinel option value that reveals the free-text field. */
+const CUSTOM_PATH = "\u0000custom";
+/** Set once the user edits the path field, so a late fetch cannot overwrite it. */
+let pathDirty = false;
+/** cwd of a start that has been accepted but whose session has not appeared yet. */
+let awaitingCwd = "";
 
 function loadDirectoryMemory() {
   try {
@@ -743,7 +896,15 @@ function rememberDirectory(cwd) {
   const recent = [cwd, ...memory.recent.filter(dir => dir !== cwd)].slice(0, DIRECTORY_MEMORY_LIMIT);
   try { localStorage.setItem(DIRECTORY_MEMORY_KEY, JSON.stringify({ last: cwd, recent })); } catch {}
 }
-function addDirectoryGroup(select, label, directories, seen) {
+/* Name first, then the path: a native select clips the tail, which is exactly the
+   segment that tells `…/oh-my-pi` from `…/oh-my-pi-mobile-session-control` apart.
+   `~` buys back the width the home prefix costs. */
+function directoryLabel(dir, home) {
+  const short = home && dir.startsWith(home) ? `~${dir.slice(home.length)}` : dir;
+  const name = dir.replace(/\/+$/, "").split("/").pop();
+  return name && short !== name ? `${name} — ${short}` : short;
+}
+function addDirectoryGroup(select, label, directories, seen, home) {
   const choices = directories.filter(dir => typeof dir === "string" && dir && !seen.has(dir));
   if (!choices.length) return;
   const group = document.createElement("optgroup");
@@ -752,24 +913,22 @@ function addDirectoryGroup(select, label, directories, seen) {
     seen.add(dir);
     const option = document.createElement("option");
     option.value = dir;
-    option.textContent = dir;
+    option.textContent = directoryLabel(dir, home);
     group.append(option);
   }
   select.append(group);
 }
+/* One control for one value. The select is the thing you operate; the text field
+   only appears for a path that is not in the list, so the common case is a single
+   row showing a single directory instead of two rows showing the same string. */
 function renderDirectorySuggestions(suggestions) {
   const select = $("newsuggest");
-  const input = $("newdir");
   const memory = loadDirectoryMemory();
   const home = typeof suggestions?.home === "string" ? suggestions.home : "";
   const recent = Array.isArray(suggestions?.recent) ? suggestions.recent : [];
   const seen = new Set();
   select.replaceChildren();
 
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = "choose a saved or recent directory";
-  select.append(placeholder);
   if (home) {
     seen.add(home);
     const option = document.createElement("option");
@@ -777,59 +936,138 @@ function renderDirectorySuggestions(suggestions) {
     option.textContent = `home — ${home}`;
     select.append(option);
   }
-  addDirectoryGroup(select, "recently selected on this phone", memory.recent, seen);
-  addDirectoryGroup(select, "recent omp sessions", recent, seen);
+  addDirectoryGroup(select, "on this phone", memory.recent, seen, home);
+  addDirectoryGroup(select, "recent sessions", recent, seen, home);
+  const custom = document.createElement("option");
+  custom.value = CUSTOM_PATH;
+  custom.textContent = "type a path…";
+  select.append(custom);
 
   const preferred = memory.last || home;
-  input.value = preferred;
-  select.value = seen.has(preferred) ? preferred : "";
-}
-async function loadDirectorySuggestions() {
-  const memory = loadDirectoryMemory();
-  $("newdir").value = memory.last;
-  const select = $("newsuggest");
-  select.replaceChildren();
-  const loading = document.createElement("option");
-  loading.value = ""; loading.textContent = "loading suggestions…";
-  select.append(loading);
-  const res = await api("/api/directories");
-  if (!res.ok) {
-    loading.textContent = "type a directory below";
+  if (pathDirty) {
+    // The user is already typing: their input outranks anything that arrives late.
+    select.value = CUSTOM_PATH;
+    showPathField(true);
     return;
   }
-  renderDirectorySuggestions(await res.json());
+  if (preferred && seen.has(preferred)) {
+    select.value = preferred;
+    $("newdir").value = preferred;
+    showPathField(false);
+  } else if (preferred) {
+    select.value = CUSTOM_PATH;
+    $("newdir").value = preferred;
+    showPathField(true);
+  } else {
+    select.selectedIndex = 0;
+    $("newdir").value = select.value === CUSTOM_PATH ? "" : select.value;
+    showPathField(select.value === CUSTOM_PATH);
+  }
+}
+function showPathField(show) {
+  $("newdirfield").hidden = !show;
+}
+/** The directory the form will submit: the select, unless a custom path is showing. */
+function chosenDirectory() {
+  const select = $("newsuggest");
+  if (select.value === CUSTOM_PATH || $("newdirfield").hidden === false) return $("newdir").value.trim();
+  return select.value.trim();
+}
+async function loadDirectorySuggestions() {
+  const select = $("newsuggest");
+  const memory = loadDirectoryMemory();
+  if (!pathDirty && memory.last) $("newdir").value = memory.last;
+  select.replaceChildren();
+  const loading = document.createElement("option");
+  loading.value = ""; loading.textContent = "loading…";
+  select.append(loading);
+  try {
+    const res = await api("/api/directories");
+    if (!res.ok) throw new Error(String(res.status));
+    renderDirectorySuggestions(await res.json());
+  } catch {
+    // A dropped tunnel must still leave a usable form rather than a stuck spinner.
+    loading.textContent = "type a path…";
+    loading.value = CUSTOM_PATH;
+    select.value = CUSTOM_PATH;
+    showPathField(true);
+  }
 }
 function hideNewForm() {
   $("newform").hidden = true;
+  $("new").setAttribute("aria-expanded", "false");
+  $("new").textContent = "+ new";
   const st = $("newstatus");
   st.textContent = ""; st.classList.remove("err");
 }
+/* A toggle, not a one-way door: `+ new` sits where a thumb reaches to dismiss
+   things, and re-running the load from there used to silently replace whatever
+   had been typed. */
 $("new").onclick = async () => {
+  if (!$("newform").hidden) {
+    hideNewForm();
+    return;
+  }
+  pathDirty = false;
   $("newform").hidden = false;
+  $("new").setAttribute("aria-expanded", "true");
+  $("new").textContent = "× new";
+  // Explicit, rather than relying on a focus side effect to scroll it into view.
+  $("newform").scrollIntoView({ block: "start" });
   await loadDirectorySuggestions();
-  $("newsuggest").focus();
 };
 $("cancelnew").onclick = hideNewForm;
 $("newsuggest").onchange = () => {
-  if ($("newsuggest").value) $("newdir").value = $("newsuggest").value;
+  const select = $("newsuggest");
+  if (select.value === CUSTOM_PATH) {
+    showPathField(true);
+    $("newdir").focus();
+    return;
+  }
+  showPathField(false);
+  $("newdir").value = select.value;
+  pathDirty = false;
 };
-$("newdir").oninput = () => { $("newsuggest").value = $("newdir").value; };
+$("newdir").oninput = () => {
+  pathDirty = true;
+  const select = $("newsuggest");
+  select.value = CUSTOM_PATH;
+  // A value matching no option paints a native select empty rather than falling
+  // back to anything, which reads as broken.
+  if (select.selectedIndex < 0) select.selectedIndex = 0;
+};
 $("start").onclick = async () => {
-  const cwd = $("newdir").value.trim();
+  const cwd = chosenDirectory();
   const st = $("newstatus");
   st.classList.remove("err");
   if (!cwd) { st.textContent = "pick a directory first"; st.classList.add("err"); return; }
   st.textContent = "starting…";
   $("start").disabled = true;
-  const res = await post("/api/sessions/start", { cwd });
-  $("start").disabled = false;
+  let res;
+  try {
+    res = await post("/api/sessions/start", { cwd });
+  } catch {
+    // A rejected fetch (dropped tunnel, portal restarting) must not leave the form
+    // disabled and reading "starting…" with no way back except a reload.
+    $("start").disabled = false;
+    st.textContent = "could not reach the portal — try again";
+    st.classList.add("err");
+    return;
+  }
   if (res.ok) {
-    rememberDirectory(cwd);
-    st.textContent = "started — the session appears below in a moment";
-    setTimeout(hideNewForm, 1500);
+    // The server answers with the path it resolved, so `~/x` and `/Users/me/x`
+    // stay one remembered entry.
+    const body = await res.json().catch(() => ({}));
+    const resolved = typeof body.cwd === "string" && body.cwd ? body.cwd : cwd;
+    rememberDirectory(resolved);
+    awaitingCwd = resolved;
+    // Deliberately left disabled: the session takes a few seconds to appear, and
+    // a second tap in that window starts a second agent in the same directory.
+    st.textContent = "starting — opening the session as soon as it appears";
     setTimeout(refresh, 1000);
     return;
   }
+  $("start").disabled = false;
   let msg = "start failed";
   try { msg = (await res.json()).error ?? msg; } catch {}
   st.textContent = msg;

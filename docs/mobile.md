@@ -95,11 +95,11 @@ room as a guest, and serves:
 | `GET /api/sessions/:pid/events` | SSE: `state`, `transcript`, `todos`, `activity`, `ui-request`, `ui-request-end`, `closed` |
 | `POST /api/sessions/:pid/prompt` | Steer the agent (`{text}`) |
 | `POST /api/sessions/:pid/interrupt` | Abort the current turn — the phone's stop button, the Escape key |
-| `POST /api/sessions/:pid/resume` | The play button: send the hidden internal continue prompt |
+| `POST /api/sessions/:pid/resume` | The resume button: send the hidden internal continue prompt |
 | `POST /api/sessions/:pid/ui/:reqId` | Answer an `ask` dialog (`{value}`) |
 | `GET /api/sessions/:pid/{transcript,todos}` | Snapshot fetches for a cold page load |
 | `GET /api/directories` | Picker choices for the new-session form: `{home, recent[]}` |
-| `POST /api/sessions/start` | Start a session in a directory (`{cwd}`) — see below |
+| `POST /api/sessions/start` | Start a session in a directory (`{cwd}`), answering `{ok, cwd}` with the resolved path — see below |
 
 ### Stop and resume
 
@@ -109,14 +109,29 @@ all. There is deliberately no way to terminate a session from the phone; a
 portal that can kill processes as your user is a much bigger thing to expose
 than a portal that can press Escape.
 
-Resume only exists for a cancelled turn. The portal derives it from the
-transcript itself — the last assistant message's `stopReason: "aborted"` — so
-a turn cut short at the terminal counts too, and an ordinary finished turn
-never shows a play button. Pressing it sends a real prompt with an
-`[omp-mobile:resume]` marker prefix. It is a real prompt on purpose: the host,
-the session transcript and every other guest see exactly what drove the agent.
-Only the portal's own projection drops it, and only by that exact marker — a
+Both halves are one control in the composer, next to `send`: `stop` while a turn
+runs, `resume` once one was stopped, never both. They share a fixed-width slot so
+the row cannot shift under a thumb, and the stop leaves a marker in the
+transcript (`⨯ stopped — the session is still open`) with the header switching to
+`· stopped` — an aborted turn otherwise read exactly like one that finished, and
+a prompt whose turn died before its first token looked like the agent ignoring
+the user.
+
+Resume exists for a cancelled turn. The portal derives it from the transcript —
+the last assistant message's `stopReason: "aborted"` — so a turn cut short at the
+terminal counts too, and it also marks the session interrupted when the portal
+itself issues the abort, because a turn stopped before its first token persists
+no aborted entry to derive from. Pressing it sends a real prompt carrying the
+`[omp-mobile:resume]` marker. It is a real prompt on purpose: the host, the
+session transcript and every other guest see exactly what drove the agent. Only
+the phone's own projection drops it, matched in full rather than by prefix, so no
+other participant can steer the agent with text the phone will not render. A
 "continue" typed by hand always shows.
+
+Prompts sent from the phone show up as ordinary user cards even though the host
+records them as `collab-prompt` custom messages rather than plain user messages;
+a prompt from another participant is labelled with its sender, so a shared
+session never renders someone else's instruction as your own.
 
 ### Starting a session from the phone
 
@@ -141,16 +156,25 @@ expansion), existing, and a directory. Relative input is rejected rather than
 resolved — the portal's own working directory under launchd is unpredictable,
 so resolving would start sessions in places you never meant.
 
-Picking the directory is the part a phone keyboard is worst at, so typing is
-the fallback rather than the interface. `GET /api/directories` answers with the
-home directory as a named choice plus the working directories of recent omp
-sessions, and the form offers a native select — a full-height wheel on iOS and
-Android — above the free-text field. Successful starts are also remembered in
-the browser's `localStorage` under `omp.mobile.directories.v1`, listed as
-"recently selected on this phone", and the last one is prefilled when the form
-opens, so the common case is open, tap start. Only successful starts are
-remembered, so a rejected typo never becomes the next default, and the memory
-is per-browser: it survives portal restarts and never leaves the phone.
+Picking the directory is the part a phone keyboard is worst at, so typing is the
+fallback rather than the interface. `GET /api/directories` answers with the home
+directory as a named choice plus the working directories of recent omp sessions
+(checked for existence *before* the cap, so deleted scratch directories cannot
+crowd out live ones, and cached for a few seconds so a tap does not rescan every
+session file). The form is a single native select — a full-height wheel on iOS and
+Android — showing `<name> — <path>` with `~` for home, name first because a select
+clips the tail. A final `type a path…` option reveals the free-text field for
+anything not listed.
+
+Successful starts are remembered in the browser's `localStorage` under
+`omp.mobile.directories.v1`, listed as "on this phone", and the last one is
+preselected when the form opens, so the common case is open and tap start. The
+resolved path is what gets remembered — the start route answers with it — so
+`~/x` and `/Users/me/x` stay one entry. Only successful starts are remembered, so
+a rejected typo never becomes the next default, and the memory is per-browser: it
+survives portal restarts and never leaves the phone. Once a start is accepted the
+form stays disabled until the session appears, at which point the phone opens it
+directly rather than leaving you to find it in a list of look-alike cards.
 
 The phone view mirrors the TUI rather than inventing a web idiom: the spinner and
 its activity line come from the same `agent_start` / `tool_execution_start` /

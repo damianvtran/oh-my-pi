@@ -49,8 +49,13 @@ function messageEntry(id: string, message: AgentMessage): SessionEntry {
 	return { type: "message", id, parentId: null, timestamp: "2026-07-28T00:00:00Z", message };
 }
 
-/** A prompt sent through the room, shaped exactly as the host persists it. */
-function collabPromptEntry(id: string, text: string, display = true): SessionEntry {
+/**
+ * A prompt sent through the room, shaped exactly as the host persists it.
+ *
+ * `from` defaults to this suite's own guest name so the common case — the phone
+ * seeing its own prompt — is what most callers get.
+ */
+function collabPromptEntry(id: string, text: string, from = "portal-test", display = true): SessionEntry {
 	return {
 		type: "custom_message",
 		id,
@@ -59,7 +64,7 @@ function collabPromptEntry(id: string, text: string, display = true): SessionEnt
 		customType: COLLAB_PROMPT_MESSAGE_TYPE,
 		content: text,
 		display,
-		details: { from: "omp-mobile" },
+		details: { from },
 		attribution: "user",
 	};
 }
@@ -468,9 +473,15 @@ describe("mobile portal guest — stop and resume", () => {
 			expect(guest.transcript).toEqual([{ kind: "user", text: "ship it" }]);
 
 			// `display: false` is the host's own bookkeeping, never a phone card.
-			ctx.sessionManager.onEntryAppended?.(collabPromptEntry("c3", "invisible", false));
+			ctx.sessionManager.onEntryAppended?.(collabPromptEntry("c3", "invisible", "portal-test", false));
 			await watch.until(() => watch.entries >= 3);
 			expect(guest.transcript).toEqual([{ kind: "user", text: "ship it" }]);
+
+			// Someone else steering the same session must not read as the phone's own
+			// message: on a shared session that distinction is the point of the card.
+			ctx.sessionManager.onEntryAppended?.(collabPromptEntry("c4", "from the laptop", "laptop-tui"));
+			await watch.until(() => guest.transcript.length === 2);
+			expect(guest.transcript[1]).toEqual({ kind: "user", text: "from the laptop", from: "laptop-tui" });
 		} finally {
 			guest.close();
 			await host.stop("test over");

@@ -117,13 +117,20 @@ function buildServiceSpec(input: {
 }
 
 /**
- * launchd `PATH` for both jobs. A LaunchAgent inherits almost nothing, and both
- * services shell out (the portal reads the Keychain through `security`, omp
- * itself resolves tools through `PATH`), so the usual login directories are
- * spelled out. `HOME` matters even more: every omp path derives from it, and
- * without it a job would write its state somewhere nobody looks.
+ * launchd `PATH` for both jobs, and for any session the portal starts. A
+ * LaunchAgent inherits almost nothing, and both services shell out (the portal
+ * reads the Keychain through `security`, omp itself resolves tools through
+ * `PATH`), so the usual login directories are spelled out. `HOME` matters even
+ * more: every omp path derives from it, and without it a job would write its
+ * state somewhere nobody looks.
+ *
+ * Exported because a phone-started session needs the same treatment: its nanny
+ * is created by launchd, so without this it would run agent tool calls against
+ * launchd's bare `/usr/bin:/bin:/usr/sbin:/sbin` — no bun, no homebrew, no
+ * `~/.local/bin`. That was observed on a real phone-started session, not
+ * theorised.
  */
-function launchEnvironment(homeDir: string): Record<string, string> {
+export function launchEnvironment(homeDir: string): Record<string, string> {
 	const bunDir = path.join(homeDir, ".bun", "bin");
 	const localBin = path.join(homeDir, ".local", "bin");
 	return {
