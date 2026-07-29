@@ -176,6 +176,16 @@ survives portal restarts and never leaves the phone. Once a start is accepted th
 form stays disabled until the session appears, at which point the phone opens it
 directly rather than leaving you to find it in a list of look-alike cards.
 
+**A prompt from the phone titles the session.** Automatic titling used to hang
+off the TUI's editor submit handler alone, so a session created from the phone
+and steered only from the phone stayed nameless: its card read the directory
+basename and `omp --resume` listed it as `Untitled · HH:MM` forever. Guest
+prompts now feed the same seam, with the same skips (an already-named session,
+`PI_NO_TITLE`, low-signal input like "hi") plus one of their own — the resume
+button's hidden prompt, which describes an interruption rather than a task. The
+title lands asynchronously and rides the next state broadcast, so the card
+renames itself a moment after the first instruction.
+
 The phone view mirrors the TUI rather than inventing a web idiom: the spinner and
 its activity line come from the same `agent_start` / `tool_execution_start` /
 `message_update` / `agent_end` events the terminal titles its working line with,

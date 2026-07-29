@@ -21,6 +21,7 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
+import { INTERNAL_RESUME_PROMPT } from "../mobile/types";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
@@ -719,6 +720,24 @@ export class CollabHost {
 				logger.warn("collab guest prompt failed", { error: String(err) });
 				this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
 			});
+		// A guest prompt is a turn start, so it feeds automatic titling the way the
+		// editor's does: a session created from the phone and driven only from the
+		// phone otherwise stayed nameless forever — its card read the directory
+		// basename and `--resume` listed it as "Untitled · HH:MM" — because the
+		// only auto-title trigger lived in the TUI's editor submit handler. Kicked
+		// off *after* the dispatch above, because titling can synchronously spawn
+		// the local tiny-title worker and the prompt must not queue behind a
+		// subprocess launch.
+		//
+		// The portal's own resume prompt is the one exclusion: it says "continue
+		// what you were doing", which names no task. Matched in full rather than by
+		// its marker prefix, exactly as the phone's projection filter does — a
+		// prefix test would let any write-token guest suppress titling for the
+		// whole session by prepending the marker to its first instruction. Reaching
+		// into `mobile/` for that constant is deliberate: the text is a wire
+		// convention the portal and this host have to agree on, and `mobile/types`
+		// is a leaf module of shapes with no runtime cost.
+		if (text !== INTERNAL_RESUME_PROMPT) this.#ctx.startAutoTitleGeneration(text);
 	}
 
 	#handleAbort(fromPeer: number): void {
