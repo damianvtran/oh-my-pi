@@ -21,6 +21,7 @@ import {
 	bootstrapService,
 	LAUNCHD_EEXIST,
 	readKeychainPassword,
+	submitSessionHostJob,
 	writeKeychainPassword,
 } from "@oh-my-pi/pi-coding-agent/mobile/launchctl";
 import { ptree } from "@oh-my-pi/pi-utils";
@@ -121,6 +122,24 @@ describe("bootoutService", () => {
 		expect(calls[0]?.command[1]).toBe("bootout");
 		// Polled until the job disappeared rather than returning on the first answer.
 		expect(calls.filter(call => call.command[1] === "print").length).toBeGreaterThanOrEqual(3);
+	});
+});
+
+describe("submitSessionHostJob", () => {
+	it("creates a self-removing sibling job without interpolating command arguments into shell source", async () => {
+		const calls = stubExec(() => ({}));
+		const label = "sh.omp.mobile-session.123.example";
+		const command = ["/usr/bin/caffeinate", "-dims", "/tmp/omp $(touch nope)", "mobile", "host", "--cwd", "/tmp/a b"];
+
+		const result = await submitSessionHostJob(label, command);
+
+		expect(result.ok).toBe(true);
+		const submitted = calls[0]?.command ?? [];
+		expect(submitted.slice(0, 7)).toEqual(["/bin/launchctl", "submit", "-l", label, "--", "/bin/sh", "-c"]);
+		expect(submitted[7]).toContain('"$@"');
+		expect(submitted[7]).toContain('remove "$label"');
+		expect(submitted[7]).not.toContain(command[2]);
+		expect(submitted.slice(8)).toEqual(["omp-mobile-host-job", label, ...command]);
 	});
 });
 

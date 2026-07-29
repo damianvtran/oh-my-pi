@@ -94,9 +94,52 @@ room as a guest, and serves:
 | `GET /api/sessions` | One summary per attached session |
 | `GET /api/sessions/:pid/events` | SSE: `state`, `transcript`, `todos`, `activity`, `ui-request`, `ui-request-end`, `closed` |
 | `POST /api/sessions/:pid/prompt` | Steer the agent (`{text}`) |
-| `POST /api/sessions/:pid/interrupt` | Abort the current turn |
+| `POST /api/sessions/:pid/interrupt` | Abort the current turn — the phone's stop button, the Escape key |
+| `POST /api/sessions/:pid/resume` | The play button: send the hidden internal continue prompt |
 | `POST /api/sessions/:pid/ui/:reqId` | Answer an `ask` dialog (`{value}`) |
 | `GET /api/sessions/:pid/{transcript,todos}` | Snapshot fetches for a cold page load |
+| `GET /api/directories` | Recent session directories for the new-session form |
+| `POST /api/sessions/start` | Start a session in a directory (`{cwd}`) — see below |
+
+### Stop and resume
+
+Stop on the phone is the **Escape key, not a signal**: it aborts the running
+turn and leaves the session exactly where it was — process, context, todos and
+all. There is deliberately no way to terminate a session from the phone; a
+portal that can kill processes as your user is a much bigger thing to expose
+than a portal that can press Escape.
+
+Resume only exists for a cancelled turn. The portal derives it from the
+transcript itself — the last assistant message's `stopReason: "aborted"` — so
+a turn cut short at the terminal counts too, and an ordinary finished turn
+never shows a play button. Pressing it sends a real prompt with an
+`[omp-mobile:resume]` marker prefix. It is a real prompt on purpose: the host,
+the session transcript and every other guest see exactly what drove the agent.
+Only the portal's own projection drops it, and only by that exact marker — a
+"continue" typed by hand always shows.
+
+### Starting a session from the phone
+
+`POST /api/sessions/start` asks for a session in a directory. The portal
+spawns a **nanny** (`omp mobile host --cwd <dir>`), a tiny process that runs
+one interactive omp under a PTY and waits for it. Two constraints shape that
+design:
+
+- **An interactive omp expects a terminal.** Under the PTY it is an ordinary
+  session — `collab.autoStart` hosts its room, the record publishes, the
+  portal discovers it through the same watcher as any terminal launch. There
+  is no special headless mode and no second startup path to keep honest.
+- **The portal must not own the PTY.** launchd restarts the portal on updates
+  and crashes, and a closed PTY master takes the session with it. On macOS the
+  nanny runs as its own self-removing launchd job — a sibling of the portal,
+  not its descendant — so portal and sessions have independent lifetimes.
+  The nanny's lifecycle lines land in `run/mobile/host.log` for the day a
+  session never appears.
+
+The directory is validated before anything spawns: absolute (with `~`
+expansion), existing, and a directory. Relative input is rejected rather than
+resolved — the portal's own working directory under launchd is unpredictable,
+so resolving would start sessions in places you never meant.
 
 The phone view mirrors the TUI rather than inventing a web idiom: the spinner and
 its activity line come from the same `agent_start` / `tool_execution_start` /

@@ -23,7 +23,13 @@ import { CollabSocket } from "../collab/relay-client";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { SessionEntry } from "../session/session-entries";
 import { isTodoPhase } from "../tools/todo";
-import type { PortalActivity, PortalGuestEvents, TodoPhase, TranscriptItem } from "./types";
+import {
+	INTERNAL_RESUME_MARKER,
+	type PortalActivity,
+	type PortalGuestEvents,
+	type TodoPhase,
+	type TranscriptItem,
+} from "./types";
 
 /** Transcript items retained per session; older cards fall off the front. */
 const TRANSCRIPT_CAP = 200;
@@ -254,10 +260,21 @@ export class PortalGuest {
 		switch (message.role) {
 			case "user": {
 				const text = collectText(message.content);
-				if (text) this.#push({ kind: "user", text });
+				// The portal's own resume prompt is real (host, transcript and every
+				// other guest see it) but is not a card the phone renders — the play
+				// button would otherwise redraw the instruction it just sent. Only
+				// the exact marker prefix is dropped; a hand-typed "continue" has no
+				// marker and always shows.
+				if (text && !text.startsWith(INTERNAL_RESUME_MARKER)) this.#push({ kind: "user", text });
 				return;
 			}
 			case "assistant":
+				// The transcript projection doubles as the resume-button signal: the
+				// last assistant message's stopReason says whether the turn finished
+				// or was cut short. Snapshot replay sets this the same way live
+				// entries do, so a portal that reconnects after an abort still shows
+				// the session as interrupted.
+				this.activity = { ...this.activity, interrupted: message.stopReason === "aborted" };
 				for (const part of message.content) {
 					if (part.type === "text" && part.text.trim()) this.#push({ kind: "assistant", text: part.text });
 					else if (part.type === "thinking" && part.thinking.trim())
@@ -308,10 +325,15 @@ export class PortalGuest {
 		const before = JSON.stringify(this.activity);
 		switch (event.type) {
 			case "agent_start":
-				this.activity = { working: true };
+				// A new turn answers any previous interruption, however it started —
+				// typed prompt, the resume button, or a queued message flushing.
+				this.activity = { working: true, interrupted: false };
 				break;
 			case "agent_end":
-				this.activity = { working: false };
+				// Preserve `interrupted`: the abort's assistant entry lands before the
+				// turn-end event, and replacing the whole object here would wipe the
+				// very signal the resume button reads.
+				this.activity = { ...this.activity, working: false };
 				break;
 			case "tool_execution_start": {
 				// omp titles the working line with the call's `intent` and falls back

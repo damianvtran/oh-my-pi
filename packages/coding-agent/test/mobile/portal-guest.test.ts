@@ -32,6 +32,7 @@ import type {
 	TodoPhase,
 	TranscriptItem,
 } from "@oh-my-pi/pi-coding-agent/mobile/types";
+import { INTERNAL_RESUME_PROMPT } from "@oh-my-pi/pi-coding-agent/mobile/types";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -399,5 +400,96 @@ describe("mobile portal guest", () => {
 		const guest = new PortalGuest({});
 		await expect(guest.connect("not-a-collab-link")).rejects.toThrow(/collab link/i);
 		expect(guest.connected).toBe(false);
+	});
+});
+
+describe("mobile portal guest — stop and resume", () => {
+	it("hides only the internal resume prompt from the transcript", async () => {
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
+		const { ctx } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			// A hand-typed "continue" is an ordinary user card — hiding any prompt
+			// that merely asks to continue would eat real user messages.
+			ctx.sessionManager.onEntryAppended?.(messageEntry("u1", { role: "user", content: "continue", timestamp: 0 }));
+			await watch.until(() => guest.transcript.some(i => i.kind === "user" && i.text === "continue"));
+
+			// The play button's own prompt is still absorbed (onEntry fires) — it
+			// is a real prompt the agent reads — but never becomes a card.
+			ctx.sessionManager.onEntryAppended?.(
+				messageEntry("u2", { role: "user", content: INTERNAL_RESUME_PROMPT, timestamp: 0 }),
+			);
+			await watch.until(() => watch.entries >= 2);
+			expect(guest.transcript).toEqual([{ kind: "user", text: "continue" }]);
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("marks the activity interrupted only when the turn was aborted", async () => {
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
+		const harness = makeHostHarness(loaded);
+		const host = new CollabHost(harness.ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			expect(guest.activity.interrupted).toBeUndefined();
+
+			// A turn that finishes is idle, not resumable.
+			harness.ctx.sessionManager.onEntryAppended?.(
+				messageEntry("a1", assistantMessage([{ type: "text", text: "done" }])),
+			);
+			await watch.until(() => guest.transcript.length === 1);
+			expect(guest.activity.interrupted).toBe(false);
+
+			// Escape mid-turn: the final assistant message carries stopReason
+			// "aborted", and that is the whole signal.
+			harness.ctx.sessionManager.onEntryAppended?.(
+				messageEntry("a2", { ...assistantMessage([{ type: "text", text: "was working" }]), stopReason: "aborted" }),
+			);
+			await watch.until(() => guest.activity.interrupted === true);
+
+			// The turn-end event lands after the aborted entry and must not wipe it.
+			harness.emit({ type: "agent_end" } as unknown as AgentSessionEvent);
+			await watch.until(() => watch.eventTypes.includes("agent_end"));
+			expect(guest.activity).toMatchObject({ working: false, interrupted: true });
+
+			// Any new turn — typed prompt or the resume button — answers it.
+			harness.emit({ type: "agent_start" } as unknown as AgentSessionEvent);
+			await watch.until(() => guest.activity.working === true);
+			expect(guest.activity.interrupted).toBe(false);
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("replays an aborted tail from the snapshot as interrupted", async () => {
+		const loaded: LoadedSession = {
+			id: "sess-a",
+			cwd: "/tmp/project-a",
+			entries: [
+				messageEntry("u1", { role: "user", content: "do the thing", timestamp: 0 }),
+				messageEntry("a1", { ...assistantMessage([{ type: "text", text: "half of it" }]), stopReason: "aborted" }),
+			],
+		};
+		const { ctx } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+
+		const { guest } = await joinGuest(host.link);
+		try {
+			// A portal that attaches after the abort still shows the session as
+			// resumable: the signal comes from the transcript, not a live event.
+			expect(guest.activity.interrupted).toBe(true);
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
 	});
 });

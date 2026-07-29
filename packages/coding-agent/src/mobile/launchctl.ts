@@ -108,6 +108,50 @@ export function kickstartService(label: string): Promise<CommandOutcome> {
 }
 
 /**
+ * Constant shell body for a one-shot submitted job.
+ *
+ * The label and command are positional parameters, never interpolated into this
+ * source. That preserves argv boundaries for paths containing whitespace or
+ * shell metacharacters. `launchctl submit` otherwise leaves a completed job
+ * loaded indefinitely, so the wrapper removes its own label after the hosted
+ * process exits.
+ */
+const SELF_REMOVING_JOB = `label=$1
+shift
+"$@"
+code=$?
+${LAUNCHCTL} remove "$label" >/dev/null 2>&1
+exit "$code"`;
+
+/**
+ * Submit a session host as its own user launchd job.
+ *
+ * A mobile-spawned session must outlive a portal update/restart. A detached
+ * descendant is not a sufficient boundary because launchd owns and may tear
+ * down the portal job as a unit; asking launchd to create a sibling job makes
+ * the lifetime independent by construction.
+ */
+export function submitSessionHostJob(label: string, command: string[]): Promise<CommandOutcome> {
+	if (command.length === 0) throw new Error("session host command is required");
+	return run(
+		[
+			LAUNCHCTL,
+			"submit",
+			"-l",
+			label,
+			"--",
+			"/bin/sh",
+			"-c",
+			SELF_REMOVING_JOB,
+			"omp-mobile-host-job",
+			label,
+			...command,
+		],
+		LAUNCHCTL_TIMEOUT_MS,
+	);
+}
+
+/**
  * launchd's own state word for a job (`running`, `waiting`, `not running`, …),
  * or undefined when the job is not loaded at all. Parsed out of `launchctl
  * print`, which has no machine-readable mode — the one line we need is stable
