@@ -620,13 +620,12 @@ function renderTranscript(items) {
       <div class="tool-head"><span class="sigil">${esc(label)}</span> <span class="arg">${esc(arg)}</span></div>
       ${body ? `<div class="tool-div">${it.isError ? "Error" : "Output"}</div>
       <div class="tool-body ${clip ? "clip" : ""}" data-body="${i}">${esc(body)}</div>
-      ${clip ? `<div class="tool-more"><button data-expand="${esc(it.id)}">… expand</button></div>` : ""}` : ""}
+      ${clip ? `<div class="tool-more"><button data-expand="${esc(it.id).replaceAll('"', "&quot;")}">… expand</button></div>` : ""}` : ""}
     </div></div>`;
   }).join("");
 }
 
 let current = null, es = null;
-
 /* Spinner frames from omp's unicode preset (SPINNER_FRAMES.status). A single
    shared timer drives every spinner on the page: one interval, no per-element
    state, and it stops dead when nothing is running so an idle phone does not
@@ -806,6 +805,12 @@ function renderEmptyLog() {
 }
 
 function open(pid) {
+  // Close whatever is streaming first. `back` used to be the only way into this
+  // function, so nothing here did; a deep link into an already-open tab (which the
+  // hashchange listener now routes through here) left both streams live, and the
+  // old session's frames kept overwriting the view the URL and header claimed.
+  es?.close(); es = null;
+  expandedTools = new Set();
   current = pid;
   if (location.hash !== `#${pid}`) location.hash = `#${pid}`;
   $("list").hidden = true; $("detail").hidden = false;
@@ -827,7 +832,9 @@ function open(pid) {
     streaming = Boolean(s.isStreaming);
     renderHeader();
     renderTurnControl(streaming, interrupted && !streaming);
-    if (!$("log").querySelector(".turn")) renderEmptyLog();
+    // A `stopped` seam is content, not emptiness: it renders outside `.turn`, and
+    // a tail consisting only of seams would otherwise be blanked by the guide.
+    if (!$("log").querySelector(".turn, .stopped")) renderEmptyLog();
   });
   es.addEventListener("transcript", e => {
     const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 40;
@@ -1168,9 +1175,11 @@ $("start").onclick = async () => {
   try {
     // Snapshot what is running *now*, not at the last 2s poll: a session another
     // client started inside that window would otherwise be adopted as this start's
-    // arrival, which is the same misroute the cwd-only match caused.
-    const running = await api("/api/sessions").then(r => (r.ok ? r.json() : []), () => []);
-    awaitingKnownPids = new Set(running.map(s => s.pid));
+    // arrival, which is the same misroute the cwd-only match caused. Falling back to
+    // the last poll rather than to nothing: an empty set would make every session in
+    // the directory look new, which is the misroute this exists to prevent.
+    const running = await api("/api/sessions").then(r => (r.ok ? r.json() : null), () => null);
+    awaitingKnownPids = new Set((running ?? lastSessions).map(s => s.pid));
     res = await post("/api/sessions/start", { cwd });
   } catch {
     // A rejected fetch (dropped tunnel, portal restarting) must not leave the form

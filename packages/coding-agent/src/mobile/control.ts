@@ -162,7 +162,10 @@ const CONFIG_ROOT_ENV_KEYS = ["PI_CONFIG_DIR", "OMP_PROFILE", "PI_PROFILE"] as c
  * version looked complete precisely because nothing asserted it.
  */
 export function buildSessionJobCommand(hostArgv: string[], env: Record<string, string | undefined>): string[] {
-	const carried = CONFIG_ROOT_ENV_KEYS.flatMap(key => (env[key] ? [`${key}=${env[key]}`] : []));
+	// Definedness, not truthiness: `resolveProfileEnv` treats an explicitly-empty
+	// `OMP_PROFILE` as "the default profile", so dropping it here would let the child
+	// fall through to `PI_PROFILE` and resolve a different config root.
+	const carried = CONFIG_ROOT_ENV_KEYS.flatMap(key => (env[key] !== undefined ? [`${key}=${env[key]}`] : []));
 	const wrapped = [CAFFEINATE, "-dims", ...hostArgv];
 	return carried.length > 0 ? [ENV_BIN, ...carried, ...wrapped] : wrapped;
 }
