@@ -4938,4 +4938,385 @@ describe("AgentSession retry fallback", () => {
 			isFallback: true,
 		});
 	});
+
+	/**
+	 * Chain cycling (`retry.fallbackCycle`). The forward walk is monotonic, so
+	 * these cover the two backward moves it gained — the mid-turn pass once the
+	 * tail is spent, and the turn-boundary climb — plus the guards that stop
+	 * either from bouncing between two rate-limited models.
+	 */
+	describe("chain cycling", () => {
+		const CYCLE_COOLDOWN_HINT = "rate limit exceeded retry-after-ms=200";
+		const LONG_COOLDOWN_HINT = "rate limit exceeded retry-after-ms=600000";
+
+		function cycleModels(): { primary: Model; mid: Model; last: Model } {
+			const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const mid = getBundledModel("openai", "gpt-4o-mini");
+			const last = getBundledModel("openai", "gpt-4o");
+			if (!primary || !mid || !last) throw new Error("Expected bundled cycling test models to exist");
+			return { primary, mid, last };
+		}
+
+		function cycleSettings(models: { primary: Model; mid: Model; last: Model }, cycle: boolean): Settings {
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxRetries": 5,
+				"retry.fallbackCycle": cycle,
+				"retry.fallbackChains": {
+					default: [`${models.mid.provider}/${models.mid.id}`, `${models.last.provider}/${models.last.id}`],
+				},
+				"retry.fallbackRevertPolicy": "cooldown-expiry",
+			});
+			settings.setModelRole("default", `${models.primary.provider}/${models.primary.id}`);
+			return settings;
+		}
+
+		it("reverses mid-turn to a recovered earlier entry once the tail is spent", async () => {
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			const failedOnce = new Set<string>();
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const primarySelector = `${models.primary.provider}/${models.primary.id}`;
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					// Every attempt burns more wall clock than the 200ms window a blip
+					// buys, so the middle entry has genuinely recovered by the time the
+					// tail is spent. The primary's 10-minute cap outlives the whole
+					// burst, which keeps the plain restore path out of the way and
+					// leaves the reversal as the only thing that can rescue the turn.
+					now += 500;
+					if (!failedOnce.has(selector)) {
+						failedOnce.add(selector);
+						mock.push({ throw: selector === primarySelector ? LONG_COOLDOWN_HINT : CYCLE_COOLDOWN_HINT });
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, true),
+				modelRegistry,
+			});
+
+			await session.prompt("Reverse onto the recovered middle entry");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				primarySelector,
+				`${models.mid.provider}/${models.mid.id}`,
+				`${models.last.provider}/${models.last.id}`,
+				`${models.mid.provider}/${models.mid.id}`,
+			]);
+			expect(session.model?.provider).toBe(models.mid.provider);
+			expect(session.model?.id).toBe(models.mid.id);
+		});
+
+		it("takes at most one backward hop per retry burst", async () => {
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const primarySelector = `${models.primary.provider}/${models.primary.id}`;
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					// Nothing ever succeeds and every window is a 200ms blip that the
+					// clock immediately outruns, so without the hop cap the burst could
+					// keep reversing onto whichever entry just cooled off.
+					now += 500;
+					mock.push({ throw: selector === primarySelector ? LONG_COOLDOWN_HINT : CYCLE_COOLDOWN_HINT });
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, true),
+				modelRegistry,
+			});
+			const reversals: Array<{ from: string; to: string }> = [];
+			const order = [
+				primarySelector,
+				`${models.mid.provider}/${models.mid.id}`,
+				`${models.last.provider}/${models.last.id}`,
+			];
+			session.subscribe(event => {
+				if (event.type !== "retry_fallback_applied") return;
+				const from = order.indexOf(event.from);
+				const to = order.indexOf(event.to);
+				if (from >= 0 && to >= 0 && to < from) reversals.push({ from: event.from, to: event.to });
+			});
+			const { retryEndEvents } = trackRetryEvents(session);
+
+			await session.prompt("One reversal, then give up");
+			await session.waitForIdle();
+
+			// Exactly one reversal, onto the entry that recovered. Everything after it
+			// is ordinary forward walking and same-model backoff, so the assertion is
+			// on reversals rather than on the full request sequence.
+			expect(reversals).toEqual([
+				{ from: `${models.last.provider}/${models.last.id}`, to: `${models.mid.provider}/${models.mid.id}` },
+			]);
+			expect(requestedModels.slice(0, 4)).toEqual([
+				primarySelector,
+				`${models.mid.provider}/${models.mid.id}`,
+				`${models.last.provider}/${models.last.id}`,
+				`${models.mid.provider}/${models.mid.id}`,
+			]);
+			expect(retryEndEvents.at(-1)).toMatchObject({ success: false });
+		});
+
+		it("dead-ends on the last chain entry when cycling is disabled", async () => {
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const primarySelector = `${models.primary.provider}/${models.primary.id}`;
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					now += 500;
+					// The primary's 10-minute cap keeps the plain restore path from
+					// re-entering it between attempts, so what remains in the request
+					// sequence is purely the forward walk this test is about.
+					mock.push({ throw: selector === primarySelector ? LONG_COOLDOWN_HINT : CYCLE_COOLDOWN_HINT });
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, false),
+				modelRegistry,
+			});
+			const reversals: Array<{ from: string; to: string }> = [];
+			const order = [
+				`${models.primary.provider}/${models.primary.id}`,
+				`${models.mid.provider}/${models.mid.id}`,
+				`${models.last.provider}/${models.last.id}`,
+			];
+			session.subscribe(event => {
+				if (event.type !== "retry_fallback_applied") return;
+				const from = order.indexOf(event.from);
+				const to = order.indexOf(event.to);
+				if (from >= 0 && to >= 0 && to < from) reversals.push({ from: event.from, to: event.to });
+			});
+			const { retryEndEvents } = trackRetryEvents(session);
+
+			await session.prompt("Forward-only walk must stop at the tail");
+			await session.waitForIdle();
+
+			// Forward-only: no fallback switch ever targets an earlier entry, and the
+			// saga ends on the tail. (The plain restore path may still re-enter the
+			// primary between attempts under this clock — that predates cycling and is
+			// not what this asserts.)
+			expect(reversals).toEqual([]);
+			expect(requestedModels.slice(0, 3)).toEqual(order);
+			expect(requestedModels.at(-1)).toBe(`${models.last.provider}/${models.last.id}`);
+			expect(retryEndEvents.at(-1)).toMatchObject({ success: false });
+		});
+
+		it("climbs to a recovered middle entry at a turn boundary while the primary stays capped", async () => {
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			const failedOnce = new Set<string>();
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					if (!failedOnce.has(selector) && selector !== `${models.last.provider}/${models.last.id}`) {
+						failedOnce.add(selector);
+						// The primary draws a 10-minute cap, the middle entry a 200ms
+						// blip: the climb must prefer the entry that actually recovered.
+						mock.push({
+							throw:
+								selector === `${models.primary.provider}/${models.primary.id}`
+									? LONG_COOLDOWN_HINT
+									: CYCLE_COOLDOWN_HINT,
+						});
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, true),
+				modelRegistry,
+			});
+
+			await session.prompt("Land on the last entry");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(models.last.id);
+
+			// Past the climb dwell window, still far inside the primary's 10-minute cap.
+			now += 61_000;
+			await session.prompt("Climb back toward the primary");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				`${models.primary.provider}/${models.primary.id}`,
+				`${models.mid.provider}/${models.mid.id}`,
+				`${models.last.provider}/${models.last.id}`,
+				`${models.mid.provider}/${models.mid.id}`,
+			]);
+			expect(session.model?.provider).toBe(models.mid.provider);
+			expect(session.model?.id).toBe(models.mid.id);
+		});
+
+		it("holds the dwell window before climbing so a short cap cannot seesaw", async () => {
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			const failedOnce = new Set<string>();
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					if (!failedOnce.has(selector) && selector !== `${models.last.provider}/${models.last.id}`) {
+						failedOnce.add(selector);
+						mock.push({
+							throw:
+								selector === `${models.primary.provider}/${models.primary.id}`
+									? LONG_COOLDOWN_HINT
+									: CYCLE_COOLDOWN_HINT,
+						});
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, true),
+				modelRegistry,
+			});
+
+			await session.prompt("Land on the last entry");
+			await session.waitForIdle();
+
+			// The middle entry's 200ms cap has lapsed, but the descent that stranded
+			// us here is seconds old: climbing now is the bounce we refuse to make.
+			now += 1_000;
+			await session.prompt("Too soon to climb");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				`${models.primary.provider}/${models.primary.id}`,
+				`${models.mid.provider}/${models.mid.id}`,
+				`${models.last.provider}/${models.last.id}`,
+				`${models.last.provider}/${models.last.id}`,
+			]);
+			expect(session.model?.id).toBe(models.last.id);
+		});
+
+		it("doubles a model's cooldown when it fails again right after recovering", async () => {
+			const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallback = getBundledModel("openai", "gpt-4o-mini");
+			if (!primary || !fallback) throw new Error("Expected bundled escalation test models to exist");
+			const requestedModels: string[] = [];
+			let primaryFailures = 0;
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					if (model.provider === primary.provider && model.id === primary.id) {
+						primaryFailures += 1;
+						mock.push({ throw: CYCLE_COOLDOWN_HINT });
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] },
+				"retry.fallbackRevertPolicy": "cooldown-expiry",
+			});
+			settings.setModelRole("default", `${primary.provider}/${primary.id}`);
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("First failure buys the base 200ms window");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(fallback.id);
+
+			// 250ms later the base window has lapsed, so the primary is restored —
+			// and fails again, which is the flap that doubles its window to 400ms.
+			now += 250;
+			await session.prompt("Restore, fail again, escalate");
+			await session.waitForIdle();
+			expect(primaryFailures).toBe(2);
+			expect(session.model?.id).toBe(fallback.id);
+
+			// Another 250ms would have been enough under the un-escalated window.
+			now += 250;
+			await session.prompt("Escalated window keeps us on the fallback");
+			await session.waitForIdle();
+			expect(primaryFailures).toBe(2);
+			expect(session.model?.id).toBe(fallback.id);
+			expect(requestedModels).toEqual([
+				`${primary.provider}/${primary.id}`,
+				`${fallback.provider}/${fallback.id}`,
+				`${primary.provider}/${primary.id}`,
+				`${fallback.provider}/${fallback.id}`,
+				`${fallback.provider}/${fallback.id}`,
+			]);
+		});
+	});
 });

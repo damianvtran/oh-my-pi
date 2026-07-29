@@ -1628,6 +1628,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"retry.fallbackCycle": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Cycle Fallback Chains",
+			description:
+				"Let an exhausted chain re-consult the models before the active one instead of dead-ending on its last entry. Only models whose cooldown already expired are eligible, each model is used at most once per retry burst, and a model that fails again right after recovering gets a doubled cooldown — so recovery never turns into a bounce between two rate-limited providers. Off restores the strictly forward-only walk.",
+		},
+	},
+
 	"providers.anthropic.serverSideFallback": {
 		type: "boolean",
 		default: false,

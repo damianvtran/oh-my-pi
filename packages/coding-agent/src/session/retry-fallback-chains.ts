@@ -124,7 +124,7 @@ export function formatRetryFallbackSelector(model: Model, thinkingLevel: Thinkin
 }
 
 /** Formats the model-only portion of a parsed fallback selector. */
-function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): string {
+export function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): string {
 	return `${selector.provider}/${selector.id}`;
 }
 
@@ -224,6 +224,21 @@ export function validateRetryFallbackChains(
 /** Returns the configured fallback-primary restoration policy. */
 export function getRetryFallbackRevertPolicy(settings: Settings): RetryFallbackRevertPolicy {
 	return settings.get("retry.fallbackRevertPolicy") === "never" ? "never" : "cooldown-expiry";
+}
+
+/**
+ * Whether an exhausted chain may re-consult the entries BEFORE the active one.
+ *
+ * The forward walk is monotonic: every hop only looks at the tail after the
+ * failing selector, so a chain like `opus → kimi → codex` dead-ends on its last
+ * entry even when the head's cooldown lapsed minutes ago. With cycling on, a
+ * spent tail triggers a second, most-preferred-first pass over the preceding
+ * entries. Only selectors whose suppression window already expired are
+ * eligible, so a model known to be rate limited is never re-picked, and the
+ * `retry.maxDelayMs` fail-fast cap still applies when nothing has recovered.
+ */
+export function getRetryFallbackCycleEnabled(settings: Settings): boolean {
+	return settings.get("retry.fallbackCycle") !== false;
 }
 
 /** Resolves the primary selector represented by a fallback-chain key. */
@@ -425,6 +440,54 @@ function getRetryFallbackEffectiveChain(
 	return chain;
 }
 
+/**
+ * Where `currentSelector` sits inside its effective chain, plus that chain.
+ *
+ * `index` is -1 when the active selector is not part of the chain at all (an
+ * ad-hoc `/model` pick under a role-keyed chain, say); `unresolved` marks the
+ * separate case where the active selector could not be parsed, which callers
+ * must treat as "no position known" rather than "position 0".
+ */
+interface RetryFallbackChainPosition {
+	chain: RetryFallbackSelector[];
+	index: number;
+	unresolved: boolean;
+}
+
+function resolveRetryFallbackChainPosition(
+	context: RetryFallbackResolutionContext,
+	chainKey: string,
+	currentSelector: string,
+	currentModel: Model | null | undefined,
+	allowMissingPrimary: boolean,
+): RetryFallbackChainPosition {
+	const chain = getRetryFallbackEffectiveChain(context, chainKey, currentSelector, currentModel, allowMissingPrimary);
+	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
+	const currentPlainSelector = currentModel
+		? formatModelSelectorValue(formatModelString(currentModel), parsedConfigured?.thinkingLevel)
+		: undefined;
+	const parsedCurrent =
+		parsedConfigured ??
+		(currentPlainSelector ? parseRetryFallbackSelector(currentPlainSelector, context.modelLookup) : undefined);
+	if (!parsedCurrent) return { chain, index: -1, unresolved: true };
+	const currentBaseSelector = formatRetryFallbackBaseSelector(parsedCurrent);
+	const currentPlainBaseSelector =
+		currentPlainSelector && currentPlainSelector !== currentSelector
+			? formatRetryFallbackBaseSelector(parseRetryFallbackSelector(currentPlainSelector) ?? parsedCurrent)
+			: undefined;
+	const exactIndex = chain.findIndex(
+		selector => selector.raw === currentSelector || selector.raw === currentPlainSelector,
+	);
+	if (exactIndex >= 0) return { chain, index: exactIndex, unresolved: false };
+	const baseIndex = currentBaseSelector
+		? chain.findIndex(selector => {
+				const selectorBase = formatRetryFallbackBaseSelector(selector);
+				return selectorBase === currentBaseSelector || selectorBase === currentPlainBaseSelector;
+			})
+		: -1;
+	return { chain, index: baseIndex, unresolved: false };
+}
+
 /** Return the candidates after the current selector in an effective chain. */
 export function findRetryFallbackCandidates(
 	context: RetryFallbackResolutionContext,
@@ -433,37 +496,43 @@ export function findRetryFallbackCandidates(
 	currentModel?: Model | null,
 	options?: { allowMissingPrimary?: boolean },
 ): RetryFallbackSelector[] {
-	const chain = getRetryFallbackEffectiveChain(
+	const { chain, index, unresolved } = resolveRetryFallbackChainPosition(
 		context,
 		chainKey,
 		currentSelector,
 		currentModel,
 		options?.allowMissingPrimary === true,
 	);
-	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
-	const currentPlainSelector = currentModel
-		? formatModelSelectorValue(formatModelString(currentModel), parsedConfigured?.thinkingLevel)
-		: undefined;
-	const parsedCurrent =
-		parsedConfigured ??
-		(currentPlainSelector ? parseRetryFallbackSelector(currentPlainSelector, context.modelLookup) : undefined);
-	if (!parsedCurrent) return chain;
+	if (unresolved) return chain;
 	if (chain.length <= 1) return [];
-	const currentBaseSelector = formatRetryFallbackBaseSelector(parsedCurrent);
-	const currentPlainBaseSelector =
-		parsedCurrent && currentPlainSelector && currentPlainSelector !== currentSelector
-			? formatRetryFallbackBaseSelector(parseRetryFallbackSelector(currentPlainSelector) ?? parsedCurrent)
-			: undefined;
-	const exactIndex = chain.findIndex(
-		selector => selector.raw === currentSelector || selector.raw === currentPlainSelector,
+	// An unknown position keeps the historical guard: everything except the
+	// primary is fair game, but we never bounce straight back to the primary.
+	return index >= 0 ? chain.slice(index + 1) : chain.slice(1);
+}
+
+/**
+ * Return the candidates BEFORE the current selector, most-preferred first.
+ *
+ * Powers both halves of chain cycling: the mid-turn second pass once the
+ * forward tail is spent, and the turn-boundary partial revert that climbs back
+ * toward the primary one entry at a time. Empty when the active selector is the
+ * chain head or its position is unknown — in the unknown case a "preceding"
+ * entry is not defined, and guessing would flap between two unrelated models.
+ */
+export function findRetryFallbackPrecedingCandidates(
+	context: RetryFallbackResolutionContext,
+	chainKey: string,
+	currentSelector: string,
+	currentModel?: Model | null,
+	options?: { allowMissingPrimary?: boolean },
+): RetryFallbackSelector[] {
+	const { chain, index, unresolved } = resolveRetryFallbackChainPosition(
+		context,
+		chainKey,
+		currentSelector,
+		currentModel,
+		options?.allowMissingPrimary === true,
 	);
-	if (exactIndex >= 0) return chain.slice(exactIndex + 1);
-	const baseIndex = currentBaseSelector
-		? chain.findIndex(selector => {
-				const selectorBase = formatRetryFallbackBaseSelector(selector);
-				return selectorBase === currentBaseSelector || selectorBase === currentPlainBaseSelector;
-			})
-		: -1;
-	if (baseIndex >= 0) return chain.slice(baseIndex + 1);
-	return chain.slice(1);
+	if (unresolved || index <= 0) return [];
+	return chain.slice(0, index);
 }

@@ -688,6 +688,7 @@
 ### Removed
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
+- Added `retry.fallbackCycle` (on by default): an exhausted fallback chain may now reverse onto an earlier entry instead of dead-ending on its last one, so `opus → kimi → codex` recovers when `codex` runs out and something earlier has cooled off. A turn-boundary climb also walks partway home — onto `kimi` while `opus` is still capped — where previously only the configured primary could be restored. Guards keep recovery from becoming a bounce: a model that fails again right after its cooldown lapsed gets a doubled window (capped at 8x, absolute 4h, strikes forgotten after 2h of quiet), one retry burst may reverse direction at most once, the mid-chain climb waits 60s after the switch that stranded it, and backward moves compare cooldowns per model rather than per selector string so a differently-routed spelling of a rate-limited model is not mistaken for a healthy one. Classifier-refusal fallbacks stay forward-only, and turning the setting off restores the strictly monotonic walk.
 
 ## [17.1.8] - 2026-07-28
 
