@@ -286,12 +286,18 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
    "yes, and don't ask again" is one row from "no" — is not recoverable the way a
    mis-tapped stop is. */
 #ask .opt {
-  display: flex; align-items: center; min-height: 44px; width: 100%;
+  display: flex; align-items: center; gap: 6px; min-height: 44px; width: 100%;
   text-align: left; padding: 6px 10px; margin-top: 6px;
   background: var(--bg); border: 1px solid var(--hairline); border-radius: var(--radius-ctl);
 }
 #ask .opt:hover { background: var(--hover-wash); border-color: var(--border-strong); }
-#ask .opt::before { content: "› "; color: var(--accent-text); }
+/* No trailing space in the glyph: a flex item trims it, which collided the chevron
+   with the label. The gap above does that job instead. */
+#ask .opt::before { content: "›"; color: var(--accent-text); }
+.ask-err { margin-top: 8px; font-size: 11px; color: var(--err); }
+/* A steer the portal could not deliver: the text is put back in the field, and the
+   border is what says so without stealing a row from a phone-sized composer. */
+#msg.err { border-color: var(--err); }
 
 /* ── new-session form ────────────────────────────────────────────────── */
 #newform {
@@ -382,7 +388,7 @@ footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
       <button class="btn" id="cancelnew">cancel</button>
     </div>
     <div class="nf-status" id="newstatus" role="status" aria-live="polite"></div>
-  </div><div id="list"></div><div id="detail" hidden><div id="ask" hidden></div><div id="log"></div><div id="todos"></div><div id="working" class="working" hidden></div></div></div></main>
+  </div><div id="list"></div><div id="detail" hidden><div id="ask" role="group" aria-live="assertive" hidden></div><div id="log"></div><div id="todos"></div><div id="working" class="working" hidden></div></div></div></main>
   <footer id="composer" hidden>
     <div class="wrap">
       <span class="prompt">›</span>
@@ -402,7 +408,13 @@ const pinned = new URLSearchParams(location.search).get("theme");
 if (pinned === "light" || pinned === "dark") document.documentElement.dataset.theme = pinned;
 
 const $ = id => document.getElementById(id);
-const esc = s => s.replace(/[<&]/g, c => (c === "<" ? "&lt;" : "&amp;"));
+/* Quotes matter as much as angle brackets here: several of these strings land in
+   attribute position, and everything this renders — assistant prose, tool output,
+   approval labels, ids off the wire — is content the agent produced or fetched. An
+   unescaped `"` in a markdown link target was enough to add a `style` attribute and
+   float one link over the whole viewport, so every tap hit it instead of stop. */
+const ESCAPES = { "<": "&lt;", "&": "&amp;", '"': "&quot;", "'": "&#39;" };
+const esc = s => String(s).replace(/[<&"']/g, c => ESCAPES[c]);
 
 /* Plain-text width of an inline-markdown cell. Column widths must be measured
    on what the eye sees, not on the markup, or every bold cell over-pads. */
@@ -503,7 +515,9 @@ function md(src) {
       .replace(/`([^`]+)`/g, "<code>$1</code>")
       .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
       .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-      .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+      // No quotes in the URL group: belt and braces with `esc`, so a link cannot
+      // carry an attribute even if this string reaches here unescaped later.
+      .replace(/\[([^\]]+)\]\((https?:[^)\s"']+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   const flushPara = () => { if (para.length) { out.push(`<p>${inline(para.join(" "))}</p>`); para = []; } };
   const flushList = () => { if (list) { out.push(`<${list.tag}>${list.items.map(i => `<li>${inline(i)}</li>`).join("")}</${list.tag}>`); list = null; } };
   const flush = () => { flushPara(); flushList(); };
@@ -620,7 +634,7 @@ function renderTranscript(items) {
       <div class="tool-head"><span class="sigil">${esc(label)}</span> <span class="arg">${esc(arg)}</span></div>
       ${body ? `<div class="tool-div">${it.isError ? "Error" : "Output"}</div>
       <div class="tool-body ${clip ? "clip" : ""}" data-body="${i}">${esc(body)}</div>
-      ${clip ? `<div class="tool-more"><button data-expand="${esc(it.id).replaceAll('"', "&quot;")}">… expand</button></div>` : ""}` : ""}
+      ${body.split("\n").length > 9 ? `<div class="tool-more"><button data-expand="${esc(it.id)}">${clip ? "… expand" : "collapse"}</button></div>` : ""}` : ""}
     </div></div>`;
   }).join("");
 }
@@ -701,7 +715,7 @@ async function refresh() {
             <span class="k" style="display:flex;align-items:center;gap:5px">
               <span class="gauge"><i style="width:${Math.min(100, pct).toFixed(0)}%"></i></span>${pct.toFixed(1)}%
             </span>
-            <span class="k">${esc(ageOf(s.startedAt))}</span>
+            ${ageOf(s.startedAt) ? `<span class="k">${esc(ageOf(s.startedAt))} ago</span>` : ""}
             <span class="k">pid ${s.pid}</span>
           </div>
           ${
@@ -846,11 +860,21 @@ function open(pid) {
     }
     for (const b of $("log").querySelectorAll("[data-expand]")) {
       b.onclick = () => {
-        // Remember it, then let the ordinary render path apply it: the next frame
-        // would otherwise re-clip the body.
-        expandedTools.add(b.dataset.expand);
-        b.closest(".tool")?.querySelector(".tool-body")?.classList.remove("clip");
-        b.parentElement.remove();
+        // A toggle, not a one-way door: expanding inserts thousands of pixels of
+        // raw output mid-transcript, and on a phone an accidental tap otherwise
+        // costs a lot of scrolling with no undo. The set is what the next render
+        // reads, so the state survives the frame that follows.
+        const id = b.dataset.expand;
+        const body = b.closest(".tool")?.querySelector(".tool-body");
+        if (expandedTools.has(id)) {
+          expandedTools.delete(id);
+          body?.classList.add("clip");
+          b.textContent = "… expand";
+        } else {
+          expandedTools.add(id);
+          body?.classList.remove("clip");
+          b.textContent = "collapse";
+        }
       };
     }
     if (atBottom) main.scrollTop = main.scrollHeight;
@@ -896,10 +920,23 @@ function showAsk(req) {
     opts.map(o => `<button class="opt" data-v="${esc(o)}">${esc(o)}</button>`).join("");
   for (const b of box.querySelectorAll("button")) {
     b.onclick = async () => {
-      await post(`/api/sessions/${current}/ui/${req.reqId}`, { value: b.dataset.v });
-      box.hidden = true;
+      const res = await post(`/api/sessions/${current}/ui/${req.reqId}`, { value: b.dataset.v }).catch(() => null);
+      // Only dismiss a question that was actually answered: hiding it on a failed
+      // request leaves the agent waiting on an approval the phone believes it gave.
+      if (res?.ok) {
+        box.hidden = true;
+        return;
+      }
+      const failed = document.createElement("div");
+      failed.className = "ask-err";
+      failed.textContent = "could not send that answer — try again";
+      box.querySelector(".ask-err")?.remove();
+      box.append(failed);
     };
   }
+  // The highest-stakes interruption in the app should not be silent to a screen
+  // reader, and the first option one tab away is right for a keyboard too.
+  box.querySelector("button")?.focus();
 }
 
 const main = document.querySelector("main");
@@ -914,7 +951,12 @@ async function api(url, init) {
 const post = (url, body) =>
   api(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
 
-$("back").onclick = () => {
+/* Tearing the session view down, without touching history: `back` unwinds the
+   hash entry it pushed (so the platform swipe-back gesture keeps working), and
+   `applyHash` calls this directly because the hash has already moved. Replacing
+   the entry instead of unwinding it left a duplicate `/` per open/close cycle,
+   which made swipe-back a no-op once per session browsed. */
+function closeSession() {
   es?.close(); es = null; current = null;
   $("list").hidden = false; $("detail").hidden = true;
   $("back").hidden = true; $("composer").hidden = true;
@@ -923,15 +965,30 @@ $("back").onclick = () => {
   $("ask").hidden = true; $("todos").innerHTML = ""; $("sub").textContent = "sessions";
   streaming = false; interrupted = false; openCwd = "";
   renderWorking(null);
-  if (location.hash) history.replaceState(null, "", location.pathname);
   refresh();
+}
+$("back").onclick = () => {
+  if (location.hash) {
+    history.back();
+    return;
+  }
+  closeSession();
 };
 $("send").onclick = async () => {
   const text = $("msg").value.trim();
   if (!text) return;
   $("msg").value = "";
   syncSendState();
-  await post(`/api/sessions/${current}/prompt`, { text });
+  const res = await post(`/api/sessions/${current}/prompt`, { text }).catch(() => null);
+  if (res?.ok) {
+    $("msg").classList.remove("err");
+    return;
+  }
+  // Never swallow what someone typed. Over a tunnel a dropped steer is ordinary,
+  // and the composer looked identical to a successful send while the text was gone.
+  $("msg").value = text;
+  $("msg").classList.add("err");
+  syncSendState();
 };
 /* The accent fill is a promise that tapping does something. With an empty field it
    did nothing at all, which reads as an unresponsive app — and in the stopped
@@ -1224,7 +1281,7 @@ function applyHash() {
   const wanted = Number.isInteger(pid) && pid > 0 ? pid : null;
   if (wanted === current) return;
   if (wanted === null) {
-    if (current !== null) $("back").click();
+    if (current !== null) closeSession();
     return;
   }
   if (document.querySelector(`.card[data-pid="${wanted}"]`) || current !== null) open(wanted);
