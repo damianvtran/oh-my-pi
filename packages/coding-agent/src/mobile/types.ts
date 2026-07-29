@@ -173,15 +173,19 @@ export interface PortalControl {
 }
 
 // ── Portal view state ───────────────────────────────────────────────────────
-// The portal keeps one of these per attached session and pushes them to the
-// phone over SSE. They are UI projections, not protocol types: the phone renders
-// TUI-shaped cards, so tool calls stay structured instead of flattened to text.
-
 export type TranscriptItem =
 	/** `from` names another room participant; absent when this portal sent it. */
 	| { kind: "user"; text: string; from?: string }
 	| { kind: "assistant"; text: string }
 	| { kind: "thinking"; text: string }
+	/**
+	 * Where a turn was cut short. Derived from the aborted assistant message rather
+	 * than from live UI state, so the seam sits at the point the stop happened and
+	 * survives every re-render and reconnect: without it a resumed turn read as one
+	 * continuous answer, and a turn aborted before its first token looked like the
+	 * agent ignoring the prompt above it.
+	 */
+	| { kind: "stopped" }
 	| { kind: "tool"; id: string; name: string; args: Record<string, unknown>; output?: string; isError?: boolean };
 
 /**
