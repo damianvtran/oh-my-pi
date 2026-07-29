@@ -25,6 +25,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import type { CollabSessionState, CollabUiRequest } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { PortalGuest } from "@oh-my-pi/pi-coding-agent/mobile/portal-guest";
 import type {
 	PortalActivity,
@@ -46,6 +47,21 @@ const TODO_PHASES: TodoPhase[] = [{ name: "Port", tasks: [{ content: "move the g
 
 function messageEntry(id: string, message: AgentMessage): SessionEntry {
 	return { type: "message", id, parentId: null, timestamp: "2026-07-28T00:00:00Z", message };
+}
+
+/** A prompt sent through the room, shaped exactly as the host persists it. */
+function collabPromptEntry(id: string, text: string, display = true): SessionEntry {
+	return {
+		type: "custom_message",
+		id,
+		parentId: null,
+		timestamp: "2026-07-28T00:00:00Z",
+		customType: COLLAB_PROMPT_MESSAGE_TYPE,
+		content: text,
+		display,
+		details: { from: "omp-mobile" },
+		attribution: "user",
+	};
 }
 
 function assistantMessage(content: AssistantMessage["content"]): AssistantMessage {
@@ -424,6 +440,37 @@ describe("mobile portal guest — stop and resume", () => {
 			);
 			await watch.until(() => watch.entries >= 2);
 			expect(guest.transcript).toEqual([{ kind: "user", text: "continue" }]);
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("shows what the phone itself typed, which the host stores as a collab-prompt entry", async () => {
+		// A prompt sent through the room is persisted as a `custom_message` entry,
+		// not a user message. A projection that only absorbed `message` entries
+		// rendered nothing for it: the phone showed the agent answering a question
+		// the phone could not see. Live runtime proved it; this locks it.
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
+		const { ctx } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			ctx.sessionManager.onEntryAppended?.(collabPromptEntry("c1", "ship it"));
+			await watch.until(() => guest.transcript.some(i => i.kind === "user" && i.text === "ship it"));
+
+			// The play button travels this same path, so the marker filter has to
+			// apply here too or the hidden prompt becomes a visible card.
+			ctx.sessionManager.onEntryAppended?.(collabPromptEntry("c2", INTERNAL_RESUME_PROMPT));
+			await watch.until(() => watch.entries >= 2);
+			expect(guest.transcript).toEqual([{ kind: "user", text: "ship it" }]);
+
+			// `display: false` is the host's own bookkeeping, never a phone card.
+			ctx.sessionManager.onEntryAppended?.(collabPromptEntry("c3", "invisible", false));
+			await watch.until(() => watch.entries >= 3);
+			expect(guest.transcript).toEqual([{ kind: "user", text: "ship it" }]);
 		} finally {
 			guest.close();
 			await host.stop("test over");
