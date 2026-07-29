@@ -93,6 +93,12 @@ export class PortalGuest {
 	#writeToken?: string;
 	/** Set by {@link close}: suppresses the close callback the portal just caused. */
 	#closed = false;
+	/**
+	 * Set when this portal aborted a turn that persisted no aborted entry to
+	 * derive from. Survives the welcome/snapshot rebuild for that reason; see
+	 * {@link markInterrupted}.
+	 */
+	#optimisticInterrupt = false;
 
 	constructor(events: PortalGuestEvents, displayName = DEFAULT_DISPLAY_NAME) {
 		this.#events = events;
@@ -159,8 +165,9 @@ export class PortalGuest {
 		this.#send({ t: "prompt", text });
 	}
 
-	abort(): void {
-		this.#send({ t: "abort" });
+	/** Returns whether the abort actually went out; a read-only room drops it. */
+	abort(): boolean {
+		return this.#send({ t: "abort" });
 	}
 
 	/**
@@ -171,10 +178,16 @@ export class PortalGuest {
 	 * it stays authoritative — but it is not complete: a turn stopped before its
 	 * first token produces no assistant entry at all, so a phone that pressed stop
 	 * in that window would get no resume button for an abort it performed itself.
-	 * The next `agent_start` clears the flag, so an optimistic set cannot outlive
-	 * the interruption it describes.
+	 *
+	 * Kept in its own field rather than only in `activity` because a welcome resets
+	 * activity wholesale and the snapshot that follows can only rebuild
+	 * `interrupted` from a persisted aborted entry — which in this exact case does
+	 * not exist, so a reconnect would silently drop the affordance. Cleared by the
+	 * next `agent_start` and by any assistant entry that did not abort, so it
+	 * cannot outlive the interruption it describes.
 	 */
 	markInterrupted(): void {
+		this.#optimisticInterrupt = true;
 		if (this.activity.interrupted) return;
 		this.activity = { ...this.activity, interrupted: true };
 		this.#events.onActivity?.(this.activity);
@@ -191,17 +204,18 @@ export class PortalGuest {
 	 * keeps the phone's read-only view working rather than throwing at a caller
 	 * that cannot do anything useful with the failure.
 	 */
-	#send(frame: CollabFrame): void {
+	#send(frame: CollabFrame): boolean {
 		const socket = this.#socket;
 		if (!socket || this.#closed) {
 			logger.debug("mobile portal guest: dropping frame, not connected", { t: frame.t });
-			return;
+			return false;
 		}
 		if (!this.#writeToken) {
 			logger.debug("mobile portal guest: dropping frame on a read-only room", { t: frame.t });
-			return;
+			return false;
 		}
 		socket.send(frame);
+		return true;
 	}
 
 	#handleFrame(frame: CollabFrame): void {
@@ -213,7 +227,16 @@ export class PortalGuest {
 				for (const entry of frame.entries) this.#absorb(entry);
 				// The final chunk completes the snapshot: everything a subscriber
 				// renders is now current, and nothing else announces that.
-				if (frame.final) this.#events.onResync?.();
+				if (frame.final) {
+					// The snapshot can only rebuild `interrupted` from a persisted
+					// aborted entry, so an abort this portal made before the turn's
+					// first token has to be re-applied here or a reconnect drops the
+					// resume button for an interruption that really happened.
+					if (this.#optimisticInterrupt && !this.activity.interrupted && !this.activity.working) {
+						this.activity = { ...this.activity, interrupted: true };
+					}
+					this.#events.onResync?.();
+				}
 				break;
 			case "entry":
 				this.#absorb(frame.entry);
@@ -324,6 +347,10 @@ export class PortalGuest {
 				// after `agent_end` — or any snapshot replay after a reconnect — left
 				// the phone with no resume button until something unrelated changed.
 				const interrupted = message.stopReason === "aborted";
+				// An assistant entry that did not abort is the authoritative answer to
+				// the optimistic flag: the turn produced real output and ended on its
+				// own terms.
+				if (!interrupted) this.#optimisticInterrupt = false;
 				if (interrupted !== this.activity.interrupted) {
 					this.activity = { ...this.activity, interrupted };
 					this.#events.onActivity?.(this.activity);
@@ -381,6 +408,7 @@ export class PortalGuest {
 			case "agent_start":
 				// A new turn answers any previous interruption, however it started —
 				// typed prompt, the resume button, or a queued message flushing.
+				this.#optimisticInterrupt = false;
 				this.activity = { working: true, interrupted: false };
 				break;
 			case "agent_end":

@@ -9,6 +9,7 @@
  * in argv — argv is world-readable through `ps`.
  */
 
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, ptree } from "@oh-my-pi/pi-utils";
@@ -139,9 +140,14 @@ exit "$code"`;
  * created, and the phone waits for a session that will never arrive. Routing the
  * wrapper's output to `session-jobs.log` is what makes that case diagnosable.
  */
-export function submitSessionHostJob(label: string, command: string[], logDir: string): Promise<CommandOutcome> {
+export async function submitSessionHostJob(label: string, command: string[], logDir: string): Promise<CommandOutcome> {
 	if (command.length === 0) throw new Error("session host command is required");
 	const logFile = path.join(logDir, "session-jobs.log");
+	// launchd opens the redirect target itself and silently discards the output if
+	// the directory is missing, which is the common case for a portal run straight
+	// from a checkout that was never installed — exactly where a stale launch argv
+	// is most likely and this log matters most.
+	await fs.mkdir(logDir, { recursive: true }).catch(() => {});
 	return run(
 		[
 			LAUNCHCTL,

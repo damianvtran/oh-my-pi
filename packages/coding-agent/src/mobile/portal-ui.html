@@ -16,12 +16,16 @@
 :root {
   color-scheme: dark;
   --bg: #0f0b14; --bg-raised: #16111c; --bg-inset: #09060c; --bg-overlay: #211b28;
-  --fg: #e6e3ea; --fg-muted: #a49faa; --fg-faint: #6e6974;
+  --fg: #e6e3ea; --fg-muted: #a49faa; --fg-faint: oklch(0.68 0.015 307);
   --accent: #ed4abf; --accent-muted: oklch(0.674 0.23 341 / 18%);
-  /* Fill colour for filled buttons. Split from `--accent` because the label sits
-     on top of it: `--accent` is tuned for text and borders on the page
-     background, where it is already legible. */
+  /* Three accent roles, because one colour cannot serve all of them at 12px:
+     `--accent` for borders and glyphs, `--accent-text` for text on the page
+     background, `--accent-solid` as a fill with a label on top. In the dark
+     palette they coincide; in the light one they must not. */
+  --accent-text: #ed4abf;
   --accent-solid: #ed4abf;
+  /* Warn as *text* needs more contrast than warn as a dot or a border. */
+  --warn-text: #e4b33f;
   --ok: #68ca80; --err: #f05653; --warn: #e4b33f; --link: #5ad8e5;
   --border: oklch(1 0 0 / 9%); --border-strong: oklch(1 0 0 / 13%);
   --ring: oklch(0.817 0.112 205 / 70%);
@@ -32,11 +36,11 @@
     color-scheme: light;
     --bg: oklch(0.985 0.004 307); --bg-raised: oklch(1 0 0);
     --bg-inset: oklch(0.95 0.006 307); --bg-overlay: oklch(0.965 0.006 307);
-    --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.58 0.025 307);
+    --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.52 0.025 307);
     --accent: oklch(0.62 0.23 341); --accent-muted: oklch(0.62 0.23 341 / 14%);
-    /* Darker than `--accent`: white-on-accent is 3.94:1 in this palette, below
-       the 4.5:1 AA floor for 12px labels. */
+    --accent-text: oklch(0.55 0.22 341);
     --accent-solid: oklch(0.52 0.21 341);
+    --warn-text: oklch(0.47 0.13 85);
     --ok: oklch(0.55 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
     --link: #0f7a88;
     --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
@@ -47,9 +51,11 @@
     color-scheme: light;
     --bg: oklch(0.985 0.004 307); --bg-raised: oklch(1 0 0);
     --bg-inset: oklch(0.95 0.006 307); --bg-overlay: oklch(0.965 0.006 307);
-    --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.58 0.025 307);
+    --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.52 0.025 307);
     --accent: oklch(0.62 0.23 341); --accent-muted: oklch(0.62 0.23 341 / 14%);
+    --accent-text: oklch(0.55 0.22 341);
     --accent-solid: oklch(0.52 0.21 341);
+    --warn-text: oklch(0.47 0.13 85);
     --ok: oklch(0.55 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
     --link: #0f7a88;
     --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
@@ -196,23 +202,23 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 
 /* user prompt — the TUI's ❯ badge line */
 .user-line { color: var(--fg); }
-.user-line::before { content: "❯ "; color: var(--accent); }
+.user-line::before { content: "❯ "; color: var(--accent-text); }
 
 /* assistant prose — no chrome, like the terminal */
 .md { color: var(--fg); }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
-.md h1, .md h2, .md h3 { margin: 12px 0 4px; font-size: 12px; font-weight: 650; color: var(--accent); }
+.md h1, .md h2, .md h3 { margin: 12px 0 4px; font-size: 12px; font-weight: 650; color: var(--accent-text); }
 .md h1::before { content: "# "; color: var(--fg-faint); font-weight: 400; }
 .md h2::before { content: "## "; color: var(--fg-faint); font-weight: 400; }
 .md h3::before { content: "### "; color: var(--fg-faint); font-weight: 400; }
 .md p { margin: 4px 0; }
 .md ul, .md ol { margin: 4px 0; padding-left: 0; list-style: none; }
 .md li { padding-left: 16px; position: relative; }
-.md ul > li::before { content: "•"; position: absolute; left: 4px; color: var(--accent); }
+.md ul > li::before { content: "•"; position: absolute; left: 4px; color: var(--accent-text); }
 .md ol { counter-reset: n; }
 .md ol > li { counter-increment: n; }
-.md ol > li::before { content: counter(n) "."; position: absolute; left: 0; color: var(--accent); }
+.md ol > li::before { content: counter(n) "."; position: absolute; left: 0; color: var(--accent-text); }
 .md b, .md strong { font-weight: 650; color: var(--fg); }
 .md em { font-style: italic; color: var(--fg-muted); }
 .md a { color: var(--link); }
@@ -232,7 +238,7 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 }
 .tool.err { border-color: color-mix(in srgb, var(--err) 45%, transparent); }
 .tool-head { padding: 6px 10px; color: var(--fg); overflow-wrap: anywhere; }
-.tool-head .sigil { color: var(--accent); }
+.tool-head .sigil { color: var(--accent-text); }
 .tool-head .arg { color: var(--fg-muted); }
 /* the `├─ Output ───┤` divider, as a rule with an inline label */
 .tool-div {
@@ -251,7 +257,7 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 
 /* todos — the tree panel, with omp's guides and strikethrough completions */
 .todos { margin: 10px 0; }
-.todos-h { font-weight: 650; color: var(--accent); }
+.todos-h { font-weight: 650; color: var(--accent-text); }
 .todos-h .count { color: var(--fg-faint); font-weight: 400; }
 .phase { color: var(--fg); font-weight: 650; }
 .phase .count { color: var(--fg-faint); font-weight: 400; }
@@ -269,12 +275,16 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
   border-radius: var(--radius-card);
 }
 #ask .q { color: var(--warn); font-weight: 650; margin-bottom: 8px; }
+/* Same 44px floor as `.btn`: these authorise a tool call, and a mis-tap here —
+   "yes, and don't ask again" is one row from "no" — is not recoverable the way a
+   mis-tapped stop is. */
 #ask .opt {
-  display: block; width: 100%; text-align: left; padding: 6px 10px; margin-top: 4px;
+  display: flex; align-items: center; min-height: 44px; width: 100%;
+  text-align: left; padding: 6px 10px; margin-top: 6px;
   background: var(--bg); border: 1px solid var(--hairline); border-radius: var(--radius-ctl);
 }
 #ask .opt:hover { background: var(--hover-wash); border-color: var(--border-strong); }
-#ask .opt::before { content: "› "; color: var(--accent); }
+#ask .opt::before { content: "› "; color: var(--accent-text); }
 
 /* ── new-session form ────────────────────────────────────────────────── */
 #newform {
@@ -294,7 +304,8 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
   background: var(--bg-inset); border: 1px solid var(--hairline);
   border-radius: var(--radius-ctl); color: var(--fg);
 }
-#newsuggest { appearance: auto; }
+/* Room for the UA's own chevron, which a long clipped label otherwise runs under. */
+#newsuggest { appearance: auto; padding-right: 28px; }
 #newdir::placeholder { color: var(--fg-faint); }
 /* The primary needs to be the wider of the two: `cancel` is the longer word and
    would otherwise be the physically larger button. */
@@ -310,7 +321,7 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
    ran straight on from the truncated one with no boundary. */
 .stopped {
   display: flex; align-items: center; gap: 8px;
-  margin: 10px 0; color: var(--warn); font-size: 11px;
+  margin: 10px 0; color: var(--warn-text); font-size: 11px;
 }
 .stopped::after { content: ""; flex: 1; border-top: 1px solid var(--hairline); }
 /* A prompt another participant sent, named so it does not read as the phone's own. */
@@ -323,7 +334,7 @@ footer {
 }
 /* Same 880px column as `.wrap`, so the input lines up with the transcript. */
 footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
-.prompt { color: var(--accent); flex: none; }
+.prompt { color: var(--accent-text); flex: none; }
 #msg {
   flex: 1; min-width: 0; min-height: 44px; padding: 6px 8px;
   background: var(--bg-inset); border: 1px solid var(--hairline);
@@ -626,11 +637,20 @@ function renderWorking(activity) {
   ensureSpinner();
 }
 
+/* Sessions as of the last refresh, so a start can tell an arriving session from
+   one that was already running. */
+let lastSessions = [];
+
 async function refresh() {
   if (current !== null) return;
   const res = await api("/api/sessions");
   if (!res.ok) return;
   const sessions = await res.json();
+  lastSessions = sessions;
+  // The reason to open the portal is a session that needs an answer, then one
+  // that is working; server order is arbitrary and buries both.
+  const rank = s => (s.needsAttention ? 0 : s.streaming ? 1 : 2);
+  sessions.sort((a, b) => rank(a) - rank(b) || String(b.startedAt ?? "").localeCompare(String(a.startedAt ?? "")));
   $("list").innerHTML = sessions.length
     ? sessions.map(s => {
         const pct = s.context ? s.context.percent : 0;
@@ -660,15 +680,25 @@ async function refresh() {
     : `<div class="empty">no live sessions yet — tap “+ new” to start one</div>`;
   ensureSpinner();
   // A session started from the phone takes a few seconds to publish its room, and
-  // it lands in an unsorted list of look-alike cards. The user asked for that one
-  // session, so open it the moment it exists rather than making them hunt for it.
+  // it lands in an unsorted list of look-alike cards, so open it as soon as it
+  // exists. Matching on cwd alone opened the *wrong* session whenever the chosen
+  // directory already hosted one — the normal case for the repo you always work
+  // in — dropping the user into another agent's context, so the arrival must also
+  // be a pid that was not already there when the start was accepted.
   if (awaitingCwd) {
-    const arrived = sessions.find(s => s.cwd === awaitingCwd);
+    const arrived = sessions.find(s => s.cwd === awaitingCwd && !awaitingKnownPids.has(s.pid));
     if (arrived) {
-      awaitingCwd = "";
-      $("start").disabled = false;
+      clearAwaitingStart();
       open(arrived.pid);
       return;
+    }
+    // A start the server accepted whose session never publishes (a nanny that
+    // cannot exec, a job that died) must not leave the form disabled forever.
+    if (Date.now() - awaitingSince > START_WAIT_MS) {
+      clearAwaitingStart();
+      const st = $("newstatus");
+      st.textContent = "started, but the session has not appeared yet — check the list";
+      st.classList.add("err");
     }
   }
   for (const el of document.querySelectorAll(".card[data-pid]")) el.onclick = () => open(Number(el.dataset.pid));
@@ -676,20 +706,41 @@ async function refresh() {
 
 /* Turn state for the open session, mirrored from the SSE frames so the header
    word, the turn control and the transcript marker all read the same truth. */
-let streaming = false, interrupted = false;
+let streaming = false, interrupted = false, openCwd = "";
+
+/* Header state word. Written from every path that changes the mirrors, not just
+   the `state` frame: the activity frame is what sets `interrupted`, and it
+   arrives after `state` on connect, so a header computed only there read "idle"
+   on a session the marker and the turn control both showed as stopped. */
+function renderHeader() {
+  if (current === null) return;
+  const label = innerWidth <= 640 ? (openCwd || "").split("/").pop() || String(current) : openCwd || String(current);
+  const state = streaming ? "working" : interrupted ? "stopped" : "idle";
+  $("sub").textContent = `${label} · ${state}`;
+}
 
 /* The abort itself leaves no card in the transcript — the host records a stop as
    an assistant `stopReason`, not an entry — so a prompt whose turn was killed
    before it emitted text read as the agent ignoring the user, and a resumed turn
-   ran straight on from the truncated one. This appends the boundary the story
-   needs, and removes it as soon as work resumes. */
+   ran straight on from the truncated one. This keeps the boundary in place: live
+   while stopped, then demoted to a quiet "stopped, then resumed" so scrolling
+   back through the session still shows where the seam was. */
 function renderStopMarker() {
   const existing = $("log").querySelector(".stopped");
   if (!interrupted || streaming) {
-    existing?.remove();
+    if (existing && !existing.dataset.resumed) {
+      existing.dataset.resumed = "1";
+      existing.textContent = "⨯ stopped, then resumed";
+      existing.style.color = "var(--fg-faint)";
+    }
     return;
   }
-  if (existing) return;
+  if (existing) {
+    delete existing.dataset.resumed;
+    existing.textContent = "⨯ stopped — the session is still open";
+    existing.style.removeProperty("color");
+    return;
+  }
   const marker = document.createElement("div");
   marker.className = "stopped";
   marker.textContent = "⨯ stopped — the session is still open";
@@ -701,32 +752,43 @@ function renderStopMarker() {
    putting stop in the far top corner meant the most time-critical button in the
    app sat at the least reachable point, 6px from the button that navigates away.
    `send` keeps the single accent fill so the row never shows two primaries. */
-function renderTurnControl(streaming, interrupted) {
+function renderTurnControl(isStreaming, isInterrupted) {
   const turn = $("turn");
   turn.disabled = false;
-  if (streaming) {
-    turn.hidden = false;
+  // `visibility`, not `hidden`: the slot stays in flow so the composer's geometry
+  // never depends on turn state — the text field must not resize under a caret
+  // when another participant starts a turn.
+  if (isStreaming) {
+    turn.style.visibility = "visible";
+    turn.style.pointerEvents = "";
     turn.textContent = "stop";
     turn.className = "btn btn-stop";
     turn.title = "stop the current turn — the session stays open";
+    turn.setAttribute("aria-label", "stop the current turn; the session stays open");
     return;
   }
-  if (interrupted) {
-    turn.hidden = false;
+  if (isInterrupted) {
+    turn.style.visibility = "visible";
+    turn.style.pointerEvents = "";
     turn.textContent = "resume";
     turn.className = "btn btn-go";
     turn.title = "continue the turn you stopped";
+    turn.setAttribute("aria-label", "resume the turn you stopped");
     return;
   }
-  turn.hidden = true;
+  turn.style.visibility = "hidden";
+  turn.style.pointerEvents = "none";
 }
 
 /* An empty transcript is the guaranteed first screen of a phone-started session,
    so it has to say something: which directory the session is in (the header
-   truncates it to a basename on a narrow screen) and what to do next. */
-function renderEmptyLog(cwd) {
+   truncates it to a basename on a narrow screen) and what to do next. The cwd
+   comes from the cached value rather than an argument, because the transcript
+   frame that follows `state` on connect has no cwd to pass and used to overwrite
+   the guide with a version missing the one fact it exists to show. */
+function renderEmptyLog() {
   $("log").innerHTML = `<div class="empty">no messages yet — send the first instruction below${
-    cwd ? `<div class="card-cwd" style="display:block;margin-top:6px">${esc(cwd)}</div>` : ""
+    openCwd ? `<div class="card-cwd" style="display:block;margin-top:6px">${esc(openCwd)}</div>` : ""
   }</div>`;
   $("msg").placeholder = "what should it work on?";
 }
@@ -743,19 +805,17 @@ function open(pid) {
   $("new").hidden = true;
   $("log").textContent = "";
   $("msg").placeholder = "steer this session";
-  interrupted = false;
+  streaming = false; interrupted = false; openCwd = "";
+  syncSendState();
   renderWorking(null);
   es = new EventSource(`/api/sessions/${pid}/events`);
   es.addEventListener("state", e => {
     const s = JSON.parse(e.data);
-    const label = innerWidth <= 640 ? (s.cwd ?? "").split("/").pop() || String(pid) : (s.cwd ?? String(pid));
-    // "stopped" is a third state, not a flavour of idle: after pressing stop the
-    // header used to read exactly like a turn that finished on its own.
-    const state = s.isStreaming ? "working" : interrupted ? "stopped" : "idle";
-    $("sub").textContent = `${label} · ${state}`;
-    streaming = s.isStreaming;
+    openCwd = s.cwd ?? "";
+    streaming = Boolean(s.isStreaming);
+    renderHeader();
     renderTurnControl(streaming, interrupted && !streaming);
-    if (!$("log").querySelector(".turn")) renderEmptyLog(s.cwd);
+    if (!$("log").querySelector(".turn")) renderEmptyLog();
   });
   es.addEventListener("transcript", e => {
     const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 40;
@@ -787,6 +847,7 @@ function open(pid) {
     // finished, so the composer alone is the way back in.
     interrupted = Boolean(a.interrupted);
     streaming = Boolean(a.working);
+    renderHeader();
     renderTurnControl(streaming, interrupted && !a.working);
     renderStopMarker();
     if (atBottom) main.scrollTop = main.scrollHeight;
@@ -806,6 +867,10 @@ function open(pid) {
 function showAsk(req) {
   const box = $("ask");
   box.hidden = false;
+  // An approval renders above the transcript, which on a long session is off the
+  // top of the screen: the agent waits on the user while the user waits on the
+  // agent, with only the working line's disappearance as a hint.
+  box.scrollIntoView({ block: "center" });
   const opts = (req.options ?? []).map(o => (typeof o === "string" ? o : o.label));
   box.innerHTML = `<div class="q">${esc(req.title)}</div>` +
     opts.map(o => `<button class="opt" data-v="${esc(o)}">${esc(o)}</button>`).join("");
@@ -832,10 +897,11 @@ const post = (url, body) =>
 $("back").onclick = () => {
   es?.close(); es = null; current = null;
   $("list").hidden = false; $("detail").hidden = true;
-  $("back").hidden = true; $("turn").hidden = true; $("composer").hidden = true;
+  $("back").hidden = true; $("composer").hidden = true;
+  renderTurnControl(false, false);
   $("new").hidden = false;
   $("ask").hidden = true; $("todos").innerHTML = ""; $("sub").textContent = "sessions";
-  streaming = false; interrupted = false;
+  streaming = false; interrupted = false; openCwd = "";
   renderWorking(null);
   if (location.hash) history.replaceState(null, "", location.pathname);
   refresh();
@@ -844,8 +910,16 @@ $("send").onclick = async () => {
   const text = $("msg").value.trim();
   if (!text) return;
   $("msg").value = "";
+  syncSendState();
   await post(`/api/sessions/${current}/prompt`, { text });
 };
+/* The accent fill is a promise that tapping does something. With an empty field it
+   did nothing at all, which reads as an unresponsive app — and in the stopped
+   state it advertised a dead primary next to the live `resume`. */
+function syncSendState() {
+  $("send").disabled = $("msg").value.trim().length === 0;
+}
+$("msg").oninput = syncSendState;
 $("msg").onkeydown = e => { if (e.key === "Enter") $("send").click(); };
 
 /* The one turn control: stop while a turn runs, resume after one was stopped.
@@ -858,13 +932,22 @@ $("turn").onclick = async () => {
   const wasStreaming = streaming;
   turn.disabled = true;
   const res = await post(`/api/sessions/${current}/${wasStreaming ? "interrupt" : "resume"}`).catch(() => null);
+  // `{ok: false}` is a real answer here: the portal reports an abort it could not
+  // deliver (a read-only room), so the control must come back rather than leave
+  // the phone believing the turn was stopped.
   if (!res?.ok) {
     turn.disabled = false;
     return;
   }
-  // The answering SSE frame decides what the control becomes; hide the resume
+  let body = {};
+  try { body = await res.json(); } catch {}
+  if (body.ok === false) {
+    turn.disabled = false;
+    return;
+  }
+  // The answering SSE frame decides what the control becomes; drop the resume
   // affordance now so a second tap cannot queue a second continue.
-  if (!wasStreaming) turn.hidden = true;
+  if (!wasStreaming) renderTurnControl(false, false);
 };
 
 /* New-session form. Successful choices are remembered by this browser: the
@@ -879,6 +962,19 @@ const CUSTOM_PATH = "\u0000custom";
 let pathDirty = false;
 /** cwd of a start that has been accepted but whose session has not appeared yet. */
 let awaitingCwd = "";
+/** When that start was accepted, so an arrival that never comes stops being waited on. */
+let awaitingSince = 0;
+/** Pids already running when it was accepted: the arrival must not be one of them. */
+let awaitingKnownPids = new Set();
+/** How long to keep the form disabled waiting for a started session to publish. */
+const START_WAIT_MS = 30_000;
+
+function clearAwaitingStart() {
+  awaitingCwd = "";
+  awaitingSince = 0;
+  awaitingKnownPids = new Set();
+  $("start").disabled = false;
+}
 
 function loadDirectoryMemory() {
   try {
@@ -902,7 +998,10 @@ function rememberDirectory(cwd) {
 function directoryLabel(dir, home) {
   const short = home && dir.startsWith(home) ? `~${dir.slice(home.length)}` : dir;
   const name = dir.replace(/\/+$/, "").split("/").pop();
-  return name && short !== name ? `${name} — ${short}` : short;
+  // `/tmp` would otherwise read "tmp — /tmp": name-first buys nothing when the
+  // path is barely longer than the name.
+  if (!name || short === name || short === `/${name}`) return short;
+  return `${name} — ${short}`;
 }
 function addDirectoryGroup(select, label, directories, seen, home) {
   const choices = directories.filter(dir => typeof dir === "string" && dir && !seen.has(dir));
@@ -986,11 +1085,16 @@ async function loadDirectorySuggestions() {
     if (!res.ok) throw new Error(String(res.status));
     renderDirectorySuggestions(await res.json());
   } catch {
-    // A dropped tunnel must still leave a usable form rather than a stuck spinner.
+    // A dropped tunnel must still leave a usable form rather than a stuck spinner,
+    // and must say so: a bare "type a path…" reads as "this portal has no
+    // directories".
     loading.textContent = "type a path…";
     loading.value = CUSTOM_PATH;
     select.value = CUSTOM_PATH;
     showPathField(true);
+    const st = $("newstatus");
+    st.textContent = "could not load directories — type a path";
+    st.classList.add("err");
   }
 }
 function hideNewForm() {
@@ -1022,6 +1126,10 @@ $("newsuggest").onchange = () => {
   if (select.value === CUSTOM_PATH) {
     showPathField(true);
     $("newdir").focus();
+    // Select rather than append: the field still holds the directory that was
+    // chosen a moment ago, and erasing 20-odd characters on a phone keyboard to
+    // type a different path is the worst part of this form.
+    $("newdir").select();
     return;
   }
   showPathField(false);
@@ -1060,7 +1168,12 @@ $("start").onclick = async () => {
     const body = await res.json().catch(() => ({}));
     const resolved = typeof body.cwd === "string" && body.cwd ? body.cwd : cwd;
     rememberDirectory(resolved);
+    // Snapshot what is already running: the arrival has to be a session that was
+    // not there before, or a directory that already hosts one would match first
+    // and drop the user into the wrong agent.
     awaitingCwd = resolved;
+    awaitingSince = Date.now();
+    awaitingKnownPids = new Set(lastSessions.map(s => s.pid));
     // Deliberately left disabled: the session takes a few seconds to appear, and
     // a second tap in that window starts a second agent in the same directory.
     st.textContent = "starting — opening the session as soon as it appears";

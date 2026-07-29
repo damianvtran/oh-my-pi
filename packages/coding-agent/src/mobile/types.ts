@@ -127,21 +127,25 @@ export interface MobileStatusReport {
 }
 
 /**
- * Prefix of the one prompt the phone may hide from its transcript: the resume
- * instruction the play button sends after a stop. A stop on the phone is the
- * Escape key (an `abort` frame), not a process signal — the session stays
- * alive and simply has no turn running — so resuming is a new prompt that
- * tells the agent to pick its work back up.
+ * Marker that names the one prompt the phone may hide from its transcript: the
+ * resume instruction the button sends after a stop. A stop on the phone is the
+ * Escape key (an `abort` frame), not a process signal — the session stays alive
+ * and simply has no turn running — so resuming is a new prompt that tells the
+ * agent to pick its work back up.
  *
- * It is a real user message on purpose: the host, the session transcript and
- * any other guest all see exactly what drove the agent, and the TUI renders
- * it like any other prompt. Only the portal's projection drops it, and only
- * by this exact prefix — a "continue" the user types by hand never matches
- * and always stays visible.
+ * It is a real user message on purpose: the host, the session transcript and any
+ * other guest all see exactly what drove the agent, and the TUI renders it like
+ * any other prompt.
+ *
+ * The projection filter matches {@link INTERNAL_RESUME_PROMPT} in full, not this
+ * prefix. Prefix matching would let any participant holding a write token steer
+ * the agent with text the phone never renders, which is precisely the blindness
+ * the projection exists to remove; a hand-typed "continue" always stays visible
+ * either way.
  */
 export const INTERNAL_RESUME_MARKER = "[omp-mobile:resume]";
 
-/** The prompt the phone's resume button sends. */
+/** The prompt the phone's resume button sends, and the only text it hides. */
 export const INTERNAL_RESUME_PROMPT = `${INTERNAL_RESUME_MARKER} I paused you from my phone. Continue the work you were doing before the interruption.`;
 
 /** Directory choices for the phone's new-session picker. */

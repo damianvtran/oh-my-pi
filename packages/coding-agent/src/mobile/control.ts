@@ -29,7 +29,6 @@ import * as path from "node:path";
 import { type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { listAllSessions } from "../session/session-listing";
-import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
 import { isDarwin, submitSessionHostJob } from "./launchctl";
 import { mobileRuntimeDir, SESSION_JOB_LABEL_PREFIX } from "./paths";
 import { launchEnvironment, resolveOmpLaunchArgv } from "./service";
@@ -46,6 +45,12 @@ import type { PortalControl, PortalDirectorySuggestions } from "./types";
  * the portal being up. macOS-only, matching the services.
  */
 const CAFFEINATE = "/usr/bin/caffeinate";
+
+/**
+ * `env(1)`, used to carry the profile selection into a submitted launchd job:
+ * `launchctl submit` takes a command, not an environment.
+ */
+const ENV_BIN = "/usr/bin/env";
 
 /**
  * How long `{home, recent}` is reused before rescanning the session store.
@@ -97,17 +102,10 @@ export async function validateSessionCwd(input: string): Promise<string> {
  * `/tmp`, deleted worktrees and removed checkouts are exactly the most recently
  * used ones, so filtering afterwards let dead entries eat every slot and could
  * hand the phone an empty list while live directories sat just past the cut.
- *
- * `storage` is injectable so tests can pin ordering, dedupe and the existence
- * rule against a fixture instead of whatever sessions the developer happens to
- * have.
  */
-export async function listDirectorySuggestions(
-	limit = 8,
-	storage: SessionStorage = new FileSessionStorage(),
-): Promise<PortalDirectorySuggestions> {
+export async function listDirectorySuggestions(limit = 8): Promise<PortalDirectorySuggestions> {
 	const home = os.homedir();
-	const sessions = await listAllSessions(storage).catch(() => []);
+	const sessions = await listAllSessions().catch(() => []);
 	const seen = new Set<string>([home]);
 	const recent: string[] = [];
 	for (const session of sessions) {
@@ -152,12 +150,23 @@ export function buildHostArgv(launchArgv: string[], cwd: string): string[] {
  * teardown. The submitted job removes its own launchd label when the nanny
  * exits. Other platforms have no launchd service lifecycle to escape, so a
  * detached POSIX process with ignored stdio is the portable fallback.
+ *
+ * A submitted job inherits nothing from the submitting process, so the profile
+ * selection has to be carried over by hand: `PI_CONFIG_DIR` decides which config
+ * root the session resolves, and therefore which link directory it publishes to.
+ * Without it a `PI_CONFIG_DIR=… omp mobile serve` portal would start sessions
+ * that publish where its own watcher is not looking, and the phone would wait
+ * forever for a session that is running fine.
  */
 export async function spawnSessionHost(launchArgv: string[], cwd: string, log: (msg: string) => void): Promise<void> {
 	const hostArgv = buildHostArgv(launchArgv, cwd);
 	if (isDarwin()) {
 		const label = `${SESSION_JOB_LABEL_PREFIX}${process.pid}.${Date.now().toString(36)}.${crypto.randomUUID().slice(0, 8)}`;
-		const result = await submitSessionHostJob(label, [CAFFEINATE, "-dims", ...hostArgv], mobileRuntimeDir());
+		const configDir = process.env.PI_CONFIG_DIR;
+		const command = configDir
+			? [ENV_BIN, `PI_CONFIG_DIR=${configDir}`, CAFFEINATE, "-dims", ...hostArgv]
+			: [CAFFEINATE, "-dims", ...hostArgv];
+		const result = await submitSessionHostJob(label, command, mobileRuntimeDir());
 		if (!result.ok) {
 			log(`session host submit failed label=${label} cwd=${cwd} code=${result.exitCode} ${result.stderr}`);
 			throw new Error("could not start session host");
@@ -170,6 +179,27 @@ export async function spawnSessionHost(launchArgv: string[], cwd: string, log: (
 	proc.unref();
 	void proc.exited.then(code => log(`session host exited pid=${proc.pid} cwd=${cwd} code=${code}`));
 	log(`session host spawned pid=${proc.pid} cwd=${cwd}`);
+}
+
+/**
+ * Environment for the omp the nanny runs.
+ *
+ * On macOS the nanny is created by launchd and inherits almost nothing — a
+ * phone-started session was observed running with
+ * `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so its `bash` tool calls could not see
+ * bun, homebrew or `~/.local/bin`: healthy in the room, broken at the first real
+ * command. There `launchEnvironment` (the same set the service plists spell out)
+ * has to win.
+ *
+ * Everywhere else the nanny is forked from a portal someone started in a login
+ * shell, and that environment is better than anything reconstructed here — nvm,
+ * pyenv, cargo and asdf all live in it. There the inherited values win and
+ * `launchEnvironment` only fills what is missing.
+ */
+function sessionEnvironment(): Record<string, string> {
+	const inherited = process.env as Record<string, string>;
+	const launch = launchEnvironment(os.homedir());
+	return isDarwin() ? { ...inherited, ...launch } : { ...launch, ...inherited };
 }
 
 /**
@@ -203,16 +233,9 @@ export function defaultPortalControl(log: (msg: string) => void): PortalControl 
  * and nothing appeared" is debuggable after the fact; two short lines per
  * spawned session cannot grow meaningfully.
  *
- * The child's environment is built explicitly rather than inherited. On macOS
- * this nanny is created by launchd (`launchctl submit`), not forked from the
- * portal, and a launchd job inherits almost nothing: a phone-started session was
- * observed running with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so its `bash` tool
- * calls could not see bun, homebrew or `~/.local/bin` — a session that looks
- * healthy in the room and then fails at the first real command. `launchEnvironment`
- * is the same set the service plists spell out for exactly this reason; anything
- * already in this process's environment (a profile's `PI_CONFIG_DIR`, for
- * instance) is kept underneath it so a profile-scoped install still publishes to
- * the link directory its own portal watches.
+ * The child's environment comes from {@link sessionEnvironment}, which is not a
+ * plain inherit: see there for why macOS needs an explicit PATH and other
+ * platforms must not have theirs replaced.
  */
 export async function runSessionHost(cwd: string): Promise<number> {
 	const dir = await validateSessionCwd(cwd);
@@ -235,7 +258,7 @@ export async function runSessionHost(cwd: string): Promise<number> {
 			cwd: dir,
 			cols: PTY_COLS,
 			rows: PTY_ROWS,
-			env: { ...(process.env as Record<string, string>), ...launchEnvironment(os.homedir()) },
+			env: sessionEnvironment(),
 		});
 	} catch (err) {
 		await note(`spawn failed cwd=${dir}: ${err instanceof Error ? err.message : String(err)}`);
