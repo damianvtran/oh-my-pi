@@ -144,6 +144,14 @@ export const INTERNAL_RESUME_MARKER = "[omp-mobile:resume]";
 /** The prompt the phone's resume button sends. */
 export const INTERNAL_RESUME_PROMPT = `${INTERNAL_RESUME_MARKER} I paused you from my phone. Continue the work you were doing before the interruption.`;
 
+/** Directory choices for the phone's new-session picker. */
+export interface PortalDirectorySuggestions {
+	/** The user's home directory, always available as the safe first-use default. */
+	home: string;
+	/** Existing working directories from recent omp sessions, newest first. */
+	recent: string[];
+}
+
 /**
  * The portal's session-spawning surface, injectable so route tests never touch
  * the process table or the PTY layer. The real implementation is
@@ -152,8 +160,8 @@ export const INTERNAL_RESUME_PROMPT = `${INTERNAL_RESUME_MARKER} I paused you fr
 export interface PortalControl {
 	/** Validate the directory and spawn a session nanny in it. Throws with a phone-safe message on bad input. */
 	startSession(cwd: string): Promise<void>;
-	/** Suggested directories for the new-session form, most recent first. */
-	listDirectories(): Promise<string[]>;
+	/** Home plus recent session directories for the new-session picker. */
+	listDirectories(): Promise<PortalDirectorySuggestions>;
 }
 
 // ── Portal view state ───────────────────────────────────────────────────────
