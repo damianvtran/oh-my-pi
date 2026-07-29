@@ -1386,9 +1386,14 @@ export class TurnRecovery {
 		const withinDecay = previous !== undefined && nowMs - previous.suppressedUntilMs < RETRY_FALLBACK_STRIKE_DECAY_MS;
 		// Escalation exists to protect cycling; with cycling off the walk never
 		// returns to a model, so leaving it on would stretch suppression windows the
-		// forward walk, the primary restore and the usage preflight all read.
-		const strikes =
-			this.#retryFallbackCycleEnabled() && previous && probed && windowLapsed && withinDecay
+		// forward walk, the primary restore and the usage preflight all read. The
+		// carried count is gated too, not just the increment — a multiplier earned
+		// while cycling was on must not keep doubling windows after the switch is
+		// flipped off mid-session, which is the ordinary way it gets used.
+		const cycleEnabled = this.#retryFallbackCycleEnabled();
+		const strikes = !cycleEnabled
+			? 0
+			: previous && probed && windowLapsed && withinDecay
 				? previous.strikes + 1
 				: (previous?.strikes ?? 0);
 		const escalatedMs = Math.min(
@@ -1396,13 +1401,19 @@ export class TurnRecovery {
 			RETRY_FALLBACK_MAX_COOLDOWN_MS,
 		);
 		// Never shorten a window already promised: a failure inside an open window
-		// must not hand the model back early. Cycling-only, exactly like the
-		// escalation above — upstream's last-write-wins timing is what the kill
-		// switch has to reproduce, and a later shorter cooldown freeing the model
-		// early only matters once something may reverse onto it.
-		const suppressedUntilMs = this.#retryFallbackCycleEnabled()
-			? Math.max(nowMs + escalatedMs, previous?.suppressedUntilMs ?? 0)
-			: nowMs + escalatedMs;
+		// must not hand the model back early. Two bounds on that. It is cycling-only,
+		// because upstream's last-write-wins timing is what the kill switch has to
+		// reproduce. And it defers to the registry, which OWNS suppression: an
+		// explicit `/model` pick calls `clearSuppressedSelector` and a registry
+		// refresh drops every window, so a deadline this ledger still remembers may
+		// already have been cancelled deliberately. Flooring against that stale copy
+		// would silently reverse a user's own command — re-imposing hours of a
+		// cleared cap on the next trivial hiccup.
+		const promisedUntilMs =
+			previous !== undefined && this.#host.modelRegistry.isSelectorSuppressed(currentSelector)
+				? previous.suppressedUntilMs
+				: 0;
+		const suppressedUntilMs = cycleEnabled ? Math.max(nowMs + escalatedMs, promisedUntilMs) : nowMs + escalatedMs;
 		this.#pruneRetryFallbackFlaps(nowMs);
 		this.#retryFallbackFlaps.set(flapKey, { strikes, suppressedUntilMs, probing: false });
 		this.#host.modelRegistry.suppressSelector(currentSelector, suppressedUntilMs);
