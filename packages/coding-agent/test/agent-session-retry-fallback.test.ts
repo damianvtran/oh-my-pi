@@ -5023,6 +5023,183 @@ describe("AgentSession retry fallback", () => {
 			expect(session.model?.id).toBe(models.mid.id);
 		});
 
+		it("prefers the role's own model over an intermediate entry when both recovered", async () => {
+			// The shape a real config takes: the session runs the `default` role's
+			// model and `retry.fallbackChains.default` lists two fallbacks, so the
+			// effective chain is [role model, mid, last]. A reversal must reach for the
+			// role's model first rather than settling for the nearest healthy entry.
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			const failedOnce = new Set<string>();
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const primarySelector = `${models.primary.provider}/${models.primary.id}`;
+			const lastSelector = `${models.last.provider}/${models.last.id}`;
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					// The role model draws a 5s cap and the middle entry a 200ms blip, so
+					// only the jump the tail's failure takes (+6s) frees the role model.
+					// Both are healthy at that instant, which is what makes the choice
+					// between them observable.
+					if (selector === lastSelector) now += 6_000;
+					else now += 100;
+					if (!failedOnce.has(selector)) {
+						failedOnce.add(selector);
+						mock.push({
+							throw:
+								selector === primarySelector ? "rate limit exceeded retry-after-ms=5000" : CYCLE_COOLDOWN_HINT,
+						});
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, true),
+				modelRegistry,
+			});
+			const fallbackApplied: Array<{ from: string; to: string }> = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") fallbackApplied.push({ from: event.from, to: event.to });
+			});
+
+			await session.prompt("Reverse onto the role's own model, not the nearest healthy entry");
+			await session.waitForIdle();
+
+			// The role's own model is reached through the restore path, which owns the
+			// effort-level restore and emits no fallback event. So the proof is the
+			// request sequence: the fourth attempt is the role's model, not the nearer
+			// healthy `mid`, and no fallback switch ever targeted `mid` a second time.
+			expect(requestedModels).toEqual([
+				primarySelector,
+				`${models.mid.provider}/${models.mid.id}`,
+				lastSelector,
+				primarySelector,
+			]);
+			expect(fallbackApplied).toEqual([
+				{ from: primarySelector, to: `${models.mid.provider}/${models.mid.id}` },
+				{ from: `${models.mid.provider}/${models.mid.id}`, to: lastSelector },
+			]);
+			expect(session.model?.id).toBe(models.primary.id);
+		});
+
+		it("never reverses when the revert policy is never", async () => {
+			// `never` promises the session stays on its fallback until switched by
+			// hand. A backward hop onto the primary would break that promise just as
+			// surely as the boundary restore it already blocks.
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			const failedOnce = new Set<string>();
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					now += 500;
+					if (!failedOnce.has(selector)) {
+						failedOnce.add(selector);
+						mock.push({ throw: CYCLE_COOLDOWN_HINT });
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			const settings = cycleSettings(models, true);
+			settings.override("retry.fallbackRevertPolicy", "never");
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("Never means never, in both directions");
+			await session.waitForIdle();
+
+			// Every model's 200ms window has lapsed by the time the tail is reached, so
+			// only the policy keeps the session from walking back up the chain. Anything
+			// after the walk is same-model backoff on the tail, which `never` permits.
+			expect(requestedModels.slice(0, 3)).toEqual([
+				`${models.primary.provider}/${models.primary.id}`,
+				`${models.mid.provider}/${models.mid.id}`,
+				`${models.last.provider}/${models.last.id}`,
+			]);
+			expect(requestedModels.slice(3)).toEqual(
+				requestedModels.slice(3).map(() => `${models.last.provider}/${models.last.id}`),
+			);
+			expect(session.model?.id).toBe(models.last.id);
+		});
+
+		it("keeps the hop cap when the provider's window outlasts the climb dwell", async () => {
+			// The boundary restore check also runs before each scheduled continue
+			// inside a live burst. A `retry-after` longer than the climb dwell would
+			// therefore let the climb reverse on every attempt, defeating the per-burst
+			// hop cap — the climb has to stand down while a burst is in flight.
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const primarySelector = `${models.primary.provider}/${models.primary.id}`;
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					// Past the 60s dwell on every attempt, and past each 200ms window.
+					now += 61_000;
+					mock.push({ throw: selector === primarySelector ? LONG_COOLDOWN_HINT : CYCLE_COOLDOWN_HINT });
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, true),
+				modelRegistry,
+			});
+			const reversals: Array<{ from: string; to: string }> = [];
+			const order = [
+				primarySelector,
+				`${models.mid.provider}/${models.mid.id}`,
+				`${models.last.provider}/${models.last.id}`,
+			];
+			session.subscribe(event => {
+				if (event.type !== "retry_fallback_applied") return;
+				const from = order.indexOf(event.from);
+				const to = order.indexOf(event.to);
+				if (from >= 0 && to >= 0 && to < from) reversals.push({ from: event.from, to: event.to });
+			});
+
+			await session.prompt("A long provider window must not multiply reversals");
+			await session.waitForIdle();
+
+			expect(reversals).toEqual([
+				{ from: `${models.last.provider}/${models.last.id}`, to: `${models.mid.provider}/${models.mid.id}` },
+			]);
+		});
+
 		it("takes at most one backward hop per retry burst", async () => {
 			const models = cycleModels();
 			const requestedModels: string[] = [];

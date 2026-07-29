@@ -1636,7 +1636,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Retry & Fallback",
 			label: "Cycle Fallback Chains",
 			description:
-				"Let an exhausted chain re-consult the models before the active one instead of dead-ending on its last entry. Only models whose cooldown already expired are eligible, each model is used at most once per retry burst, and a model that fails again right after recovering gets a doubled cooldown — so recovery never turns into a bounce between two rate-limited providers. Off restores the strictly forward-only walk.",
+				"Let an exhausted chain reverse onto the models before the active one instead of dead-ending on its last entry, and let a turn boundary climb partway home while the primary is still capped. Only models whose cooldown already expired are eligible, one retry burst may reverse direction at most once, and a model that fails again right after recovering gets a doubled cooldown — so recovery never turns into a bounce between two rate-limited providers. Off restores the strictly forward-only walk.",
 		},
 	},
 
