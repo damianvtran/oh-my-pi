@@ -1334,10 +1334,23 @@ export class TurnRecovery {
 		return getRetryFallbackRevertPolicy(this.#host.settings);
 	}
 
-	/** Clears fallback ownership after an explicit model change or a restore. */
-	clearActiveRetryFallback(): void {
+	/**
+	 * Clears fallback ownership after an explicit model change or a restore.
+	 *
+	 * `forgetSelector` names the model the user picked. Its flap record goes with
+	 * the ownership: an explicit pick also calls `ModelRegistry.clearSuppressedSelector`,
+	 * and the registry owns suppression, so a record this ledger still holds for
+	 * that model describes a window the user just cancelled. Keeping its strike
+	 * count would let the next failure draw a doubled (up to 8x) window on a model
+	 * whose cap was deliberately dropped — a user command silently reversed.
+	 *
+	 * The restore path passes nothing: it arms a probe strike on the primary on
+	 * purpose, and forgetting the record here would erase it in the same breath.
+	 */
+	clearActiveRetryFallback(forgetSelector?: string): void {
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
+		if (forgetSelector) this.#retryFallbackFlaps.delete(this.#retryFallbackFlapKey(forgetSelector));
 	}
 
 	/** Checks whether a fallback selector remains in cooldown. */
@@ -1396,10 +1409,15 @@ export class TurnRecovery {
 			: previous && probed && windowLapsed && withinDecay
 				? previous.strikes + 1
 				: (previous?.strikes ?? 0);
-		const escalatedMs = Math.min(
-			cooldownMs * Math.min(2 ** strikes, RETRY_FALLBACK_STRIKE_MULTIPLIER_CAP),
-			RETRY_FALLBACK_MAX_COOLDOWN_MS,
-		);
+		// The absolute ceiling is cycling-only for the same reason as the multiplier:
+		// upstream honours a provider's window verbatim, however long, and the kill
+		// switch has to mean exactly that.
+		const escalatedMs = cycleEnabled
+			? Math.min(
+					cooldownMs * Math.min(2 ** strikes, RETRY_FALLBACK_STRIKE_MULTIPLIER_CAP),
+					RETRY_FALLBACK_MAX_COOLDOWN_MS,
+				)
+			: cooldownMs;
 		// Never shorten a window already promised: a failure inside an open window
 		// must not hand the model back early. Two bounds on that. It is cycling-only,
 		// because upstream's last-write-wins timing is what the kill switch has to
@@ -2091,9 +2109,9 @@ export class TurnRecovery {
 	 *   request failure, which escalates that entry's cooldown on the way down;
 	 * - the primary is excluded — restoring it belongs to the caller, which owns
 	 *   the effort-level restore a mid-chain hop must not perform;
-	 * - an entry that has already failed a re-probe is left alone until the flap
-	 *   ledger forgets it, so a chronically capped middle entry stops costing a
-	 *   wasted request and two provider-session resets every turn;
+	 * - an entry that has failed two re-probes is left alone until the flap ledger
+	 *   forgets it, so a chronically capped middle entry stops costing a wasted
+	 *   request and two provider-session resets every turn;
 	 * - a dwell window keeps a climb from firing in the same breath as the descent
 	 *   that stranded us.
 	 */

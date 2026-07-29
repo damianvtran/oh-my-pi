@@ -5746,6 +5746,72 @@ describe("AgentSession retry fallback", () => {
 			expect(requestedModels.filter(selector => selector === primarySelector)).toHaveLength(3);
 		});
 
+		it("drops an earned strike multiplier when the user re-picks the model by hand", async () => {
+			// The window half of this is covered above; the strike count lives in the
+			// same ledger record and must go with it. Otherwise a model whose cap the
+			// user just cancelled draws a doubled window on its next failure.
+			const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallback = getBundledModel("openai", "gpt-4o-mini");
+			if (!primary || !fallback) throw new Error("Expected bundled test models to exist");
+			const primarySelector = `${primary.provider}/${primary.id}`;
+			let primaryFailures = 0;
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					if (model.provider === primary.provider && model.id === primary.id) {
+						primaryFailures += 1;
+						mock.push({ throw: CYCLE_COOLDOWN_HINT });
+					} else {
+						mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] },
+				"retry.fallbackRevertPolicy": "cooldown-expiry",
+			});
+			settings.setModelRole("default", primarySelector);
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("First failure buys the base window");
+			await session.waitForIdle();
+			now += 250;
+			await session.prompt("Restore, fail again, earn a strike");
+			await session.waitForIdle();
+			expect(primaryFailures).toBe(2);
+
+			// The user takes the wheel: this clears the cooldown, and the strike with it.
+			now += 450;
+			await session.setModelTemporary(primary);
+			expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(false);
+
+			// A fresh 200ms blip must buy 200ms, not the 400ms a retained strike would.
+			await session.prompt("A blip on the model the user chose");
+			await session.waitForIdle();
+			expect(primaryFailures).toBe(3);
+			expect(session.model?.id).toBe(fallback.id);
+
+			now += 250;
+			await session.prompt("Back on the user's choice after the plain window");
+			await session.waitForIdle();
+			expect(primaryFailures).toBe(4);
+		});
+
 		it("drops an earned strike multiplier when cycling is switched off mid-session", async () => {
 			// The kill switch is a live settings toggle, so escalation earned while
 			// cycling was on must not keep stretching windows after it is turned off.
