@@ -5376,6 +5376,98 @@ describe("AgentSession retry fallback", () => {
 			expect(retryEndEvents.at(-1)).toMatchObject({ success: false });
 		});
 
+		it("does not climb between turns when cycling is disabled", async () => {
+			// The between-turns climb has its own kill-switch gate, on a different call
+			// site from the mid-turn pass: the restore path invokes it unconditionally,
+			// so without that gate a cycling-off session would still walk back up.
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			const failedOnce = new Set<string>();
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const primarySelector = `${models.primary.provider}/${models.primary.id}`;
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					if (!failedOnce.has(selector) && selector !== `${models.last.provider}/${models.last.id}`) {
+						failedOnce.add(selector);
+						mock.push({ throw: selector === primarySelector ? LONG_COOLDOWN_HINT : CYCLE_COOLDOWN_HINT });
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, false),
+				modelRegistry,
+			});
+
+			await session.prompt("Land on the last entry");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(models.last.id);
+
+			// Past the dwell, with the middle entry long recovered and the primary still
+			// capped — precisely when cycling would climb.
+			now += 61_000;
+			await session.prompt("Cycling is off, so stay put");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([
+				primarySelector,
+				`${models.mid.provider}/${models.mid.id}`,
+				`${models.last.provider}/${models.last.id}`,
+				`${models.last.provider}/${models.last.id}`,
+			]);
+			expect(session.model?.id).toBe(models.last.id);
+		});
+
+		it("honours a provider window longer than the escalation ceiling when cycling is disabled", async () => {
+			// The absolute 4h ceiling is part of the anti-flap budget, so with the kill
+			// switch off a week-long cap has to be honoured verbatim, the way upstream
+			// does. This is the last divergence the changelog's parity claim rests on.
+			const models = cycleModels();
+			const primarySelector = `${models.primary.provider}/${models.primary.id}`;
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					// A week-long cap on the primary; the first fallback serves the turn.
+					if (selector === primarySelector) mock.push({ throw: "rate limit exceeded retry-after-ms=604800000" });
+					else mock.push({ content: [`ok:${selector}`] });
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, false),
+				modelRegistry,
+			});
+
+			await session.prompt("A week-long cap on the primary");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(models.mid.id);
+
+			// Five hours in: past the 4h ceiling the cycling path would have imposed,
+			// nowhere near the week the provider asked for.
+			now += 5 * 60 * 60 * 1_000;
+			expect(modelRegistry.isSelectorSuppressed(primarySelector)).toBe(true);
+		});
+
 		it("climbs to a recovered middle entry at a turn boundary while the primary stays capped", async () => {
 			const models = cycleModels();
 			const requestedModels: string[] = [];

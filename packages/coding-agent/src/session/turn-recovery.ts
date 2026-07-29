@@ -1337,12 +1337,14 @@ export class TurnRecovery {
 	/**
 	 * Clears fallback ownership after an explicit model change or a restore.
 	 *
-	 * `forgetSelector` names the model the user picked. Its flap record goes with
-	 * the ownership: an explicit pick also calls `ModelRegistry.clearSuppressedSelector`,
-	 * and the registry owns suppression, so a record this ledger still holds for
-	 * that model describes a window the user just cancelled. Keeping its strike
-	 * count would let the next failure draw a doubled (up to 8x) window on a model
-	 * whose cap was deliberately dropped — a user command silently reversed.
+	 * `forgetSelector` names the model being switched TO, and its flap record goes
+	 * with the ownership. Every caller — an interactive `/model` pick, the prewalk
+	 * and plan-yolo transitions, the context-promotion overflow switch — clears that
+	 * model's registry suppression on the same line, and the registry owns
+	 * suppression, so a record this ledger still holds describes a window that was
+	 * just cancelled. Keeping its strike count would let the next failure draw a
+	 * doubled (up to 8x) window on a model whose cap was deliberately dropped: for
+	 * an interactive pick that is a user command silently reversed.
 	 *
 	 * The restore path passes nothing: it arms a probe strike on the primary on
 	 * purpose, and forgetting the record here would erase it in the same breath.
