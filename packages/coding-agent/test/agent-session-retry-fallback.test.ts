@@ -5200,6 +5200,65 @@ describe("AgentSession retry fallback", () => {
 			]);
 		});
 
+		it("never reverses while the latch is pinned by a classifier refusal", async () => {
+			// A refusal deliberately leaves the refusing model unsuppressed, so a later
+			// ordinary error on the pinned fallback must not walk the turn back onto it.
+			const models = cycleModels();
+			const requestedModels: string[] = [];
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const primarySelector = `${models.primary.provider}/${models.primary.id}`;
+			const midSelector = `${models.mid.provider}/${models.mid.id}`;
+			const lastSelector = `${models.last.provider}/${models.last.id}`;
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: models.primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					now += 500;
+					if (selector === primarySelector) {
+						// A structured refusal: pins the chain and leaves the primary free
+						// of any cooldown, which is exactly what a reversal could exploit.
+						mock.push({
+							content: ["Classifier declined this turn."],
+							stopReason: "error",
+							stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
+							errorMessage: "Refusal (cyber): Classifier declined.",
+						});
+					} else if (selector === midSelector) {
+						mock.push({ throw: CYCLE_COOLDOWN_HINT });
+					} else {
+						mock.push({ throw: CYCLE_COOLDOWN_HINT });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings: cycleSettings(models, true),
+				modelRegistry,
+			});
+			const reversals: Array<{ from: string; to: string }> = [];
+			const order = [primarySelector, midSelector, lastSelector];
+			session.subscribe(event => {
+				if (event.type !== "retry_fallback_applied") return;
+				const from = order.indexOf(event.from);
+				const to = order.indexOf(event.to);
+				if (from >= 0 && to >= 0 && to < from) reversals.push({ from: event.from, to: event.to });
+			});
+
+			await session.prompt("A pinned chain must never reverse");
+			await session.waitForIdle();
+
+			expect(reversals).toEqual([]);
+			expect(requestedModels.filter(selector => selector === primarySelector)).toHaveLength(1);
+		});
+
 		it("takes at most one backward hop per retry burst", async () => {
 			const models = cycleModels();
 			const requestedModels: string[] = [];
@@ -5494,6 +5553,134 @@ describe("AgentSession retry fallback", () => {
 				`${fallback.provider}/${fallback.id}`,
 				`${fallback.provider}/${fallback.id}`,
 			]);
+		});
+
+		it("does not escalate cooldowns when cycling is disabled", async () => {
+			// The kill switch has to restore upstream timing, not just upstream routing:
+			// escalation exists to protect reversal, so with reversal off a model that
+			// fails again after recovering gets the plain window the provider asked for.
+			const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallback = getBundledModel("openai", "gpt-4o-mini");
+			if (!primary || !fallback) throw new Error("Expected bundled escalation test models to exist");
+			let primaryFailures = 0;
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					if (model.provider === primary.provider && model.id === primary.id) {
+						primaryFailures += 1;
+						mock.push({ throw: CYCLE_COOLDOWN_HINT });
+					} else {
+						mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackCycle": false,
+				"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] },
+				"retry.fallbackRevertPolicy": "cooldown-expiry",
+			});
+			settings.setModelRole("default", `${primary.provider}/${primary.id}`);
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("First failure buys the base 200ms window");
+			await session.waitForIdle();
+			now += 250;
+			await session.prompt("Restore and fail again");
+			await session.waitForIdle();
+			expect(primaryFailures).toBe(2);
+
+			// With cycling on this third prompt stays on the fallback, because the
+			// second failure doubled the window to 400ms. With cycling off the window
+			// is still 200ms, so the primary is restored and fails a third time.
+			now += 250;
+			await session.prompt("Un-escalated window restores the primary again");
+			await session.waitForIdle();
+			expect(primaryFailures).toBe(3);
+		});
+
+		it("forgets a model's flap history once it serves a turn successfully", async () => {
+			// The probe arm set by a deliberate return must not outlive a successful
+			// turn, or an unrelated failure much later is scored as a bounce and the
+			// multiplier ratchets across succeed/fail cycles.
+			const primary = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallback = getBundledModel("openai", "gpt-4o-mini");
+			if (!primary || !fallback) throw new Error("Expected bundled escalation test models to exist");
+			let primaryAttempts = 0;
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					if (model.provider === primary.provider && model.id === primary.id) {
+						primaryAttempts += 1;
+						// Fails on the first and third visits, succeeds on the second.
+						if (primaryAttempts === 2) mock.push({ content: [`ok:${selector}`] });
+						else mock.push({ throw: CYCLE_COOLDOWN_HINT });
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] },
+				"retry.fallbackRevertPolicy": "cooldown-expiry",
+			});
+			settings.setModelRole("default", `${primary.provider}/${primary.id}`);
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("Primary fails, session moves to the fallback");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(fallback.id);
+
+			// The restore arms a probe and the primary serves this turn, which must
+			// wipe its flap record — arm included.
+			now += 250;
+			await session.prompt("Primary is restored and succeeds");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(primary.id);
+			expect(primaryAttempts).toBe(2);
+
+			// Half an hour later the primary hits an unrelated 200ms cap. With the arm
+			// wiped that is a first offence, so 250ms is enough to come back; a latched
+			// arm would have doubled the window to 400ms and stranded us.
+			now += 30 * 60 * 1_000;
+			await session.prompt("Unrelated failure much later");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(fallback.id);
+
+			now += 250;
+			await session.prompt("A first offence releases after the plain window");
+			await session.waitForIdle();
+			expect(primaryAttempts).toBe(4);
 		});
 	});
 });
