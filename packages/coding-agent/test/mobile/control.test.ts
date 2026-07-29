@@ -17,47 +17,63 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildHostArgv, listDirectorySuggestions, validateSessionCwd } from "@oh-my-pi/pi-coding-agent/mobile/control";
-import { __resetDirsFromEnvForTests, getAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getAgentDir, getConfigRootDir } from "@oh-my-pi/pi-utils";
 
 const originalConfigDir = process.env.PI_CONFIG_DIR;
 let sessionsRoot = "";
+let configRoot = "";
+let fixtureBase = "";
 /** Directories the fixture sessions point at; only some of them exist. */
 let liveDirs: string[] = [];
 let deletedDir = "";
 
-/** One session file, mtime-ordered by the caller writing them in sequence. */
-async function writeSession(project: string, id: string, cwd: string): Promise<void> {
+/**
+ * One session file. `ageRank` sets an explicit mtime (higher = newer) because the
+ * listing sorts on whole milliseconds and writes made in the same tick would leave
+ * the order to the glob.
+ */
+async function writeSession(project: string, id: string, cwd: string, ageRank: number): Promise<void> {
 	const dir = path.join(sessionsRoot, project);
 	await fs.mkdir(dir, { recursive: true });
+	const file = path.join(dir, `${id}.jsonl`);
 	const header = JSON.stringify({ type: "session", id, timestamp: new Date().toISOString(), cwd });
-	await fs.writeFile(path.join(dir, `${id}.jsonl`), `${header}\n`);
+	await fs.writeFile(file, `${header}\n`);
+	const when = new Date(Date.now() - (10 - ageRank) * 1000);
+	await fs.utimes(file, when, when);
 }
 
 beforeAll(async () => {
 	process.env.PI_CONFIG_DIR = `.omp-test-mobile-control-${process.pid}-${Date.now().toString(36)}`;
 	__resetDirsFromEnvForTests();
+	configRoot = getConfigRootDir();
 	sessionsRoot = path.join(getAgentDir(), "sessions");
 	expect(sessionsRoot).not.toBe(path.join(os.homedir(), ".omp", "sessions"));
 
-	const base = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mobile-suggest-"));
-	liveDirs = [path.join(base, "alpha"), path.join(base, "beta")];
+	fixtureBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mobile-suggest-"));
+	liveDirs = [path.join(fixtureBase, "alpha"), path.join(fixtureBase, "beta")];
 	for (const dir of liveDirs) await fs.mkdir(dir, { recursive: true });
-	deletedDir = path.join(base, "gone");
+	deletedDir = path.join(fixtureBase, "gone");
 
-	// Oldest first, so the newest write is the newest session. The deleted
-	// directory is deliberately the most recent: with the cap applied before the
-	// existence check it would eat the only slot a limit of 1 has.
-	await writeSession("proj", "s-home", os.homedir());
-	await writeSession("proj", "s-beta", liveDirs[1]!);
-	await writeSession("proj", "s-beta-dup", liveDirs[1]!);
-	await writeSession("other", "s-alpha", liveDirs[0]!);
-	await writeSession("other", "s-gone", deletedDir);
+	// Oldest first. The deleted directory is deliberately the most recent: with the
+	// cap applied before the existence check it would eat the only slot a limit of
+	// 1 has. mtimes are set explicitly because the listing sorts on whole
+	// milliseconds and five back-to-back writes can land in the same one, which
+	// leaves the order down to glob order and makes recency untested.
+	await writeSession("proj", "s-home", os.homedir(), 1);
+	await writeSession("proj", "s-beta-dup", liveDirs[1]!, 2);
+	await writeSession("proj", "s-beta", liveDirs[1]!, 3);
+	await writeSession("other", "s-alpha", liveDirs[0]!, 4);
+	await writeSession("other", "s-gone", deletedDir, 5);
 });
 
 afterAll(async () => {
 	if (originalConfigDir === undefined) delete process.env.PI_CONFIG_DIR;
 	else process.env.PI_CONFIG_DIR = originalConfigDir;
 	__resetDirsFromEnvForTests();
+	// The fixture config root lives under $HOME; leaving it behind litters the
+	// developer's home directory once per run.
+	await fs.rm(configRoot, { recursive: true, force: true });
+	await fs.rm(fixtureBase, { recursive: true, force: true });
 });
 
 describe("mobile session control", () => {

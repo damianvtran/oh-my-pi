@@ -68,6 +68,9 @@ beforeAll(async () => {
 		password: PASSWORD,
 		scanIntervalMs: NEVER_POLL_MS,
 		control,
+		// Starting a portal must not shell out to launchctl and remove labels that
+		// belong to the developer's own running portal.
+		reapSessionJobs: false,
 	});
 	const login = await fetch(`http://127.0.0.1:${portal.port}/login`, {
 		method: "POST",

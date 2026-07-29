@@ -73,6 +73,12 @@ export interface PortalOptions {
 	scanIntervalMs?: number;
 	/** Session-spawning surface. Tests inject a fake; the real one is {@link defaultPortalControl}. */
 	control?: PortalControl;
+	/**
+	 * Sweep stale session-host launchd labels on start. Defaults to true; tests set
+	 * false so starting a portal never shells out to launchctl or removes a label
+	 * belonging to the developer's own running portal.
+	 */
+	reapSessionJobs?: boolean;
 }
 
 class Portal implements PortalHandle {
@@ -122,8 +128,10 @@ class Portal implements PortalHandle {
 		}
 		// Session-host jobs remove their own launchd label on exit; a SIGKILL skips
 		// that line. Sweeping here keeps the leaks bounded to one portal lifetime
-		// instead of accumulating in the user domain until logout.
-		if (isDarwin()) {
+		// instead of accumulating in the user domain until logout. Opt-out because
+		// this shells out to launchctl and removes real labels: a test that starts a
+		// portal must not mutate the developer's launchd state.
+		if (isDarwin() && options.reapSessionJobs !== false) {
 			const reaped = await reapStaleSessionJobs(SESSION_JOB_LABEL_PREFIX).catch(() => []);
 			if (reaped.length > 0) portal.#log(`reaped ${reaped.length} stale session job label(s)`);
 		}
@@ -484,13 +492,15 @@ class Portal implements PortalHandle {
 				return Response.json({ ok: true });
 			}
 			if (req.method === "POST" && action === "interrupt") {
-				entry.guest.abort();
+				const sent = entry.guest.abort();
 				// Not every abort persists an aborted assistant entry — a turn stopped
 				// before its first token throws instead, emitting `agent_end` with
 				// nothing to record — so the phone would show no resume button for a
-				// stop it just issued. The portal knows it issued this one.
-				entry.guest.markInterrupted();
-				return Response.json({ ok: true });
+				// stop it just issued. Only claim it when the frame actually went out:
+				// a read-only room drops it, and telling the phone a turn was cut short
+				// when nothing was sent is worse than showing no button.
+				if (sent) entry.guest.markInterrupted();
+				return Response.json({ ok: sent });
 			}
 			if (req.method === "POST" && action === "resume") {
 				// The play button's hidden continue prompt (INTERNAL_RESUME_PROMPT is
