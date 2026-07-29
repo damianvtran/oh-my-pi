@@ -24,7 +24,7 @@ import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { SessionEntry } from "../session/session-entries";
 import { isTodoPhase } from "../tools/todo";
 import {
-	INTERNAL_RESUME_MARKER,
+	INTERNAL_RESUME_PROMPT,
 	type PortalActivity,
 	type PortalGuestEvents,
 	type TodoPhase,
@@ -163,6 +163,23 @@ export class PortalGuest {
 		this.#send({ t: "abort" });
 	}
 
+	/**
+	 * Record that this portal aborted the turn, without waiting for the host to
+	 * persist an aborted assistant entry.
+	 *
+	 * The transcript is the honest source for "was the last turn cut short", and
+	 * it stays authoritative — but it is not complete: a turn stopped before its
+	 * first token produces no assistant entry at all, so a phone that pressed stop
+	 * in that window would get no resume button for an abort it performed itself.
+	 * The next `agent_start` clears the flag, so an optimistic set cannot outlive
+	 * the interruption it describes.
+	 */
+	markInterrupted(): void {
+		if (this.activity.interrupted) return;
+		this.activity = { ...this.activity, interrupted: true };
+		this.#events.onActivity?.(this.activity);
+	}
+
 	answerUi(reqId: number, value: string | undefined): void {
 		if (this.pendingUi?.reqId === reqId) this.pendingUi = undefined;
 		this.#send({ t: "ui-response", reqId, value });
@@ -265,7 +282,19 @@ export class PortalGuest {
 		if (entry.type === "custom_message") {
 			if (entry.customType !== COLLAB_PROMPT_MESSAGE_TYPE || !entry.display) return;
 			const text = collectText(entry.content);
-			if (text && !text.startsWith(INTERNAL_RESUME_MARKER)) this.#push({ kind: "user", text });
+			if (!text || text === INTERNAL_RESUME_PROMPT) return;
+			// Name the sender when it is not this portal: on a shared session the
+			// difference between "I asked for this" and "someone else asked for
+			// this" is the whole point of the card. `details` crossed the wire as
+			// JSON, so the field is narrowed rather than asserted.
+			const details: unknown = entry.details;
+			const sender =
+				details && typeof details === "object" && "from" in details && typeof details.from === "string"
+					? details.from
+					: "";
+			this.#push(
+				sender && sender !== this.#displayName ? { kind: "user", text, from: sender } : { kind: "user", text },
+			);
 			return;
 		}
 		if (entry.type !== "message") return;
@@ -273,19 +302,32 @@ export class PortalGuest {
 		switch (message.role) {
 			case "user": {
 				const text = collectText(message.content);
-				// A user message typed at the terminal is an ordinary card. The
-				// portal's own resume prompt is dropped by its exact marker prefix
-				// only, so a hand-typed "continue" always shows.
-				if (text && !text.startsWith(INTERNAL_RESUME_MARKER)) this.#push({ kind: "user", text });
+				// A user message typed at the terminal is an ordinary card. Only the
+				// portal's own resume prompt is dropped, matched in full rather than
+				// by prefix: a prefix test would let any write-token holder steer the
+				// agent with text the phone never renders, which is exactly the
+				// blindness this projection exists to remove.
+				if (text && text !== INTERNAL_RESUME_PROMPT) this.#push({ kind: "user", text });
 				return;
 			}
-			case "assistant":
+			case "assistant": {
 				// The transcript projection doubles as the resume-button signal: the
 				// last assistant message's stopReason says whether the turn finished
 				// or was cut short. Snapshot replay sets this the same way live
 				// entries do, so a portal that reconnects after an abort still shows
 				// the session as interrupted.
-				this.activity = { ...this.activity, interrupted: message.stopReason === "aborted" };
+				//
+				// The push matters as much as the value: this flag arrives on an
+				// `entry` frame, and the `event` frames that would otherwise notify
+				// come from an independent tap on the host with no ordering guarantee
+				// between them. Without emitting here, an aborted entry that lands
+				// after `agent_end` — or any snapshot replay after a reconnect — left
+				// the phone with no resume button until something unrelated changed.
+				const interrupted = message.stopReason === "aborted";
+				if (interrupted !== this.activity.interrupted) {
+					this.activity = { ...this.activity, interrupted };
+					this.#events.onActivity?.(this.activity);
+				}
 				for (const part of message.content) {
 					if (part.type === "text" && part.text.trim()) this.#push({ kind: "assistant", text: part.text });
 					else if (part.type === "thinking" && part.thinking.trim())
@@ -294,6 +336,7 @@ export class PortalGuest {
 						this.#push({ kind: "tool", id: part.id, name: part.name, args: part.arguments });
 				}
 				return;
+			}
 			case "toolResult": {
 				const text = collectText(message.content);
 				// The todo tool owns the panel, not the transcript: its result is state.

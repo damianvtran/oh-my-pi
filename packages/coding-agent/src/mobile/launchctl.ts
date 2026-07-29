@@ -10,6 +10,7 @@
  */
 
 import * as os from "node:os";
+import * as path from "node:path";
 import { logger, ptree } from "@oh-my-pi/pi-utils";
 import { KEYCHAIN_SERVICE } from "./paths";
 
@@ -130,15 +131,27 @@ exit "$code"`;
  * descendant is not a sufficient boundary because launchd owns and may tear
  * down the portal job as a unit; asking launchd to create a sibling job makes
  * the lifetime independent by construction.
+ *
+ * `submit` exits 0 once the job exists, which says nothing about whether the
+ * wrapper then managed to exec the binary. A moved binary or a stale launch argv
+ * in the install record exits 127 inside the wrapper, which removes its own
+ * label and disappears — the portal logged success, the nanny's own log was never
+ * created, and the phone waits for a session that will never arrive. Routing the
+ * wrapper's output to `session-jobs.log` is what makes that case diagnosable.
  */
-export function submitSessionHostJob(label: string, command: string[]): Promise<CommandOutcome> {
+export function submitSessionHostJob(label: string, command: string[], logDir: string): Promise<CommandOutcome> {
 	if (command.length === 0) throw new Error("session host command is required");
+	const logFile = path.join(logDir, "session-jobs.log");
 	return run(
 		[
 			LAUNCHCTL,
 			"submit",
 			"-l",
 			label,
+			"-o",
+			logFile,
+			"-e",
+			logFile,
 			"--",
 			"/bin/sh",
 			"-c",
@@ -149,6 +162,32 @@ export function submitSessionHostJob(label: string, command: string[]): Promise<
 		],
 		LAUNCHCTL_TIMEOUT_MS,
 	);
+}
+
+/**
+ * Remove session-host labels that launchd still lists but nothing is running.
+ *
+ * The wrapper removes its own label on exit, so this only ever finds the cases
+ * that skipped that line — a SIGKILL, an OOM kill, a forced logout race. Each
+ * leak is harmless on its own but they accumulate for the life of the login
+ * session, and a stack whose whole promise is managing its own launchd state
+ * should not litter `launchctl list`. Called on portal start, where a few
+ * milliseconds of `launchctl list` parsing is free.
+ *
+ * `launchctl list` prints `PID Status Label`; a PID of `-` means loaded but not
+ * running, which for a one-shot job that should have removed itself means dead.
+ */
+export async function reapStaleSessionJobs(labelPrefix: string): Promise<string[]> {
+	const listed = await run([LAUNCHCTL, "list"], LAUNCHCTL_TIMEOUT_MS);
+	if (!listed.ok) return [];
+	const removed: string[] = [];
+	for (const line of listed.stdout.split("\n")) {
+		const [pid, , label] = line.trim().split(/\s+/);
+		if (!label?.startsWith(labelPrefix) || pid !== "-") continue;
+		const result = await run([LAUNCHCTL, "remove", label], LAUNCHCTL_TIMEOUT_MS);
+		if (result.ok) removed.push(label);
+	}
+	return removed;
 }
 
 /**

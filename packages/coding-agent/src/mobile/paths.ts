@@ -28,6 +28,15 @@ export const SERVICE_LABELS: Record<MobileServiceName, string> = {
 };
 
 /**
+ * Label prefix for the transient launchd jobs that host phone-started sessions.
+ *
+ * Shared rather than inlined at the submit site because the labels have to be
+ * findable later: the job removes its own label on exit, but a SIGKILL skips
+ * that, and a stale label lingers in the user domain until something sweeps it.
+ */
+export const SESSION_JOB_LABEL_PREFIX = "sh.omp.mobile-session.";
+
+/**
  * Keychain generic-password service holding the portal password, keyed by the
  * local account. Named without a version or profile suffix on purpose: rotating
  * the password must not silently strand a phone on a stale credential.

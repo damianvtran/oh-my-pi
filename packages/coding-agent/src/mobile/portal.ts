@@ -17,6 +17,8 @@ import * as path from "node:path";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { type CollabLinkRecord, collabLinkDir } from "../collab/link-file";
 import { defaultPortalControl } from "./control";
+import { isDarwin, reapStaleSessionJobs } from "./launchctl";
+import { SESSION_JOB_LABEL_PREFIX } from "./paths";
 import { PortalGuest } from "./portal-guest";
 import portalHtml from "./portal-ui.html" with { type: "text" };
 import { INTERNAL_RESUME_PROMPT, type PortalControl } from "./types";
@@ -117,6 +119,13 @@ class Portal implements PortalHandle {
 			await fs.chmod(portal.#linkDir, 0o700);
 		} catch (err) {
 			logger.debug("mobile portal could not prepare the link directory", { error: String(err) });
+		}
+		// Session-host jobs remove their own launchd label on exit; a SIGKILL skips
+		// that line. Sweeping here keeps the leaks bounded to one portal lifetime
+		// instead of accumulating in the user domain until logout.
+		if (isDarwin()) {
+			const reaped = await reapStaleSessionJobs(SESSION_JOB_LABEL_PREFIX).catch(() => []);
+			if (reaped.length > 0) portal.#log(`reaped ${reaped.length} stale session job label(s)`);
 		}
 		// One scan before returning so `omp mobile status` and the phone's first
 		// load see the sessions that were already running.
@@ -256,6 +265,11 @@ class Portal implements PortalHandle {
 					onResync: () => {
 						this.#push(record.pid, "transcript", guest.transcript.slice(-TRANSCRIPT_PUSH_LIMIT));
 						this.#push(record.pid, "todos", guest.todos);
+						// Activity too: a welcome resets it and the snapshot then rebuilds
+						// `interrupted` from the replayed tail, so a phone reconnecting to
+						// an aborted session would otherwise have no resume button until
+						// something unrelated changed.
+						this.#push(record.pid, "activity", guest.activity);
 					},
 					onEvent: event => this.#push(record.pid, "agent", { type: event.type }),
 					onActivity: activity => this.#push(record.pid, "activity", activity),
@@ -445,9 +459,11 @@ class Portal implements PortalHandle {
 				return Response.json({ error: "invalid JSON body" }, { status: 400 });
 			}
 			try {
-				await this.#control.startSession(cwd);
-				this.#log(`session host requested cwd=${cwd}`);
-				return Response.json({ ok: true }, { status: 201 });
+				const dir = await this.#control.startSession(cwd);
+				this.#log(`session host requested cwd=${dir}`);
+				// The resolved directory goes back so the phone remembers what the
+				// server used rather than what was typed (`~/x` vs `/Users/me/x`).
+				return Response.json({ ok: true, cwd: dir }, { status: 201 });
 			} catch (err) {
 				// Validation errors are the expected failure and worded for the phone.
 				return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 422 });
@@ -469,11 +485,16 @@ class Portal implements PortalHandle {
 			}
 			if (req.method === "POST" && action === "interrupt") {
 				entry.guest.abort();
+				// Not every abort persists an aborted assistant entry — a turn stopped
+				// before its first token throws instead, emitting `agent_end` with
+				// nothing to record — so the phone would show no resume button for a
+				// stop it just issued. The portal knows it issued this one.
+				entry.guest.markInterrupted();
 				return Response.json({ ok: true });
 			}
 			if (req.method === "POST" && action === "resume") {
-				// The play button's hidden continue prompt (INTERNAL_RESUME_MARKER
-				// keeps it off the phone's transcript). No streaming guard: a resume
+				// The play button's hidden continue prompt (INTERNAL_RESUME_PROMPT is
+				// filtered out of the phone's projection). No streaming guard: a resume
 				// that races a running turn queues like any other prompt.
 				entry.guest.prompt(INTERNAL_RESUME_PROMPT);
 				return Response.json({ ok: true });
