@@ -8,6 +8,7 @@
  */
 
 import chalk from "chalk";
+import { runSessionHost } from "../mobile/control";
 import {
 	controlMobile,
 	installMobile,
@@ -37,6 +38,7 @@ export type MobileAction =
 	| "logs"
 	| "serve"
 	| "relay"
+	| "host"
 	| "password";
 
 export interface MobileCommandArgs {
@@ -53,6 +55,8 @@ export interface MobileCommandArgs {
 		build?: boolean;
 		purge?: boolean;
 		skipSettings?: boolean;
+		/** host: working directory for the spawned session. */
+		cwd?: string;
 	};
 }
 
@@ -256,7 +260,7 @@ export async function runMobileCommand(args: MobileCommandArgs): Promise<void> {
 	const json = flags.json === true;
 
 	// The services themselves are portable; only the launchd management is not.
-	if (!isDarwin() && action !== "serve" && action !== "relay") {
+	if (!isDarwin() && action !== "serve" && action !== "relay" && action !== "host") {
 		console.error(chalk.red(MACOS_ONLY_MESSAGE));
 		process.exitCode = 1;
 		return;
@@ -269,6 +273,17 @@ export async function runMobileCommand(args: MobileCommandArgs): Promise<void> {
 		case "serve":
 			await runPortalForeground(flags.port, flags.username);
 			return;
+		case "host": {
+			// The session nanny the portal spawns for a phone-started session (see
+			// mobile/control.ts). Not a management verb: no --json, no --dry-run.
+			if (!flags.cwd) {
+				console.error(chalk.red("mobile host requires --cwd <directory>"));
+				process.exitCode = 1;
+				return;
+			}
+			process.exitCode = await runSessionHost(flags.cwd);
+			return;
+		}
 		case "install": {
 			const result = await installMobile({
 				relayPort: flags.relayPort,

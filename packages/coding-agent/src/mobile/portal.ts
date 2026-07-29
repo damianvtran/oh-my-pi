@@ -16,8 +16,10 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { type CollabLinkRecord, collabLinkDir } from "../collab/link-file";
+import { defaultPortalControl } from "./control";
 import { PortalGuest } from "./portal-guest";
 import portalHtml from "./portal-ui.html" with { type: "text" };
+import { INTERNAL_RESUME_PROMPT, type PortalControl } from "./types";
 
 /** bun-types claims `*.html` as `HTMLBundle`; with `type: "text"` it is the file's text. */
 const UI = portalHtml as unknown as string;
@@ -67,6 +69,8 @@ export interface PortalOptions {
 	password: string;
 	/** Link-directory poll interval. Defaults to 2s — the phone should see a new session promptly. */
 	scanIntervalMs?: number;
+	/** Session-spawning surface. Tests inject a fake; the real one is {@link defaultPortalControl}. */
+	control?: PortalControl;
 }
 
 class Portal implements PortalHandle {
@@ -89,6 +93,7 @@ class Portal implements PortalHandle {
 	 */
 	readonly #linkDir = collabLinkDir();
 	readonly #scanIntervalMs: number;
+	readonly #control: PortalControl;
 	readonly #attached = new Map<number, Attached>();
 	readonly #subscribers = new Map<number, Set<(chunk: string) => void>>();
 	readonly #server: Bun.Server<undefined>;
@@ -156,6 +161,7 @@ class Portal implements PortalHandle {
 	constructor(options: PortalOptions) {
 		this.#username = options.username;
 		this.#password = options.password;
+		this.#control = options.control ?? defaultPortalControl(msg => this.#log(msg));
 		this.#secret = new Bun.CryptoHasher("sha256")
 			.update(`omp-mobile\u0000${options.username}\u0000${options.password}`)
 			.digest();
@@ -417,6 +423,37 @@ class Portal implements PortalHandle {
 			return Response.json([...this.#attached.values()].map(entry => this.#sessionSummary(entry)));
 		}
 
+		// Suggestions for the new-session form. Read-only.
+		if (url.pathname === "/api/directories") {
+			return Response.json(await this.#control.listDirectories());
+		}
+
+		// Start a session in a directory. Matched before the :pid block below —
+		// "start" is not a pid. The session appears through ordinary room
+		// discovery once its nanny has it hosting; the launchd label is deliberately
+		// an implementation detail rather than an API handle.
+		if (url.pathname === "/api/sessions/start") {
+			if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+			let cwd: string;
+			try {
+				const body: unknown = await req.json();
+				cwd =
+					body !== null && typeof body === "object" && "cwd" in body && typeof body.cwd === "string"
+						? body.cwd
+						: "";
+			} catch {
+				return Response.json({ error: "invalid JSON body" }, { status: 400 });
+			}
+			try {
+				await this.#control.startSession(cwd);
+				this.#log(`session host requested cwd=${cwd}`);
+				return Response.json({ ok: true }, { status: 201 });
+			} catch (err) {
+				// Validation errors are the expected failure and worded for the phone.
+				return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status: 422 });
+			}
+		}
+
 		// /api/sessions/:pid/...
 		if (seg[0] === "api" && seg[1] === "sessions" && seg[2]) {
 			const entry = this.#attached.get(Number(seg[2]));
@@ -432,6 +469,13 @@ class Portal implements PortalHandle {
 			}
 			if (req.method === "POST" && action === "interrupt") {
 				entry.guest.abort();
+				return Response.json({ ok: true });
+			}
+			if (req.method === "POST" && action === "resume") {
+				// The play button's hidden continue prompt (INTERNAL_RESUME_MARKER
+				// keeps it off the phone's transcript). No streaming guard: a resume
+				// that races a running turn queues like any other prompt.
+				entry.guest.prompt(INTERNAL_RESUME_PROMPT);
 				return Response.json({ ok: true });
 			}
 			if (req.method === "POST" && action === "ui" && seg[4]) {

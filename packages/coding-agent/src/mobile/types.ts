@@ -126,6 +126,36 @@ export interface MobileStatusReport {
 	unregistered: { pid: number; command: string }[];
 }
 
+/**
+ * Prefix of the one prompt the phone may hide from its transcript: the resume
+ * instruction the play button sends after a stop. A stop on the phone is the
+ * Escape key (an `abort` frame), not a process signal — the session stays
+ * alive and simply has no turn running — so resuming is a new prompt that
+ * tells the agent to pick its work back up.
+ *
+ * It is a real user message on purpose: the host, the session transcript and
+ * any other guest all see exactly what drove the agent, and the TUI renders
+ * it like any other prompt. Only the portal's projection drops it, and only
+ * by this exact prefix — a "continue" the user types by hand never matches
+ * and always stays visible.
+ */
+export const INTERNAL_RESUME_MARKER = "[omp-mobile:resume]";
+
+/** The prompt the phone's resume button sends. */
+export const INTERNAL_RESUME_PROMPT = `${INTERNAL_RESUME_MARKER} I paused you from my phone. Continue the work you were doing before the interruption.`;
+
+/**
+ * The portal's session-spawning surface, injectable so route tests never touch
+ * the process table or the PTY layer. The real implementation is
+ * `defaultPortalControl` in `control.ts`.
+ */
+export interface PortalControl {
+	/** Validate the directory and spawn a session nanny in it. Throws with a phone-safe message on bad input. */
+	startSession(cwd: string): Promise<void>;
+	/** Suggested directories for the new-session form, most recent first. */
+	listDirectories(): Promise<string[]>;
+}
+
 // ── Portal view state ───────────────────────────────────────────────────────
 // The portal keeps one of these per attached session and pushes them to the
 // phone over SSE. They are UI projections, not protocol types: the phone renders
@@ -154,6 +184,13 @@ export interface PortalActivity {
 	working: boolean;
 	intent?: string;
 	thinking?: string;
+	/**
+	 * The last completed turn ended on an abort (assistant `stopReason:
+	 * "aborted"`), i.e. someone hit Escape or the phone's stop button. This is
+	 * what gates the phone's resume button: ordinary idle means the turn
+	 * finished and there is nothing to continue, so the composer alone shows.
+	 */
+	interrupted?: boolean;
 }
 
 /** Callbacks the portal installs on each guest. */

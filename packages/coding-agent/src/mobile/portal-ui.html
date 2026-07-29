@@ -253,6 +253,25 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 #ask .opt:hover { background: var(--hover-wash); border-color: var(--border-strong); }
 #ask .opt::before { content: "› "; color: var(--accent); }
 
+/* ── new-session form ────────────────────────────────────────────────── */
+#newform {
+  padding: 10px 12px; margin-bottom: 8px;
+  background: color-mix(in srgb, var(--bg-raised) 60%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: var(--radius-card);
+}
+.nf-title { font-weight: 650; color: var(--fg); margin-bottom: 8px; }
+.nf-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.nf-row:first-of-type { margin-top: 0; }
+#newdir {
+  flex: 1; min-width: 0; padding: 6px 8px;
+  background: var(--bg-inset); border: 1px solid var(--hairline);
+  border-radius: var(--radius-ctl); color: var(--fg);
+}
+#newdir::placeholder { color: var(--fg-faint); }
+.nf-status { font-size: 11px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nf-status.err { color: var(--err); white-space: normal; }
+
 /* ── composer ────────────────────────────────────────────────────────── */
 footer {
   padding: 8px 12px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
@@ -280,14 +299,27 @@ footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
     <div class="brand"><b>omp</b><span class="sub" id="sub">sessions</span></div>
     <div style="display:flex;gap:6px">
       <button class="btn" id="back" hidden>← all</button>
-      <button class="btn btn-stop" id="stop" hidden>esc</button>
+      <button class="btn btn-stop" id="stop" hidden>stop</button>
+      <button class="btn" id="new">+ new</button>
     </div>
   </header>
-  <main><div class="wrap"><div id="list"></div><div id="detail" hidden><div id="ask" hidden></div><div id="log"></div><div id="todos"></div><div id="working" class="working" hidden></div></div></div></main>
+  <main><div class="wrap"><div id="newform" hidden>
+    <div class="nf-title">start a new session</div>
+    <div class="nf-row">
+      <input id="newdir" list="dirs" placeholder="directory (~/ works)" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <datalist id="dirs"></datalist>
+    </div>
+    <div class="nf-row">
+      <button class="btn btn-accent" id="start">start</button>
+      <button class="btn" id="cancelnew">cancel</button>
+      <span class="nf-status" id="newstatus"></span>
+    </div>
+  </div><div id="list"></div><div id="detail" hidden><div id="ask" hidden></div><div id="log"></div><div id="todos"></div><div id="working" class="working" hidden></div></div></div></main>
   <footer id="composer" hidden>
     <div class="wrap">
       <span class="prompt">›</span>
       <input id="msg" placeholder="steer this session" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="btn btn-accent" id="resume" hidden>▶ resume</button>
       <button class="btn btn-accent" id="send">send</button>
     </div>
   </footer>
@@ -579,7 +611,11 @@ function open(pid) {
   current = pid;
   if (location.hash !== `#${pid}`) location.hash = `#${pid}`;
   $("list").hidden = true; $("detail").hidden = false;
-  $("back").hidden = false; $("stop").hidden = false; $("composer").hidden = false;
+  $("back").hidden = false; $("composer").hidden = false;
+  // Stop and resume are state-driven: stop only exists while a turn runs, and
+  // resume only after a turn was cancelled — both toggle on the SSE snapshot
+  // that arrives right after connect.
+  $("stop").hidden = true; $("resume").hidden = true; $("new").hidden = true;
   $("log").textContent = "";
   renderWorking(null);
   es = new EventSource(`/api/sessions/${pid}/events`);
@@ -587,6 +623,8 @@ function open(pid) {
     const s = JSON.parse(e.data);
     const label = innerWidth <= 640 ? (s.cwd ?? "").split("/").pop() || String(pid) : (s.cwd ?? String(pid));
     $("sub").textContent = `${label} · ${s.isStreaming ? "working" : "idle"}`;
+    // Stop is the Escape key: meaningful only while a turn is running.
+    $("stop").hidden = !s.isStreaming;
   });
   es.addEventListener("transcript", e => {
     const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 40;
@@ -606,7 +644,11 @@ function open(pid) {
   });
   es.addEventListener("activity", e => {
     const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
-    renderWorking(JSON.parse(e.data));
+    const a = JSON.parse(e.data);
+    renderWorking(a);
+    // Resume exists only for a cancelled turn. Ordinary idle means the work
+    // finished, so the composer alone is the way back in.
+    $("resume").hidden = !(a.interrupted && !a.working);
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
   es.addEventListener("ui-request", e => showAsk(JSON.parse(e.data)));
@@ -650,7 +692,8 @@ const post = (url, body) =>
 $("back").onclick = () => {
   es?.close(); es = null; current = null;
   $("list").hidden = false; $("detail").hidden = true;
-  $("back").hidden = true; $("stop").hidden = true; $("composer").hidden = true;
+  $("back").hidden = true; $("stop").hidden = true; $("resume").hidden = true; $("composer").hidden = true;
+  $("new").hidden = false;
   $("ask").hidden = true; $("todos").innerHTML = ""; $("sub").textContent = "sessions";
   renderWorking(null);
   if (location.hash) history.replaceState(null, "", location.pathname);
@@ -664,6 +707,48 @@ $("send").onclick = async () => {
 };
 $("msg").onkeydown = e => { if (e.key === "Enter") $("send").click(); };
 $("stop").onclick = () => post(`/api/sessions/${current}/interrupt`);
+$("resume").onclick = async () => {
+  // Optimistic: the agent_start that answers the prompt would hide it anyway.
+  $("resume").hidden = true;
+  await post(`/api/sessions/${current}/resume`);
+};
+
+/* New-session form. The session itself shows up through ordinary discovery
+   (the nanny's room publishes, the portal attaches), so a successful start
+   only has to wait for the next refresh — there is no handle to poll. */
+function hideNewForm() {
+  $("newform").hidden = true;
+  const st = $("newstatus");
+  st.textContent = ""; st.classList.remove("err");
+}
+$("new").onclick = async () => {
+  $("newform").hidden = false;
+  $("newdir").focus();
+  const res = await api("/api/directories");
+  if (!res.ok) return;
+  $("dirs").innerHTML = (await res.json()).map(d => `<option value="${esc(d)}">`).join("");
+};
+$("cancelnew").onclick = hideNewForm;
+$("start").onclick = async () => {
+  const cwd = $("newdir").value.trim();
+  const st = $("newstatus");
+  st.classList.remove("err");
+  if (!cwd) { st.textContent = "pick a directory first"; st.classList.add("err"); return; }
+  st.textContent = "starting…";
+  const res = await post("/api/sessions/start", { cwd });
+  if (res.ok) {
+    st.textContent = "started — the session appears below in a moment";
+    $("newdir").value = "";
+    setTimeout(hideNewForm, 1500);
+    setTimeout(refresh, 1000);
+    return;
+  }
+  let msg = "start failed";
+  try { msg = (await res.json()).error ?? msg; } catch {}
+  st.textContent = msg;
+  st.classList.add("err");
+};
+$("newdir").onkeydown = e => { if (e.key === "Enter") $("start").click(); };
 
 // Deep link: #<pid> opens that session directly, so a push notification or a
 // bookmark can land on the session that needs an answer.
