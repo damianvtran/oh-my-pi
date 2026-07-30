@@ -214,6 +214,81 @@ export interface PortalActivity {
 	interrupted?: boolean;
 }
 
+/**
+ * One subagent as the phone renders it: the host's agent-registry roster joined
+ * with whatever the task EventBus has reported for the same id.
+ *
+ * Both halves are needed and neither is sufficient. The registry roster (the
+ * `agents` frame) is the authoritative answer to "which subagents exist and are
+ * they running", but `AgentSnapshot` carries no work description at all. The
+ * assignment and the live tool come from the mirrored `task:subagent:*` bus
+ * traffic, which only flows while an agent is actually emitting progress — so a
+ * portal that attaches mid-run knows a subagent exists before it knows what the
+ * subagent is doing, and an idle or rehydrated agent may never report at all.
+ * Every field below the identity is therefore optional on purpose.
+ */
+export interface PortalSubagent {
+	/** Registry id: the instance name the spawn was given, e.g. `CollabWireScout`. */
+	id: string;
+	/** Agent type behind the instance (`AgentRef.displayName`), e.g. `scout`. */
+	agent: string;
+	/**
+	 * Display status, which is not the same as the roster status: the registry
+	 * flips a finished subagent back to `idle`, so a completed scout would read as
+	 * merely idle. When the lifecycle channel reported a terminal word for this
+	 * id, that word wins. The running COUNT deliberately does not use this — see
+	 * {@link PortalSubagents.running}.
+	 */
+	status: "running" | "idle" | "parked" | "aborted" | "completed" | "failed";
+	/** Parent agent id; `Main` for a top-level spawn, another agent id when nested. */
+	parentId?: string;
+	/**
+	 * Human label for the assignment, when one exists: a spawn's own description or
+	 * the tiny-model label the executor generates for it. Absent — not backfilled
+	 * with the id or the raw prompt — until then; see `#projectSubagents`.
+	 */
+	task?: string;
+	/** Live work: the in-flight tool call, falling back to the last reported intent. */
+	intent?: string;
+	/** Tool calls, tokens and dollars so far. Absent until progress traffic arrives. */
+	tools?: number;
+	tokens?: number;
+	cost?: number;
+	/**
+	 * Host-computed run duration. Preferred over deriving one from
+	 * {@link startedAt} because it carries no clock skew between host and phone,
+	 * and because it freezes at the right value when the agent finishes.
+	 */
+	durationMs?: number;
+	/** Host epoch ms the agent was registered; the fallback for elapsed time. */
+	startedAt: number;
+}
+
+/**
+ * The phone's subagent panel state. `rows` is capped so a 32-wide fan-out cannot
+ * push a payload proportional to the fan-out on every progress tick; the counts
+ * are not, so the panel can say what the cap hid.
+ */
+export interface PortalSubagents {
+	/**
+	 * Running subagents. Computed from the roster status alone —
+	 * `kind === "sub" && status === "running"` — which is verbatim the predicate
+	 * behind the TUI's status-line badge (`countRunningSubagentBadgeAgents`), so
+	 * the number on the phone and the number in the terminal cannot disagree.
+	 */
+	running: number;
+	/**
+	 * Subagents this panel knows about: every running one, plus every one that
+	 * reported lifecycle or progress traffic while this portal was attached. A
+	 * finished agent the registry merely remembers is not counted — see
+	 * `#projectSubagents`. So `running <= total`, and `total - rows.length` is
+	 * exactly what the cap hid.
+	 */
+	total: number;
+	/** Rows to render, running first. `total - rows.length` are hidden by the cap. */
+	rows: PortalSubagent[];
+}
+
 /** Callbacks the portal installs on each guest. */
 export interface PortalGuestEvents {
 	onState?(state: CollabSessionState): void;
@@ -230,5 +305,12 @@ export interface PortalGuestEvents {
 	onActivity?(activity: PortalActivity): void;
 	onUiRequest?(request: CollabUiRequest): void;
 	onUiRequestEnd?(reqId: number): void;
+	/**
+	 * The subagent projection changed. Throttled by the guest rather than fired
+	 * per frame: subagent progress arrives on a ~150ms per-agent coalesce, so a
+	 * wide fan-out would otherwise push an SSE frame several times a second per
+	 * agent for numbers a phone reads at a glance.
+	 */
+	onSubagents?(subagents: PortalSubagents): void;
 	onClose?(reason: string): void;
 }

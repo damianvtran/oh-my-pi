@@ -15,18 +15,21 @@
  */
 
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { importRoomKey } from "../collab/crypto";
-import type { CollabFrame, CollabSessionState, CollabUiRequest } from "../collab/protocol";
+import type { AgentSnapshot, CollabFrame, CollabSessionState, CollabUiRequest } from "../collab/protocol";
 import { COLLAB_PROMPT_MESSAGE_TYPE, COLLAB_PROTO, parseCollabLink } from "../collab/protocol";
 import { CollabSocket } from "../collab/relay-client";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { SessionEntry } from "../session/session-entries";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { isTodoPhase } from "../tools/todo";
 import {
 	INTERNAL_RESUME_PROMPT,
 	type PortalActivity,
 	type PortalGuestEvents,
+	type PortalSubagent,
+	type PortalSubagents,
 	type TodoPhase,
 	type TranscriptItem,
 } from "./types";
@@ -36,6 +39,27 @@ const TRANSCRIPT_CAP = 200;
 
 /** Characters of streamed thinking kept as the working line's subtitle. */
 const THINKING_TAIL_CHARS = 180;
+
+/**
+ * Subagent rows sent to the phone, matching the TUI HUD's own visible limit
+ * (`SUBAGENT_HUD_VISIBLE_LIMIT`). The counts in {@link PortalSubagents} stay
+ * whole-roster, so the panel can say how many rows the cap hid.
+ */
+const SUBAGENT_ROW_CAP = 8;
+
+/**
+ * Minimum gap between subagent pushes.
+ *
+ * A throttle, not a trailing debounce: the executor coalesces progress at 150ms
+ * PER AGENT, so a wide fan-out produces a continuous stream while it runs and a
+ * reset-on-every-change debounce would never fire until the last agent finished.
+ * This fires at most once per window instead, which is well past the rate a
+ * human reads a count and a tool name off a phone.
+ */
+const SUBAGENT_PUSH_THROTTLE_MS = 250;
+
+/** Characters of a live tool's argument summary kept on a subagent row. */
+const SUBAGENT_ARG_CHARS = 60;
 
 const DEFAULT_DISPLAY_NAME = "omp-mobile";
 
@@ -69,6 +93,93 @@ function todoPhasesFrom(details: unknown): TodoPhase[] | null {
 	return valid.length === phases.length ? valid : null;
 }
 
+/**
+ * Narrowed `AgentProgress` for one subagent: only the fields the phone renders,
+ * validated at the wire boundary.
+ *
+ * Split from the projection on purpose. Ingest normalizes one payload's own
+ * fields; {@link PortalGuest} resolves precedence ACROSS sources (roster,
+ * lifecycle, progress), which no single payload can answer.
+ */
+interface SubagentProgressView {
+	task?: string;
+	description?: string;
+	currentTool?: string;
+	currentToolArgs?: string;
+	lastIntent?: string;
+	tools?: number;
+	tokens?: number;
+	cost?: number;
+	durationMs?: number;
+}
+
+interface SubagentLifecycleView {
+	description?: string;
+	/** `started` | `completed` | `failed` | `aborted`, unvalidated beyond being a word. */
+	status?: string;
+}
+
+/**
+ * The two wire-boundary normalizers below exist because eleven fields across two
+ * payloads need identical treatment, and because the failure mode has to be
+ * per-field: a host on a different build that renamed or retyped `currentTool`
+ * must cost that one line of the row, not the whole row. A schema parse of the
+ * payload would drop everything on one bad field, which is the wrong trade for a
+ * display-only projection.
+ */
+
+/** Non-blank string, trimmed; anything else reads as absent. */
+function wireText(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+/** Finite number; `NaN`, `Infinity` and non-numbers read as absent. */
+function wireNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * Read a `bus` frame's `task:subagent:progress` payload.
+ *
+ * The frame's `data` is typed `unknown` for a reason: it is JSON from a host that
+ * may be a different build, and the payload the host really sends is wider than
+ * the wire package declares. So every field is narrowed rather than asserted —
+ * the same treatment todo phases get above — and a payload without a joinable id
+ * is dropped instead of producing a row keyed on `undefined`.
+ */
+function subagentProgressFrom(data: unknown): { id: string; view: SubagentProgressView } | null {
+	if (!isRecord(data) || !isRecord(data.progress)) return null;
+	const progress = data.progress;
+	// `progress.id` is the subagent's registry id — the same id `AgentSnapshot.id`
+	// carries, which is what makes the join with the roster possible.
+	const id = wireText(progress.id);
+	if (!id) return null;
+	return {
+		id,
+		view: {
+			task: wireText(progress.task),
+			description: wireText(progress.description),
+			currentTool: wireText(progress.currentTool),
+			currentToolArgs: wireText(progress.currentToolArgs)?.slice(0, SUBAGENT_ARG_CHARS),
+			lastIntent: wireText(progress.lastIntent),
+			tools: wireNumber(progress.toolCount),
+			tokens: wireNumber(progress.tokens),
+			cost: wireNumber(progress.cost),
+			durationMs: wireNumber(progress.durationMs),
+		},
+	};
+}
+
+/** Read a `bus` frame's `task:subagent:lifecycle` payload. See {@link subagentProgressFrom}. */
+function subagentLifecycleFrom(data: unknown): { id: string; view: SubagentLifecycleView } | null {
+	if (!isRecord(data)) return null;
+	const id = wireText(data.id);
+	if (!id) return null;
+	return { id, view: { description: wireText(data.description), status: wireText(data.status) } };
+}
+
 export class PortalGuest {
 	/** Latest host footer snapshot: model, streaming flag, participants, context usage. */
 	state?: CollabSessionState;
@@ -85,6 +196,14 @@ export class PortalGuest {
 	 * a guest already receives.
 	 */
 	activity: PortalActivity = { working: false };
+	/**
+	 * Live subagents, mirroring the TUI's Subagents HUD and status-line badge.
+	 * Recomputed on every roster or progress frame (the projection is bounded and
+	 * cheap) so a `/api/sessions` card and a cold SSE open both read current truth;
+	 * the PUSH to the phone is throttled separately, see
+	 * {@link SUBAGENT_PUSH_THROTTLE_MS}.
+	 */
+	subagents: PortalSubagents = { running: 0, total: 0, rows: [] };
 
 	readonly #events: PortalGuestEvents;
 	readonly #displayName: string;
@@ -104,6 +223,23 @@ export class PortalGuest {
 	 * absorbed are replayed history rather than live news.
 	 */
 	#replayingSnapshot = false;
+	/**
+	 * Host agent-registry roster from the latest `agents` frame (and from the
+	 * welcome, which carries one). Includes the main agent; the projection filters.
+	 */
+	#roster: AgentSnapshot[] = [];
+	/**
+	 * Per-subagent detail from the mirrored `task:subagent:*` bus channels, keyed
+	 * by registry id. Separate from the roster because they arrive on independent
+	 * frames with no ordering guarantee, and either can be the first to mention an
+	 * id: a spawn's lifecycle event can beat the debounced roster broadcast, and a
+	 * rehydrated parked agent appears in the roster having emitted nothing.
+	 */
+	#progress = new Map<string, SubagentProgressView>();
+	#lifecycle = new Map<string, SubagentLifecycleView>();
+	#subagentThrottle: Timer | undefined;
+	/** Last projection actually pushed, for the change test in {@link #flushSubagents}. */
+	#lastSubagentsJson = "";
 
 	constructor(events: PortalGuestEvents, displayName = DEFAULT_DISPLAY_NAME) {
 		this.#events = events;
@@ -163,6 +299,8 @@ export class PortalGuest {
 
 	close(): void {
 		this.#closed = true;
+		clearTimeout(this.#subagentThrottle);
+		this.#subagentThrottle = undefined;
 		this.#socket?.close();
 	}
 
@@ -226,7 +364,7 @@ export class PortalGuest {
 	#handleFrame(frame: CollabFrame): void {
 		switch (frame.t) {
 			case "welcome":
-				this.#handleWelcome(frame.state);
+				this.#handleWelcome(frame.state, frame.agents);
 				break;
 			case "snapshot-chunk":
 				for (const entry of frame.entries) this.#absorb(entry);
@@ -267,11 +405,38 @@ export class PortalGuest {
 			case "bye":
 				this.#events.onClose?.(frame.reason);
 				break;
+			case "agents":
+				this.#roster = frame.agents;
+				this.#refreshSubagents();
+				break;
+			case "bus":
+				// Mirrored host EventBus traffic: the per-subagent detail the roster
+				// cannot carry. The host mirrors only the lifecycle and progress
+				// channels, but switch on the channel anyway so a host that starts
+				// mirroring a third one cannot land its payload in the wrong map.
+				if (frame.channel === TASK_SUBAGENT_PROGRESS_CHANNEL) {
+					const parsed = subagentProgressFrom(frame.data);
+					if (parsed) {
+						this.#progress.set(parsed.id, parsed.view);
+						this.#refreshSubagents();
+					}
+				} else if (frame.channel === TASK_SUBAGENT_LIFECYCLE_CHANNEL) {
+					const parsed = subagentLifecycleFrom(frame.data);
+					if (parsed) {
+						this.#lifecycle.set(parsed.id, parsed.view);
+						this.#refreshSubagents();
+					}
+				}
+				break;
 			case "error":
 				// Targeted host reply: proto mismatch at hello, or a mutating frame
 				// refused on a read-only link. Neither is actionable per-session.
 				logger.debug("mobile portal guest: host error frame", { message: frame.message });
 				break;
+			// `transcript` is deliberately unhandled: it answers the TUI Agent Hub's
+			// `fetch-transcript`, which this portal never sends. The phone shows what
+			// each subagent is doing, not its full transcript — a per-agent transcript
+			// view would need the incremental byte-offset protocol too.
 		}
 	}
 
@@ -283,11 +448,19 @@ export class PortalGuest {
 	 * would splice two sessions into a single view, and a stale ask would still be
 	 * on screen for a dialog the host already discarded.
 	 */
-	#handleWelcome(state: CollabSessionState): void {
+	#handleWelcome(state: CollabSessionState, agents: AgentSnapshot[]): void {
 		this.#replayingSnapshot = true;
 		const staleUi = this.pendingUi;
 		this.transcript = [];
 		this.todos = [];
+		// The roster and the bus detail describe the session being replaced, and
+		// only the roster is re-sent. Clearing both is what stops a resumed session
+		// from inheriting the previous one's subagent rows; the welcome's own roster
+		// then seeds the panel before the snapshot train finishes.
+		this.#progress.clear();
+		this.#lifecycle.clear();
+		this.#roster = agents;
+		this.#refreshSubagents();
 		this.activity = { working: false };
 		this.pendingUi = undefined;
 		this.state = state;
@@ -467,5 +640,112 @@ export class PortalGuest {
 	#push(item: TranscriptItem): void {
 		this.transcript.push(item);
 		if (this.transcript.length > TRANSCRIPT_CAP) this.transcript.shift();
+	}
+
+	/**
+	 * Rebuild {@link subagents} and schedule a push.
+	 *
+	 * The field is rebuilt eagerly — every roster and progress frame — because it is
+	 * read synchronously by the session-list card and the cold SSE open, and a lag
+	 * there would show a stale count on the surface the count exists for. Only the
+	 * push is rate-limited.
+	 */
+	#refreshSubagents(): void {
+		this.subagents = this.#projectSubagents();
+		if (this.#closed || this.#subagentThrottle) return;
+		// Same shape as the host's own broadcast throttles (`#scheduleAgentsBroadcast`):
+		// the first change opens a window, the timer emits whatever the projection
+		// says when the window closes.
+		this.#subagentThrottle = setTimeout(() => {
+			this.#subagentThrottle = undefined;
+			if (this.#closed) return;
+			const json = JSON.stringify(this.subagents);
+			// Progress payloads carry churn the phone never renders (`recentOutput`,
+			// `recentTools`), so most of them project to an identical panel. Comparing
+			// the projection rather than the payload is what keeps a wide fan-out from
+			// waking the phone's radio for nothing.
+			if (json === this.#lastSubagentsJson) return;
+			this.#lastSubagentsJson = json;
+			this.#events.onSubagents?.(this.subagents);
+		}, SUBAGENT_PUSH_THROTTLE_MS);
+	}
+
+	/**
+	 * Join the roster with the bus detail into the panel's rows.
+	 *
+	 * Two filters, both learned from real rosters rather than reasoned about:
+	 *
+	 * Unlike the TUI HUD this does NOT filter to detached spawns. The HUD skips a
+	 * synchronous `task` call because the parent's inline tool block already draws
+	 * that call's progress live in the terminal; the phone's transcript renders a
+	 * tool card with no progress at all, so filtering here would hide running work
+	 * with nothing else showing it.
+	 *
+	 * It DOES drop a non-running agent nothing is known about. The registry keeps
+	 * finished subagents as `idle` and then `parked` until release, and rehydrates
+	 * on-disk ones when the Agent Hub opens, so a long session's roster accumulates
+	 * names from fan-outs that ended hours ago. With no bus traffic for them — the
+	 * usual case, since their lifecycle events predate this portal's attach — such a
+	 * row is a name, a dim glyph and nothing else, pushing the live work off a phone
+	 * screen. An agent that finished while the portal was watching keeps its row.
+	 */
+	#projectSubagents(): PortalSubagents {
+		let running = 0;
+		const subs: PortalSubagent[] = [];
+		for (const snapshot of this.#roster) {
+			if (snapshot.kind !== "sub") continue;
+			// Deliberately the roster status, not the display status below: this is
+			// verbatim the TUI status-line badge's predicate, and the two numbers
+			// disagreeing would be worse than either being imperfect. Counted before
+			// the filter so a running agent can never be counted and then dropped.
+			const isRunning = snapshot.status === "running";
+			if (isRunning) running++;
+			const progress = this.#progress.get(snapshot.id);
+			const lifecycle = this.#lifecycle.get(snapshot.id);
+			if (!isRunning && !progress && !lifecycle) continue;
+			const ended =
+				lifecycle?.status === "completed" || lifecycle?.status === "failed" || lifecycle?.status === "aborted"
+					? lifecycle.status
+					: undefined;
+			// The row's label, and the two candidates it is NOT.
+			//
+			// The TUI HUD's precedence is `description`, then a muted `progress.task`
+			// preview. Neither fallback survives contact with a real `task` batch: the
+			// batch names each spawn, and that name becomes the registry id AND the
+			// description until the tiny-model label lands, which rendered `SpinnerCheck`
+			// twice on one row; and `progress.task` is the spawn prompt WITH omp's
+			// wrapper preamble, so it reads "Complete the assignment below, thoroughly…"
+			// for every agent — a paragraph of boilerplate clamped to two lines.
+			//
+			// So the label is only ever a real human label, and the row is honest with no
+			// label at all: `intent` below already answers what the agent is doing right
+			// now, which is what the HUD's task preview was standing in for (the terminal
+			// HUD has no live-intent line; this row does).
+			const task = [lifecycle?.description, progress?.description].find(
+				candidate => candidate && candidate !== snapshot.id,
+			);
+			subs.push({
+				id: snapshot.id,
+				agent: snapshot.displayName,
+				// A finished subagent is `idle` in the registry, which reads as "sitting
+				// there doing nothing" rather than "done". The lifecycle word is the
+				// honest one whenever the task actually ended.
+				status: ended ?? snapshot.status,
+				parentId: snapshot.parentId,
+				task,
+				intent: progress?.currentTool
+					? `${progress.currentTool}${progress.currentToolArgs ? ` ${progress.currentToolArgs}` : ""}`
+					: progress?.lastIntent,
+				tools: progress?.tools,
+				tokens: progress?.tokens,
+				cost: progress?.cost,
+				durationMs: progress?.durationMs,
+				startedAt: snapshot.createdAt,
+			});
+		}
+		// Running first, then most recently active: on a phone the top of the list is
+		// the only part reliably on screen, so it has to hold the live work.
+		subs.sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || b.startedAt - a.startedAt);
+		return { running, total: subs.length, rows: subs.slice(0, SUBAGENT_ROW_CAP) };
 	}
 }
