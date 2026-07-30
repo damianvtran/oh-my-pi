@@ -92,7 +92,7 @@ room as a guest, and serves:
 | `GET /healthz` | Unauthenticated liveness — health checks need it and it reveals nothing |
 | `GET`/`POST /login`, `GET /logout` | Form login, signed-cookie session |
 | `GET /api/sessions` | One summary per attached session |
-| `GET /api/sessions/:pid/events` | SSE: `state`, `transcript`, `todos`, `subagents`, `activity`, `ui-request`, `ui-request-end`, `closed` |
+| `GET /api/sessions/:pid/events` | SSE: `state`, `transcript`, `todos`, `subagents`, `activity`, `agent`, `ui-request`, `ui-request-end`, `closed` |
 | `POST /api/sessions/:pid/prompt` | Steer the agent (`{text}`) |
 | `POST /api/sessions/:pid/interrupt` | Abort the current turn — the phone's stop button, the Escape key |
 | `POST /api/sessions/:pid/resume` | The resume button: send the hidden internal continue prompt |
@@ -104,11 +104,12 @@ room as a guest, and serves:
 ### Subagents
 
 A session that fans work out to `task` subagents shows them on the phone: a
-`⟳ N agents` chip on its card in the list, and a `Subagents` panel under the
-todos in the detail view, one row per agent:
+`⟳ N agents` chip on its card in the list — N being the *running* count, so a fan-out
+that has finished leaves rows in the panel but no chip — and a `Subagents` panel under
+the todos in the detail view:
 
 ```text
-Subagents · 2/3 running                                  ▾
+Subagents · 2/3 running · $4.42 ▾
 ├ ⟳ InstallPlanAudit  scout · $1.57 · 3m
 │   • Reading health.ts
 ├ ⟳ CollabHostAudit   scout · $1.59 · 3m
@@ -117,12 +118,21 @@ Subagents · 2/3 running                                  ▾
     96.7k tok · 15 tools
 ```
 
-Two lines per agent, and the second one changes with the state: a running agent
-shows the tool it is in, a finished one shows what the run cost in tokens and tool
-calls. Cost is on the identity line because it is the field most worth reading, and
-the header collapses the panel — at the row cap it is ~470px tall directly above the
-composer, which is exactly when the transcript under it matters, so above four rows
-it starts collapsed and the header's counts carry the answer on their own.
+Two or three lines per agent: the identity line, then the spawn's label if it has one,
+then a last line that changes with the state — a running agent shows the tool it is in,
+a finished one shows what the run cost in tokens and tool calls. An agent with neither
+a label nor anything to report is a single line. Cost is on the identity line because it
+is the field most worth reading.
+
+**The header is a collapse toggle, and it is the whole panel when collapsed.** At the
+row cap the list is ~470px tall directly above the composer, for as long as the
+fan-out runs — which is exactly when the transcript underneath it is worth reading, so
+past four rows it starts collapsed. Everything the header states is therefore
+aggregated over the whole roster rather than the capped rows: `N/M running`, spend, and
+a failure count that shows *while* work is still running, because a failure is
+actionable precisely then. Parked agents are counted separately from done ones — a
+parked subagent has a disposed but revivable session and is often waiting on its
+parent, which is not the same as finished.
 
 **Nothing new crosses the wire for it.** The host already broadcasts its
 agent-registry roster (a `agents` frame, 100ms-debounced on registry change, plus
@@ -147,9 +157,10 @@ Decisions worth knowing, because each one is a departure from something:
   live; the phone's transcript renders a tool card with no progress at all, so
   filtering here would hide running work with nothing else showing it.
 - **A finished agent nothing was heard from is dropped.** The registry keeps
-  finished subagents as `idle` and then `parked` until release and rehydrates
-  on-disk ones when the Agent Hub opens, so a long session's roster accumulates
-  names from fan-outs that ended hours ago. With no bus traffic for them such a row
+  finished subagents as `idle` and then `parked` until release, and rehydrates on-disk
+  ones whenever something enumerates them (opening the Agent Hub, or `hub` messaging),
+  so a long session's roster accumulates names from fan-outs that ended hours ago. With
+  no bus traffic for them such a row
   is a name and a dim glyph, pushing live work off a phone screen. One that
   finished while the portal was watching keeps its row, with the lifecycle's
   verdict (`✔` / `✘` / `⨯`) rather than the registry's `idle` — though only once the
@@ -165,12 +176,15 @@ Decisions worth knowing, because each one is a departure from something:
 - **Pushes are throttled, not debounced.** The executor coalesces progress at 150ms
   *per agent*, so a wide fan-out streams continuously and a reset-on-change
   debounce would never fire until the last agent finished. The guest emits at most
-  one `subagents` frame per 250ms, and skips it entirely when the projection is
-  unchanged — which is most of them, because the churn is in fields the phone does
-  not render (`recentTools`, `recentOutput`). That test only works because the
-  projection quantizes the host's run duration to whole seconds: it is
-  `Date.now() - startTime` recomputed on every emit, so carrying its milliseconds
-  made every projection differ and the comparison a no-op.
+  one `subagents` frame per 250ms, and skips a frame whose projection is unchanged —
+  a settled or finished agent re-reporting, or churn confined to fields the phone does
+  not render (`recentTools`, `recentOutput`). That skip cannot quiet a *live* agent,
+  whose cumulative tokens and cost move on nearly every emit; the throttle is what
+  bounds the radio wakeups. It works at all only because the projection quantizes the
+  two numbers that would otherwise move on every single emit: the host's run duration
+  is floored to whole seconds (raw, it is `Date.now() - startTime` recomputed per emit)
+  and the aggregate cost is rounded to the cent. Without both, no two projections ever
+  compared equal and the skip was a no-op.
 - **Bus detail is pruned against the roster, not cleared on a rebind.** The host's
   agent registry is process-global and survives a `/resume`, so a detached fan-out
   still running belongs to the roster the new welcome carries; wiping the maps cost

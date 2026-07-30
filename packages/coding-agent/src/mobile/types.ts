@@ -255,9 +255,13 @@ export interface PortalSubagent {
 	tokens?: number;
 	cost?: number;
 	/**
-	 * Host-computed run duration. Preferred over deriving one from
-	 * {@link startedAt} because it carries no clock skew between host and phone,
-	 * and because it freezes at the right value when the agent finishes.
+	 * Host-computed run duration, floored to whole seconds. Preferred over deriving
+	 * one from {@link startedAt} because it carries no clock skew between host and
+	 * phone and freezes at the right value when the agent finishes. The quantization
+	 * is part of the contract, not a rounding accident: the raw value is
+	 * `Date.now() - startTime` recomputed on every progress emit, so at full
+	 * precision a quiet agent's row differed forever and the guest's
+	 * unchanged-projection test could never fire for it.
 	 */
 	durationMs?: number;
 	/** Host epoch ms the agent was registered; the fallback for elapsed time. */
@@ -285,6 +289,28 @@ export interface PortalSubagents {
 	 * exactly what the cap hid.
 	 */
 	total: number;
+	/**
+	 * Of {@link total}, how many ended in `failed` or `aborted`. Counted over the
+	 * whole roster rather than derived from {@link rows}, which is capped: a header
+	 * that subtracted a capped failure count from an uncapped total reported
+	 * `11 done · 1 failed` for a twelve-agent fan-out whose other four outcomes the
+	 * phone never received.
+	 */
+	failed: number;
+	/**
+	 * Of {@link total}, how many are `parked`: session disposed but the ref revivable,
+	 * often an agent waiting on its parent. Neither running nor finished, and counting
+	 * them under "done" told the reader work had completed that had not.
+	 */
+	parked: number;
+	/**
+	 * Dollars across the whole roster, rounded to the cent. Uncapped and aggregated
+	 * here because the header is the only place spend survives the panel being
+	 * collapsed — its default state for a wide fan-out, which is when it matters most.
+	 * Rounded for the same reason {@link PortalSubagent.durationMs} is: an unrounded
+	 * sum moves on every progress emit and no two projections ever compare equal.
+	 */
+	cost: number;
 	/** Rows to render, running first. `total - rows.length` are hidden by the cap. */
 	rows: PortalSubagent[];
 }

@@ -198,9 +198,9 @@ function subagentProgressFrom(data: unknown): { id: string; view: SubagentProgre
 			tokens: wireNumber(progress.tokens),
 			cost: wireNumber(progress.cost),
 			// Quantized to the second, which is all `elapsedOf` renders. The raw value is
-			// `Date.now() - startTime` recomputed on every emit, so carrying its
-			// milliseconds would make consecutive projections differ forever and defeat
-			// the unchanged-projection test that keeps a fan-out off the phone's radio.
+			// `Date.now() - startTime` recomputed on every emit, so at full precision a
+			// row differed on every payload and the change test below could never fire for
+			// an agent whose visible state had settled.
 			durationMs: durationSeconds(wireNumber(progress.durationMs)),
 		},
 	};
@@ -275,7 +275,7 @@ export class PortalGuest {
 	 * itself. Rebuilding eagerly threw away all but a few percent of the work; a
 	 * dirty flag keeps the getter's answer exactly as current with none of it.
 	 */
-	#subagentsCache: PortalSubagents = { running: 0, total: 0, rows: [] };
+	#subagentsCache: PortalSubagents = { running: 0, failed: 0, parked: 0, cost: 0, total: 0, rows: [] };
 	#subagentsDirty = false;
 
 	/** Live subagents, mirroring the TUI's Subagents HUD and status-line badge. */
@@ -717,10 +717,11 @@ export class PortalGuest {
 			this.#subagentThrottle = undefined;
 			if (this.#closed) return;
 			const json = JSON.stringify(this.subagents);
-			// Progress payloads carry churn the phone never renders (`recentOutput`,
-			// `recentTools`), so most of them project to an identical panel. Comparing
-			// the projection rather than the payload is what keeps a wide fan-out from
-			// waking the phone's radio for nothing.
+			// The rate limit is the throttle above; this test is what stops a push whose
+			// panel would be identical — a quiet or finished agent re-reporting, an agent
+			// whose churn is confined to fields the phone does not render (`recentTools`,
+			// `recentOutput`). It cannot suppress a live agent, whose cumulative `tokens`
+			// and `cost` move on nearly every emit; that is what the throttle is for.
 			if (json === this.#lastSubagentsJson) return;
 			this.#lastSubagentsJson = json;
 			this.#events.onSubagents?.(this.subagents);
@@ -748,6 +749,9 @@ export class PortalGuest {
 	 */
 	#projectSubagents(): PortalSubagents {
 		let running = 0;
+		let failed = 0;
+		let parked = 0;
+		let cost = 0;
 		const subs: PortalSubagent[] = [];
 		for (const snapshot of this.#roster) {
 			if (snapshot.kind !== "sub") continue;
@@ -771,6 +775,15 @@ export class PortalGuest {
 				(lifecycle?.status === "completed" || lifecycle?.status === "failed" || lifecycle?.status === "aborted")
 					? lifecycle.status
 					: undefined;
+			if (ended === "failed" || ended === "aborted") failed++;
+			// Parked is neither running nor finished: the session was disposed but the ref
+			// is revivable, and it is frequently an agent waiting on its parent. Counting
+			// it under "done" told the reader the work had completed.
+			else if (!isRunning && !ended && snapshot.status === "parked") parked++;
+			// Summed over the whole roster, not the capped rows: the header is the only
+			// place spend survives the panel being collapsed, which is its default state
+			// for a wide fan-out — exactly when the number matters most.
+			cost += progress?.cost ?? 0;
 			// The row's label, and the two candidates it is NOT.
 			//
 			// The TUI HUD's precedence is `description`, then a muted `progress.task`
@@ -810,6 +823,15 @@ export class PortalGuest {
 		// Running first, then most recently active: on a phone the top of the list is
 		// the only part reliably on screen, so it has to hold the live work.
 		subs.sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || b.startedAt - a.startedAt);
-		return { running, total: subs.length, rows: subs.slice(0, SUBAGENT_ROW_CAP) };
+		// Cost is rounded to the cent the phone renders: at full precision the sum moved
+		// on every progress emit and no projection ever compared equal.
+		return {
+			running,
+			failed,
+			parked,
+			cost: Math.round(cost * 100) / 100,
+			total: subs.length,
+			rows: subs.slice(0, SUBAGENT_ROW_CAP),
+		};
 	}
 }
