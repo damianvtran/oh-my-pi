@@ -266,38 +266,44 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 .think { color: var(--fg-faint); white-space: pre-wrap; overflow-wrap: anywhere; }
 .think::before { content: "✺ "; color: var(--fg-muted); }
 
-/* todos — the tree panel, with omp's guides and strikethrough completions */
-.todos { margin: 10px 0; }
-.todos-h { font-weight: 650; color: var(--accent-text); }
-.todos-h .count { color: var(--fg-faint); font-weight: 400; }
-.phase { color: var(--fg); font-weight: 650; }
-.phase .count { color: var(--fg-faint); font-weight: 400; }
-/* `pre` is load-bearing, not cosmetic: a guide is literal box-drawing characters
-   padded with spaces to a fixed column, and HTML collapses runs of whitespace and
-   strips it at line ends. Without this the indent silently loses columns — the
-   todos tree renders 4 where 5 were written, and a continuation line under a
-   subagent row collapsed to 2 columns, or to none at all on the last row. */
+/* ── tree panels: todos and subagents ────────────────────────────────────
+   Both draw omp's ├/└ guides, and both are built from the same row primitive: a
+   fixed guide gutter plus a content column that owns its own wrapping. That
+   structure is the whole reason a row survives a 390px content column. Without it
+   the guide is an inline sibling of the text, so a wrapped line returns to column 0
+   — outside the tree, reading as a new item rather than a continuation — an
+   unbreakable token runs off the viewport and makes the whole transcript scroll
+   sideways, and `overflow`/`text-overflow` are inert, because neither applies to a
+   non-replaced inline element. The todos panel had all three problems and pushed
+   ~100px of horizontal scroll into `main` at phone width; it shares the fix. */
+.tree-row { display: flex; }
+.tree-row > .guide { flex: none; }
+.tree-body { min-width: 0; flex: 1; }
+/* `pre` is load-bearing too: a guide is literal box-drawing characters padded with
+   spaces to a fixed column, and HTML collapses runs of whitespace and strips it at
+   line ends. Without it the indent silently loses columns — the todos tree rendered
+   4 where 5 were written, and a subagent continuation collapsed to 2 columns, or to
+   none at all on the last row. */
 .guide { color: var(--fg-faint); white-space: pre; }
-.task { color: var(--fg-faint); }
+
+/* todos — strikethrough completions over the shared tree */
+.todos { margin: 10px 0; }
+/* Same min-height as the subagents header, which is a button: a 14px difference
+   between two adjacent panel headers reads as inconsistent spacing, not affordance. */
+.todos-h { display: flex; align-items: center; min-height: 32px; font-weight: 650; color: var(--accent-text); }
+.todos-h .count { color: var(--fg-faint); font-weight: 400; }
+.phase { color: var(--fg); font-weight: 650; overflow-wrap: anywhere; }
+.phase .count { color: var(--fg-faint); font-weight: 400; }
+.task { color: var(--fg-faint); overflow-wrap: anywhere; }
 .task.now { color: var(--fg); }
 .task.done { color: var(--ok); text-decoration: line-through; }
 .task.blocked { color: var(--warn-text); }
 
-/* subagents — the TUI's anchored "Subagents" HUD. Same tree idiom as the todos
-   panel directly above it (accent header with a dim count, ├/└ guides), because
-   in the terminal these two blocks are deliberately the same shape and a phone
-   that drew them differently would imply a difference that is not there.
-
-   Every line is a flex pair: a fixed guide gutter, then a content column that owns
-   its own wrapping. This is the whole reason the panel survives a 414px phone. A
-   subagent line is ~55 characters against ~52 available, so it wraps in the common
-   case — and an inline layout returns the wrapped remainder to column 0, which
-   reads as a new tree item rather than a continuation (an orphaned `$21.50` under
-   a row is not a wrapped sentence). It is also what makes the ellipsis and the
-   two-line clamp below work at all: `overflow` does not apply to a non-replaced
-   inline element, and `-webkit-box` is block-level and would push its own guide
-   onto a separate line. `.card-act` gets away with the same declarations only
-   because it is already a flex container. */
+/* subagents — the TUI's anchored "Subagents" HUD, over the shared tree row above.
+   Same idiom as the todos panel directly above it (accent header with a dim count,
+   ├/└ guides), because in the terminal these two blocks are deliberately the same
+   shape and a phone that drew them differently would imply a difference that is not
+   there. */
 .agents { margin: 10px 0; }
 /* A control, not a heading: the panel is up to ~470px tall at the row cap, sitting
    directly above the composer for as long as a fan-out runs. 32px rather than the
@@ -309,15 +315,18 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
   text-align: left; font-weight: 650; color: var(--accent-text);
 }
 .agents-h .count { color: var(--fg-faint); font-weight: 400; }
-.agents-h .caret { color: var(--fg-faint); font-weight: 400; margin-left: auto; }
-.ag-row { display: flex; }
-.ag-row > .guide { flex: none; }
-.ag-body { min-width: 0; flex: 1; }
-/* One cell, centred: the status glyphs do not share an advance width (⟳ is 1.10ch,
-   ✔ is 0.97ch), so an unpinned glyph left the id column ragged and shifted every
-   continuation indent by a fraction. Pinning it also survives a user theme that
+/* Immediately after the count, not pushed to the far edge: a 7px triangle stranded
+   200px away from the label does not read as a disclosure control. */
+.agents-h .caret { color: var(--fg-faint); font-weight: 400; }
+.agents-h .bad { color: var(--err); }
+/* One cell, centred, plus its own trailing column: the status glyphs do not share an
+   advance width (⟳ is 1.10ch, ✔ is 0.97ch), so an unpinned glyph left the id column
+   ragged and shifted every continuation indent by a fraction. `margin-right` because
+   the flex row eats the literal space the markup used to carry — without it the glyph
+   touched the first letter of the id (`⟳InstallPlanAudit`) and the id started at 3ch
+   while the continuation guide indents 4ch. Pinning also survives a user theme that
    overrides the symbol preset. */
-.ag-st { flex: none; display: inline-block; width: 1ch; text-align: center; }
+.ag-st { flex: none; display: inline-block; width: 1ch; margin-right: 1ch; text-align: center; }
 /* `--accent-text`, not `--accent`: this is a 12px glyph on the page background, and
    `--accent` measures 3.94:1 there in the light palette — under the 4.5:1 floor,
    the exact trap the `--warn`/`--warn-text` split above exists to prevent. */
@@ -328,19 +337,26 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
    that pair distinguished by a 12px glyph alone. */
 .ag-stop { color: var(--warn-text); }
 .ag-off { color: var(--fg-faint); }
-/* Live work carries the emphasis; a finished row recedes. The inverse — every id
-   bold accent regardless of state — let five completed rows dominate the two that
-   were actually running. */
+/* Live work carries the emphasis; a FINISHED row recedes. Parked is deliberately not
+   in that set: the session is disposed but revivable, often waiting on its parent, so
+   dimming it to match a completed agent overstated how done it was. */
 .ag-id { color: var(--accent-text); font-weight: 650; overflow-wrap: anywhere; }
 .ag-done .ag-id { color: var(--fg-muted); font-weight: 400; }
 .ag-meta { color: var(--fg-faint); font-weight: 400; overflow-wrap: anywhere; }
-/* The assignment: clamped to two lines. A task label can be a paragraph, and an
-   eight-row panel that lets one row grow unbounded stops being glanceable. */
+/* The budget split between the two continuation lines follows which one changes. The
+   assignment is static context you read once, so one ellipsized line; the live tool is
+   why the panel exists and is the signal that an agent is stuck, so it gets the
+   two-line clamp. (The reverse — which is what shipped first — truncated a real
+   `bash sleep 75; cd … && pnpm` at 48 characters while the label below it spent two
+   full lines.) */
 .ag-task {
-  color: var(--fg-muted); overflow-wrap: anywhere;
+  display: block; color: var(--fg-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ag-what {
+  color: var(--fg-faint); overflow-wrap: anywhere;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.ag-what { display: block; color: var(--fg-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ag-more { color: var(--fg-faint); }
 /* Screen-reader-only text. The status is otherwise a glyph plus a colour, which
    announces as an unlabeled symbol or not at all — and this is the block that
@@ -674,11 +690,20 @@ function renderTodos(phases) {
   const rows = phases.map((p, pi) => {
     const last = pi === phases.length - 1;
     const pdone = p.tasks.filter(t => t.status === "completed").length;
-    const head = `<div><span class="guide">${last ? "└" : "├"} </span><span class="phase">${esc(p.name)}<span class="count"> · ${pdone}/${p.tasks.length}</span></span></div>`;
+    // `.tree-row`/`.tree-body` and the `aria-hidden` guide are shared with the
+    // subagents panel below: without them a long task wrapped back to column 0 and an
+    // unbreakable one scrolled the whole transcript sideways, and a screen reader read
+    // the box-drawing characters aloud once per line.
+    const head =
+      `<div class="tree-row"><span class="guide" aria-hidden="true">${last ? "└" : "├"} </span>` +
+      `<span class="tree-body phase">${esc(p.name)}<span class="count"> · ${pdone}/${p.tasks.length}</span></span></div>`;
     const tasks = p.tasks.map((t, ti) => {
       const cls = t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : t.status === "blocked" ? "blocked" : "";
       const branch = ti === p.tasks.length - 1 ? "└" : "├";
-      return `<div><span class="guide">${last ? "  " : "│ "} ${branch} </span><span class="task ${cls}">${TODO_GLYPH[t.status] ?? "☐"} ${esc(t.content)}</span></div>`;
+      return (
+        `<div class="tree-row"><span class="guide" aria-hidden="true">${last ? "  " : "│ "} ${branch} </span>` +
+        `<span class="tree-body task ${cls}">${TODO_GLYPH[t.status] ?? "☐"} ${esc(t.content)}</span></div>`
+      );
     }).join("");
     return head + tasks;
   }).join("");
@@ -687,10 +712,10 @@ function renderTodos(phases) {
 
 /* Status glyph and colour per subagent. Glyphs come from omp's own unicode preset
    (theme.ts → UNICODE_SYMBOLS) so a row reads the same as the Agent Hub row for the
-   same agent, with two deliberate substitutions: `parked` uses `status.disabled`
-   rather than `status.shadowed`, because `⟳` and `○` are the same ring one hue apart
-   and running/parked are opposite meanings; and `aborted` uses the `⨯` this app
-   already marks a stopped turn with, rather than `status.aborted`'s `⏹`, which
+   same agent, with two deliberate departures, both because a 12px glyph has to differ
+   in SHAPE and not only in hue: `parked` is `⏸` rather than the preset's `○` or
+   `⦸`, which are the same ring as `⟳` for opposite meanings; and `aborted` is the `⨯`
+   this app already marks a stopped turn with rather than `status.aborted`'s `⏹`, which
    renders from a fallback face as a solid block foreign to the surrounding line art.
    `idle` means the registry released the agent without a lifecycle verdict ever
    arriving — done, but not known to have succeeded. */
@@ -699,7 +724,7 @@ const AGENT_STATE = {
   completed: { glyph: "✔", cls: "ag-ok" },
   failed:    { glyph: "✘", cls: "ag-err" },
   aborted:   { glyph: "⨯", cls: "ag-stop" },
-  parked:    { glyph: "⦸", cls: "ag-off" },
+  parked:    { glyph: "⏸", cls: "ag-off" },
   idle:      { glyph: "•", cls: "ag-off" },
 };
 /* An unrecognised status from a newer host must not masquerade as a state we know:
@@ -717,7 +742,11 @@ const agentStateOf = status =>
    covered everything from 60 to 119 minutes, which is exactly the range where the
    number is the reason you would go look at a possibly-stuck agent. */
 function elapsedOf(a) {
+  // The one number on the row with no other guard: with neither field, `Date.now() -
+  // undefined` is NaN, every comparison below is false, and the row printed `NaNh`.
+  // An empty string drops out of the `.filter(Boolean)` join like every other field.
   const ms = Number.isFinite(a.durationMs) ? a.durationMs : Date.now() - a.startedAt;
+  if (!Number.isFinite(ms)) return "";
   const secs = Math.max(0, Math.round(ms / 1000));
   if (secs < 60) return `${secs}s`;
   const mins = Math.floor(secs / 60);
@@ -763,51 +792,86 @@ function renderSubagents(s) {
   // header can say how many the cap is hiding rather than truncating silently.
   const total = s.total ?? rows.length;
   const hidden = Math.max(0, total - rows.length);
-  // `N/M running`, the ratio grammar the todos header already uses, rather than
-  // prose — it is shorter and always states both numbers. When nothing runs, count
-  // the real outcome: "3 done" over three red ✘ marks contradicts its own rows.
-  const bad = rows.filter(a => a.status === "failed" || a.status === "aborted").length;
-  const head = s.running ? `${s.running}/${total} running` : bad ? `${total - bad} done · ${bad} failed` : `${total} done`;
+  // `N/M running`, the ratio grammar the todos header already uses, rather than prose
+  // — it is shorter and always states both numbers. Every other count comes from the
+  // projection, NOT from `rows`, which is capped: subtracting a capped failure count
+  // from an uncapped total reported "11 done · 1 failed" for a twelve-agent fan-out
+  // whose other four outcomes never reached the phone.
+  //
+  // A failure and the running total are stated TOGETHER, because the panel's default
+  // state past four rows is collapsed and the header is then the whole panel: reporting
+  // a failure only once everything had stopped withheld the one thing worth looking at
+  // for exactly as long as it was actionable. Spend rides along for the same reason.
+  const bad = s.failed ?? 0;
+  const held = s.parked ?? 0;
+  const spend = costOf(s.cost);
+  const badPart = bad ? ` · <span class="bad">${bad} failed</span>` : "";
+  const settled = [
+    `${Math.max(0, total - bad - held)} done`,
+    held ? `${held} parked` : "",
+  ].filter(Boolean).join(" · ");
+  const head = s.running
+    ? `${s.running}/${total} running${badPart}`
+    : bad || held
+      ? `${settled}${badPart}`
+      : `${total} done`;
   const open = agentsOpen ?? rows.length <= AGENTS_AUTO_COLLAPSE_OVER;
+  // `aria-controls` only while the list exists: pointing it at a missing id is worst
+  // exactly when collapsed, which is when a client would follow it. The caret is
+  // decorative — `aria-expanded` already carries the state, and an unlabelled triangle
+  // announces as its Unicode name.
   const header =
-    `<button class="agents-h" id="agtoggle" aria-expanded="${open}" aria-controls="aglist">` +
-    `Subagents<span class="count"> · ${esc(head)}</span><span class="caret">${open ? "▾" : "▸"}</span></button>`;
+    `<button class="agents-h" id="agtoggle" aria-expanded="${open}"${open ? ' aria-controls="aglist"' : ""}>` +
+    `Subagents<span class="count"> · ${head}${spend ? ` · ${spend}` : ""}</span>` +
+    `<span class="caret" aria-hidden="true">${open ? "▾" : "▸"}</span></button>`;
   if (!open) return `<div class="agents">${header}</div>`;
   const body = rows.map((a, i) => {
     const last = i === rows.length - 1 && !hidden;
     const state = agentStateOf(a.status);
     // Continuation lines are indented under the id, with the trunk drawn only while
     // more rows follow. Four columns because that is where the id starts: two for the
-    // branch and its space, two for the pinned glyph cell and its space.
-    const cont = `<span class="guide">${last ? "    " : "│   "}</span>`;
+    // branch and its space, two for the pinned glyph cell and its trailing column.
+    const cont = `<span class="guide" aria-hidden="true">${last ? "    " : "│   "}</span>`;
     // `task` is the generic worker's display name, so it names nothing here and
     // collides with the assignment label below; the specific types (`scout`,
     // `reviewer`) are worth the slot. Cost sits second because it is the field most
     // worth reading and the last one an overflow would drop.
     const kind = a.agent && a.agent !== "task" ? a.agent : "";
     const meta = [kind, costOf(a.cost), elapsedOf(a)].filter(Boolean).join(" · ");
-    const volume = [tokensOf(a.tokens) ? `${tokensOf(a.tokens)} tok` : "", a.tools ? `${a.tools} tool${a.tools === 1 ? "" : "s"}` : ""]
+    const tokens = tokensOf(a.tokens);
+    const volume = [tokens ? `${tokens} tok` : "", a.tools ? `${a.tools} tool${a.tools === 1 ? "" : "s"}` : ""]
       .filter(Boolean)
       .join(" · ");
+    // `ag-done` dims the id, so parked stays out of it: the session is disposed but
+    // revivable, which is not the same as finished.
+    const spent = a.status !== "running" && a.status !== "parked" ? " ag-done" : "";
     const id =
-      `<div class="ag-row ${a.status === "running" ? "" : "ag-done"}"><span class="guide">${last ? "└ " : "├ "}</span>` +
+      `<div class="tree-row${spent}"><span class="guide" aria-hidden="true">${last ? "└ " : "├ "}</span>` +
       `<span class="ag-st ${state.cls}" aria-hidden="true">${state.glyph}</span>` +
       `<span class="sr">${esc(a.status)} </span>` +
-      `<span class="ag-body"><span class="ag-id">${esc(a.id)}</span>` +
+      `<span class="tree-body"><span class="ag-id">${esc(a.id)}</span>` +
       (meta ? ` <span class="ag-meta">${esc(meta)}</span>` : "") +
       `</span></div>`;
-    const task = a.task ? `<div class="ag-row">${cont}<span class="ag-body ag-task">${esc(a.task)}</span></div>` : "";
+    const task = a.task ? `<div class="tree-row">${cont}<span class="tree-body ag-task">${esc(a.task)}</span></div>` : "";
     // A running agent has a "right now"; a finished one's last tool is history and
     // would read as though it were still working, so its row shows what the run cost
-    // instead. Both are the same slot, so the row height does not depend on state.
+    // instead. One slot either way, and not an unconditional one: a running agent that
+    // has not reported a tool yet, or a finished one whose lifecycle arrived with no
+    // progress detail, has neither — and with no label either, that row is one line.
     const tail = a.status === "running" ? (a.intent ? `• ${a.intent}` : "") : volume;
-    const what = tail ? `<div class="ag-row">${cont}<span class="ag-body ag-what">${esc(tail)}</span></div>` : "";
-    return id + task + what;
+    const what = tail ? `<div class="tree-row">${cont}<span class="tree-body ag-what">${esc(tail)}</span></div>` : "";
+    // One list item per AGENT, not per line: the 1-3 rows below belong together, and a
+    // flat run of divs gave assistive tech no count and no way to step agent by agent.
+    return `<div role="listitem">${id}${task}${what}</div>`;
   }).join("");
+  // Structurally an agent row, ellipsis in the glyph cell, so the truncation notice
+  // lands on the same column as every id instead of two columns to its left.
   const more = hidden
-    ? `<div class="ag-row"><span class="guide">└ </span><span class="ag-body ag-more">… ${hidden} more</span></div>`
+    ? `<div role="listitem" class="tree-row"><span class="guide" aria-hidden="true">└ </span>` +
+      `<span class="ag-st ag-off" aria-hidden="true">…</span>` +
+      `<span class="tree-body ag-more">${hidden} more</span></div>`
     : "";
-  return `<div class="agents">${header}<div id="aglist">${body}${more}</div></div>`;
+  return `<div class="agents">${header}<div id="aglist" role="list">${body}${more}</div></div>`;
 }
 
 /* Tool outputs the user expanded. The transcript is re-rendered wholesale on every
@@ -897,14 +961,18 @@ async function refresh() {
   if (!res.ok) return;
   const sessions = await res.json();
   lastSessions = sessions;
-  // The reason to open the portal is a session that needs an answer, then one
-  // that is working; server order is arbitrary and buries both.
-  const rank = s => (s.needsAttention ? 0 : s.streaming ? 1 : 2);
+  // The reason to open the portal is a session that needs an answer, then one that is
+  // working, then one whose turn ended but whose detached subagents have not — server
+  // order is arbitrary and buries all three.
+  const rank = s => (s.needsAttention ? 0 : s.streaming ? 1 : s.subagents ? 2 : 3);
   sessions.sort((a, b) => rank(a) - rank(b) || String(b.startedAt ?? "").localeCompare(String(a.startedAt ?? "")));
   $("list").innerHTML = sessions.length
     ? sessions.map(s => {
         const pct = s.context ? s.context.percent : 0;
-        const state = s.needsAttention ? "ask" : s.streaming ? "run" : "";
+        // A live fan-out gets the pulsing dot too: the dot is the most prominent mark on
+        // the card, and leaving it neutral said nothing was happening on a session with
+        // agents still running, contradicting both the word and the chip beside it.
+        const state = s.needsAttention ? "ask" : s.streaming || s.subagents ? "run" : "";
         /* "waiting", not "idle", when the turn ended but a detached fan-out is still
            going: `idle` beside `⟳ 5 agents` on one row reads as a contradiction, and the
            session really is neither working nor finished.
@@ -1108,17 +1176,45 @@ function open(pid) {
     $("todos").innerHTML = renderTodos(JSON.parse(e.data));
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
-  /* The panel is re-rendered wholesale on every push, so the toggle is re-bound each
-     time and the expanded state has to live outside the DOM (`agentsOpen`) — the same
-     reason `expandedTools` exists for tool cards. */
+  /* The panel is re-rendered on every push, and the expanded state therefore lives
+     outside the DOM (`agentsOpen`) — the same reason `expandedTools` exists for tool
+     cards.
+
+     What it must NOT do is replace the toggle: a fan-out pushes several times a
+     second, and blowing away the only focusable control the panel has took keyboard
+     focus to <body> and reset an assistive client's cursor with it, mid-fan-out, which
+     is the one time the panel is worth reading. So the header button is reused when it
+     is already there and only its label, caret, state and the list below it change. */
   let lastSubagents = null;
   const paintSubagents = () => {
     const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
-    $("subagents").innerHTML = renderSubagents(lastSubagents);
+    const host = $("subagents");
+    const html = renderSubagents(lastSubagents);
     const toggle = $("agtoggle");
-    if (toggle) {
-      toggle.onclick = () => {
-        agentsOpen = toggle.getAttribute("aria-expanded") !== "true";
+    const next = toggle ? document.createElement("div") : null;
+    if (next) next.innerHTML = html;
+    const fresh = next?.querySelector("#agtoggle");
+    if (toggle && fresh) {
+      // Same panel, new numbers: patch the button in place and swap only the list.
+      // `innerHTML`, not `textContent`: the count carries a `.bad` span for failures.
+      toggle.querySelector(".count").innerHTML = fresh.querySelector(".count").innerHTML;
+      const expanded = fresh.getAttribute("aria-expanded");
+      toggle.setAttribute("aria-expanded", expanded);
+      if (expanded === "true") toggle.setAttribute("aria-controls", "aglist");
+      else toggle.removeAttribute("aria-controls");
+      const list = $("aglist");
+      const freshList = next.querySelector("#aglist");
+      if (freshList && list) list.innerHTML = freshList.innerHTML;
+      else host.innerHTML = html;
+    } else {
+      host.innerHTML = html;
+    }
+    const live = $("agtoggle");
+    // Rebinding an existing button's `onclick` replaces the one handler, so this is
+    // idempotent whether the button was reused or just created.
+    if (live) {
+      live.onclick = () => {
+        agentsOpen = live.getAttribute("aria-expanded") !== "true";
         paintSubagents();
       };
     }

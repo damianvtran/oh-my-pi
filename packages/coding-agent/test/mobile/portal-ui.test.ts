@@ -37,9 +37,23 @@ interface PortalSubagentRow {
 }
 
 interface PortalUi {
-	renderSubagents(value: { running: number; total: number; rows: PortalSubagentRow[] } | null): string;
+	/**
+	 * Every count is optional here even though `PortalSubagents` requires them: this
+	 * renderer parses a JSON frame and guards each one, and the guards are part of
+	 * what these tests pin.
+	 */
+	renderSubagents(
+		value: {
+			running?: number;
+			failed?: number;
+			parked?: number;
+			cost?: number;
+			total?: number;
+			rows: PortalSubagentRow[];
+		} | null,
+	): string;
 	esc(value: unknown): string;
-	elapsedOf(row: { durationMs?: number; startedAt: number }): string;
+	elapsedOf(row: { durationMs?: number; startedAt?: number }): string;
 	setAgentsOpen(open: boolean | null): void;
 }
 
@@ -54,8 +68,13 @@ interface PortalUi {
 function loadPortalUi(): PortalUi {
 	const source = String(portalHtml);
 	const open = source.indexOf("<script>");
-	const close = source.lastIndexOf("</script>");
+	// The FIRST close tag, matching the HTML parser: it terminates a `<script>` at
+	// `</script` regardless of JS string or comment context. Taking the last one would
+	// hand this test a body the browser never runs, which is the same invisibility that
+	// let a stray backtick ship.
+	const close = source.indexOf("</script>", open);
 	if (open < 0 || close < 0) throw new Error("portal-ui.html has no inline script");
+	if (source.split("</script>").length !== 2) throw new Error("portal-ui.html has more than one script block");
 	const script = source.slice(open + "<script>".length, close);
 
 	const sink: unknown = new Proxy(function noop() {} as unknown as Record<string, unknown>, {
@@ -161,19 +180,33 @@ describe("portal UI subagents panel", () => {
 		// Guides are literal padded box-drawing characters (the CSS keeps them with
 		// `white-space: pre`): a branch for every row but the last, and a four-column
 		// continuation indent — two for the branch, two for the pinned glyph cell.
-		expect(html).toContain('<span class="guide">├ </span>');
-		expect(html).toContain('<span class="guide">└ </span>');
-		expect(html).toContain('<span class="guide">│   </span>');
-		expect(html).toContain('<span class="guide">    </span>');
+		expect(html).toContain('<span class="guide" aria-hidden="true">├ </span>');
+		expect(html).toContain('<span class="guide" aria-hidden="true">└ </span>');
+		expect(html).toContain('<span class="guide" aria-hidden="true">│   </span>');
+		expect(html).toContain('<span class="guide" aria-hidden="true">    </span>');
+		// That four-column indent only lines up with the id if the glyph cell owns a
+		// trailing column of its own. The flex row eats the literal space the markup
+		// used to carry, so it has to come from CSS — and when it went missing the glyph
+		// touched the id and the continuation hung one column to its right.
+		const css = String(portalHtml).slice(0, String(portalHtml).indexOf("</style>"));
+		expect(css).toMatch(/\.ag-st\s*{[^}]*margin-right:\s*1ch/);
+		expect(css).toMatch(/\.ag-st\s*{[^}]*width:\s*1ch/);
+		// The primitive is shared with the todos panel, which had the same defects.
+		expect(css).toMatch(/\.tree-row\s*{\s*display:\s*flex/);
+		expect(css).toMatch(/\.tree-body\s*{[^}]*min-width:\s*0/);
 	});
 
-	it("keeps the trunk on the last row when the cap hid some", () => {
+	it("puts the truncation notice on the id column, not two columns left of it", () => {
 		const ui = loadPortalUi();
 		const html = ui.renderSubagents({ running: 12, total: 12, rows: [row(), row({ id: "Other" })] });
-		// The `… N more` row is now the last thing in the tree, so no agent row may
-		// close it — otherwise the tree ends twice.
-		expect(html).toContain("… 10 more");
-		expect(html.match(/guide">└ </g)).toHaveLength(1);
+		// The `… N more` row is the last thing in the tree, so no agent row may close it
+		// — otherwise the tree ends twice.
+		expect(html.match(/guide" aria-hidden="true">└ </g)).toHaveLength(1);
+		// And the ellipsis sits in a glyph cell, which is what lands its text on the same
+		// column as every id instead of at the guide's own edge.
+		expect(html).toContain(
+			'<span class="ag-st ag-off" aria-hidden="true">…</span><span class="tree-body ag-more">10 more</span>',
+		);
 	});
 
 	it("shows the live tool while running and the run's volume once finished", () => {
@@ -191,6 +224,19 @@ describe("portal UI subagents panel", () => {
 		expect(one).toContain("1 tool<");
 	});
 
+	it("draws a single line for an agent with nothing to report", () => {
+		const ui = loadPortalUi();
+		// Reachable and documented: a spawn whose lifecycle landed before any progress
+		// has no label, no tool and no counters. The row is its identity line alone —
+		// three `tree-row` divs would mean two of them were empty.
+		const bare = { id: "JustStarted", agent: "scout", status: "running", startedAt: Date.now() };
+		const html = ui.renderSubagents({ running: 1, total: 1, rows: [bare] });
+		expect(html.match(/class="tree-row/g)).toHaveLength(1);
+		expect(html).toContain("JustStarted");
+		expect(html).not.toContain("ag-what");
+		expect(html).not.toContain("ag-task");
+	});
+
 	it("drops the generic worker name but keeps a specific agent type", () => {
 		const ui = loadPortalUi();
 		// `AgentRef.displayName` for the default worker is literally `task`, which names
@@ -200,18 +246,42 @@ describe("portal UI subagents panel", () => {
 		expect(ui.renderSubagents({ running: 1, total: 1, rows: [row({ agent: "reviewer" })] })).toContain("reviewer");
 	});
 
-	it("states both counts in the header, and never calls a failure done", () => {
+	it("keeps the header honest about failures, parked agents and spend", () => {
 		const ui = loadPortalUi();
-		expect(ui.renderSubagents({ running: 2, total: 5, rows: [row()] })).toContain("2/5 running");
+		expect(ui.renderSubagents({ running: 2, failed: 0, total: 5, rows: [row()] })).toContain("2/5 running");
 		// "3 done" over three red marks contradicts its own rows.
 		const failed = ui.renderSubagents({
 			running: 0,
+			failed: 2,
 			total: 3,
 			rows: [row({ status: "completed" }), row({ id: "B", status: "failed" }), row({ id: "C", status: "aborted" })],
 		});
-		expect(failed).toContain("1 done · 2 failed");
-		// And a payload missing `total` must not print `undefined`.
-		const partial = ui.renderSubagents({ rows: [row()] } as unknown as Parameters<PortalUi["renderSubagents"]>[0]);
+		expect(failed).toContain('1 done · <span class="bad">2 failed</span>');
+		// A failure has to show WHILE the fan-out runs, because that is when it is
+		// actionable and the panel's default state past four rows is collapsed — the
+		// header is then the whole panel.
+		const live = ui.renderSubagents({ running: 2, failed: 1, total: 4, rows: [row()] });
+		expect(live).toContain('2/4 running · <span class="bad">1 failed</span>');
+		// Parked is neither done nor failed: it is a disposed but revivable session, and
+		// counting it as done claimed work had completed that had not.
+		const parked = ui.renderSubagents({ running: 0, failed: 0, parked: 2, total: 3, rows: [row()] });
+		expect(parked).toContain("1 done · 2 parked");
+		// Counts come from the projection, not the capped rows: deriving them here
+		// reported "11 done · 1 failed" for twelve agents whose other four outcomes the
+		// phone never received.
+		const capped = ui.renderSubagents({
+			running: 0,
+			failed: 5,
+			total: 12,
+			rows: [row({ status: "completed" }), row({ id: "B", status: "failed" })],
+		});
+		expect(capped).toContain("7 done");
+		expect(capped).toContain("5 failed");
+		expect(capped).toContain("10 more");
+		// Spend is aggregated host-side so it survives the collapse.
+		expect(ui.renderSubagents({ running: 2, total: 2, cost: 10.66, rows: [row()] })).toContain("$10.66");
+		// And a payload missing the counts must not print `undefined`.
+		const partial = ui.renderSubagents({ rows: [row()] });
 		expect(partial).not.toContain("undefined");
 	});
 
@@ -222,11 +292,15 @@ describe("portal UI subagents panel", () => {
 		// panel — without spending ~470px directly above the composer.
 		const collapsed = ui.renderSubagents(wide);
 		expect(collapsed).toContain('aria-expanded="false"');
-		expect(collapsed).not.toContain("ag-row");
+		expect(collapsed).not.toContain("tree-row");
 		expect(collapsed).toContain("6/6 running");
+		// `aria-controls` must not point at a list that is not in the document.
+		expect(collapsed).not.toContain("aria-controls");
 
 		ui.setAgentsOpen(true);
-		expect(ui.renderSubagents(wide)).toContain("ag-row");
+		const expanded = ui.renderSubagents(wide);
+		expect(expanded).toContain("tree-row");
+		expect(expanded).toContain('aria-controls="aglist"');
 
 		// A narrow one is open without being asked.
 		ui.setAgentsOpen(null);
@@ -243,14 +317,30 @@ describe("portal UI subagents panel", () => {
 		expect(ui.renderSubagents({ running: 0, total: 1, rows: [row({ status: "constructor" })] })).toContain(">?<");
 	});
 
-	it("names the status for a screen reader, since the glyph is decorative", () => {
+	it("names the status for a screen reader and groups each agent as one list item", () => {
 		const ui = loadPortalUi();
-		const html = ui.renderSubagents({ running: 1, total: 1, rows: [row()] });
-		expect(html).toContain('aria-hidden="true"');
+		const html = ui.renderSubagents({ running: 1, total: 1, rows: [row({ task: "audit the presets" })] });
 		expect(html).toContain('<span class="sr">running </span>');
+		// The tree art is decoration; announcing `├ ` before every line was three
+		// announcements of noise per agent on the block that changes most often.
+		expect(html).toContain('<span class="guide" aria-hidden="true">');
+		expect(html).not.toMatch(/<span class="guide">/);
+		// One item per agent, not per line: its 1-3 rows belong together, and a flat run
+		// of divs gave assistive tech no count and no way to step agent by agent.
+		expect(html).toContain('role="list"');
+		expect(html.match(/role="listitem"/g)).toHaveLength(1);
 	});
 
-	it("keeps minutes past the hour so a stuck agent is visible", () => {
+	it("keeps a parked agent out of the finished treatment", () => {
+		const ui = loadPortalUi();
+		// Parked means the session was disposed but the ref is revivable — frequently an
+		// agent waiting on its parent. Dimming it like a completed one overstated it.
+		const parked = ui.renderSubagents({ running: 0, parked: 1, total: 1, rows: [row({ status: "parked" })] });
+		expect(parked).not.toContain("ag-done");
+		expect(ui.renderSubagents({ running: 0, total: 1, rows: [row({ status: "completed" })] })).toContain("ag-done");
+	});
+
+	it("keeps minutes past the hour, and prints nothing rather than NaN", () => {
 		const ui = loadPortalUi();
 		expect(ui.elapsedOf({ durationMs: 42_000, startedAt: 0 })).toBe("42s");
 		expect(ui.elapsedOf({ durationMs: 8 * 60_000, startedAt: 0 })).toBe("8m");
@@ -258,5 +348,8 @@ describe("portal UI subagents panel", () => {
 		// number is the reason to go look at the agent.
 		expect(ui.elapsedOf({ durationMs: 119 * 60_000, startedAt: 0 })).toBe("1h59m");
 		expect(ui.elapsedOf({ durationMs: 120 * 60_000, startedAt: 0 })).toBe("2h");
+		// With neither field, `Date.now() - undefined` is NaN and every comparison below
+		// it is false, so the row printed `NaNh`. An empty string drops out of the join.
+		expect(ui.elapsedOf({})).toBe("");
 	});
 });
