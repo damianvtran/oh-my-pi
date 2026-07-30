@@ -140,6 +140,12 @@ main { overflow-y: auto; overscroll-behavior: contain; }
 .card-cwd { color: var(--fg-faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta { display: flex; flex-wrap: wrap; gap: 3px 14px; margin-top: 4px; font-size: 11px; color: var(--fg-muted); }
 .meta .k { color: var(--fg-faint); }
+/* The subagent chip, emphasised against its neighbours because on a session that is
+   `idle` with agents still running it is the only thing on the card explaining why.
+   `.meta .k.ag-run` rather than `.ag-run` alone: `.meta .k` is two selectors and
+   would win on specificity, which silently rendered the chip the same faint grey as
+   `pid`. */
+.meta .k.ag-run { color: var(--accent-text); }
 .empty { padding: 24px 12px; color: var(--fg-faint); text-align: center; }
 
 /* status dot — mirrors the TUI's ● run-state marker */
@@ -266,7 +272,12 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 .todos-h .count { color: var(--fg-faint); font-weight: 400; }
 .phase { color: var(--fg); font-weight: 650; }
 .phase .count { color: var(--fg-faint); font-weight: 400; }
-.guide { color: var(--fg-faint); }
+/* `pre` is load-bearing, not cosmetic: a guide is literal box-drawing characters
+   padded with spaces to a fixed column, and HTML collapses runs of whitespace and
+   strips it at line ends. Without this the indent silently loses columns — the
+   todos tree renders 4 where 5 were written, and a continuation line under a
+   subagent row collapsed to 2 columns, or to none at all on the last row. */
+.guide { color: var(--fg-faint); white-space: pre; }
 .task { color: var(--fg-faint); }
 .task.now { color: var(--fg); }
 .task.done { color: var(--ok); text-decoration: line-through; }
@@ -276,26 +287,68 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
    panel directly above it (accent header with a dim count, ├/└ guides), because
    in the terminal these two blocks are deliberately the same shape and a phone
    that drew them differently would imply a difference that is not there.
-   Two lines per agent: identity + meta, then the live tool underneath. */
+
+   Every line is a flex pair: a fixed guide gutter, then a content column that owns
+   its own wrapping. This is the whole reason the panel survives a 414px phone. A
+   subagent line is ~55 characters against ~52 available, so it wraps in the common
+   case — and an inline layout returns the wrapped remainder to column 0, which
+   reads as a new tree item rather than a continuation (an orphaned `$21.50` under
+   a row is not a wrapped sentence). It is also what makes the ellipsis and the
+   two-line clamp below work at all: `overflow` does not apply to a non-replaced
+   inline element, and `-webkit-box` is block-level and would push its own guide
+   onto a separate line. `.card-act` gets away with the same declarations only
+   because it is already a flex container. */
 .agents { margin: 10px 0; }
-.agents-h { font-weight: 650; color: var(--accent-text); }
+/* A control, not a heading: the panel is up to ~470px tall at the row cap, sitting
+   directly above the composer for as long as a fan-out runs. 32px rather than the
+   44px floor `.btn` and the approval options use — a mis-tapped collapse costs one
+   tap to undo, and 44px would spend the vertical budget the collapse exists to
+   reclaim. */
+.agents-h {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 32px;
+  text-align: left; font-weight: 650; color: var(--accent-text);
+}
 .agents-h .count { color: var(--fg-faint); font-weight: 400; }
-.ag-id { color: var(--accent-text); font-weight: 650; }
-/* Status glyph inherits the row colour so a failed agent reads as failed from the
-   glyph alone — the id stays accent-coloured to keep the list scannable. */
-.ag-run { color: var(--accent); }
+.agents-h .caret { color: var(--fg-faint); font-weight: 400; margin-left: auto; }
+.ag-row { display: flex; }
+.ag-row > .guide { flex: none; }
+.ag-body { min-width: 0; flex: 1; }
+/* One cell, centred: the status glyphs do not share an advance width (⟳ is 1.10ch,
+   ✔ is 0.97ch), so an unpinned glyph left the id column ragged and shifted every
+   continuation indent by a fraction. Pinning it also survives a user theme that
+   overrides the symbol preset. */
+.ag-st { flex: none; display: inline-block; width: 1ch; text-align: center; }
+/* `--accent-text`, not `--accent`: this is a 12px glyph on the page background, and
+   `--accent` measures 3.94:1 there in the light palette — under the 4.5:1 floor,
+   the exact trap the `--warn`/`--warn-text` split above exists to prevent. */
+.ag-run { color: var(--accent-text); }
 .ag-ok { color: var(--ok); }
 .ag-err { color: var(--err); }
+/* Aborted is an interruption, not a failure, and sharing red with `failed` left
+   that pair distinguished by a 12px glyph alone. */
+.ag-stop { color: var(--warn-text); }
 .ag-off { color: var(--fg-faint); }
-.ag-meta { color: var(--fg-faint); font-weight: 400; }
-/* The assignment: clamped to two lines. A task prompt can be a paragraph, and an
+/* Live work carries the emphasis; a finished row recedes. The inverse — every id
+   bold accent regardless of state — let five completed rows dominate the two that
+   were actually running. */
+.ag-id { color: var(--accent-text); font-weight: 650; overflow-wrap: anywhere; }
+.ag-done .ag-id { color: var(--fg-muted); font-weight: 400; }
+.ag-meta { color: var(--fg-faint); font-weight: 400; overflow-wrap: anywhere; }
+/* The assignment: clamped to two lines. A task label can be a paragraph, and an
    eight-row panel that lets one row grow unbounded stops being glanceable. */
 .ag-task {
   color: var(--fg-muted); overflow-wrap: anywhere;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.ag-what { color: var(--fg-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-what { display: block; color: var(--fg-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ag-more { color: var(--fg-faint); }
+/* Screen-reader-only text. The status is otherwise a glyph plus a colour, which
+   announces as an unlabeled symbol or not at all — and this is the block that
+   changes most often. */
+.sr {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
 
 /* ── ask / approval prompt ───────────────────────────────────────────── */
 #ask {
@@ -632,31 +685,45 @@ function renderTodos(phases) {
   return `<div class="todos"><div class="todos-h">Todos<span class="count"> · ${done}/${all.length}</span></div>${rows}</div>`;
 }
 
-/* Status glyph and colour per subagent. Glyphs are omp's own unicode preset
-   (theme.ts → UNICODE_SYMBOLS: status.running, status.success, status.error,
-   status.aborted, status.shadowed, status.done), so a row reads the same as the
-   Agent Hub row for the same agent. `idle` means the registry released it without
-   a lifecycle verdict ever arriving — done, but not known to have succeeded. */
+/* Status glyph and colour per subagent. Glyphs come from omp's own unicode preset
+   (theme.ts → UNICODE_SYMBOLS) so a row reads the same as the Agent Hub row for the
+   same agent, with two deliberate substitutions: `parked` uses `status.disabled`
+   rather than `status.shadowed`, because `⟳` and `○` are the same ring one hue apart
+   and running/parked are opposite meanings; and `aborted` uses the `⨯` this app
+   already marks a stopped turn with, rather than `status.aborted`'s `⏹`, which
+   renders from a fallback face as a solid block foreign to the surrounding line art.
+   `idle` means the registry released the agent without a lifecycle verdict ever
+   arriving — done, but not known to have succeeded. */
 const AGENT_STATE = {
   running:   { glyph: "⟳", cls: "ag-run" },
   completed: { glyph: "✔", cls: "ag-ok" },
   failed:    { glyph: "✘", cls: "ag-err" },
-  aborted:   { glyph: "⏹", cls: "ag-err" },
-  parked:    { glyph: "○", cls: "ag-off" },
+  aborted:   { glyph: "⨯", cls: "ag-stop" },
+  parked:    { glyph: "⦸", cls: "ag-off" },
   idle:      { glyph: "•", cls: "ag-off" },
 };
+/* An unrecognised status from a newer host must not masquerade as a state we know:
+   falling back to the `idle` bullet made "we have no idea" indistinguishable from
+   "finished, verdict unknown". `hasOwn` because a status of `constructor` would
+   otherwise resolve through Object.prototype and skip the fallback entirely. */
+const agentStateOf = status =>
+  Object.hasOwn(AGENT_STATE, status) ? AGENT_STATE[status] : { glyph: "?", cls: "ag-off" };
 
 /* Elapsed time for a subagent. Separate from `ageOf`: subagents live for seconds
    to minutes, and "just now" — the right answer for a session card — flattens the
    whole range that matters here. `durationMs` is preferred when the host sent it
    because it is computed host-side, so it carries no clock skew and freezes at the
-   right value when the agent stops. */
+   right value when the agent stops. Minutes are kept past the hour: a bare `1h`
+   covered everything from 60 to 119 minutes, which is exactly the range where the
+   number is the reason you would go look at a possibly-stuck agent. */
 function elapsedOf(a) {
   const ms = Number.isFinite(a.durationMs) ? a.durationMs : Date.now() - a.startedAt;
   const secs = Math.max(0, Math.round(ms / 1000));
   if (secs < 60) return `${secs}s`;
   const mins = Math.floor(secs / 60);
-  return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h`;
+  if (mins < 60) return `${mins}m`;
+  const rem = mins % 60;
+  return `${Math.floor(mins / 60)}h${rem ? `${rem}m` : ""}`;
 }
 
 /* `12.3k` / `1.2M`, the TUI's token shorthand. A phone row cannot spend 7 columns
@@ -674,35 +741,73 @@ function costOf(n) {
   return Number.isFinite(n) && n >= 0.01 ? `$${n.toFixed(2)}` : "";
 }
 
-/* The Subagents panel: the TUI HUD's `Id: description` rows, plus the live tool
-   call underneath because the phone has no Agent Hub to open for it. Returns ""
-   when the session has spawned nothing, so the panel is absent rather than an
-   empty header — the same contract `renderTodos` has. */
+/* Whether the panel is expanded. `null` follows the size-based default below; a tap
+   pins it either way for as long as the session stays open, the same lifetime
+   `expandedTools` has. */
+let agentsOpen = null;
+/* Above this many rows the panel is collapsed until asked for. At the row cap with
+   continuation lines it is ~470px tall directly above the composer, and it stays
+   that way for as long as the fan-out runs — which is exactly when the transcript
+   underneath it is worth reading. The header carries the counts, so a collapsed
+   panel still answers "how many". */
+const AGENTS_AUTO_COLLAPSE_OVER = 4;
+
+/* The Subagents panel: the TUI HUD's `Id: description` rows, plus the live tool call
+   underneath because the phone has no Agent Hub to open for it. Returns "" when the
+   session has spawned nothing, so the panel is absent rather than an empty header —
+   the same contract `renderTodos` has. */
 function renderSubagents(s) {
   const rows = s?.rows ?? [];
   if (!rows.length) return "";
-  // `total` counts every agent the projection kept, `rows` is capped, so the header
-  // can say how many the cap is hiding rather than truncating silently.
-  const hidden = Math.max(0, (s.total ?? rows.length) - rows.length);
-  const head = s.running
-    ? `${s.running} running${s.total > s.running ? ` · ${s.total} total` : ""}`
-    : `${s.total} done`;
+  // `total` counts every agent the projection kept and `rows` is capped, so the
+  // header can say how many the cap is hiding rather than truncating silently.
+  const total = s.total ?? rows.length;
+  const hidden = Math.max(0, total - rows.length);
+  // `N/M running`, the ratio grammar the todos header already uses, rather than
+  // prose — it is shorter and always states both numbers. When nothing runs, count
+  // the real outcome: "3 done" over three red ✘ marks contradicts its own rows.
+  const bad = rows.filter(a => a.status === "failed" || a.status === "aborted").length;
+  const head = s.running ? `${s.running}/${total} running` : bad ? `${total - bad} done · ${bad} failed` : `${total} done`;
+  const open = agentsOpen ?? rows.length <= AGENTS_AUTO_COLLAPSE_OVER;
+  const header =
+    `<button class="agents-h" id="agtoggle" aria-expanded="${open}" aria-controls="aglist">` +
+    `Subagents<span class="count"> · ${esc(head)}</span><span class="caret">${open ? "▾" : "▸"}</span></button>`;
+  if (!open) return `<div class="agents">${header}</div>`;
   const body = rows.map((a, i) => {
     const last = i === rows.length - 1 && !hidden;
-    const state = AGENT_STATE[a.status] ?? AGENT_STATE.idle;
-    const meta = [a.agent, elapsedOf(a), tokensOf(a.tokens), a.tools ? `${a.tools} tools` : "", costOf(a.cost)].filter(Boolean).join(" · ");
-    // Indent continuation lines under the row they belong to, with the trunk drawn
-    // only while more rows follow — the same guide arithmetic renderTodos uses.
-    const cont = `<span class="guide">${last ? "  " : "│ "}  </span>`;
-    const id = `<div><span class="guide">${last ? "└" : "├"} </span><span class="${state.cls}">${state.glyph}</span> <span class="ag-id">${esc(a.id)}</span> <span class="ag-meta">${esc(meta)}</span></div>`;
-    const task = a.task ? `<div>${cont}<span class="ag-task">${esc(a.task)}</span></div>` : "";
-    // Only a running agent has a "right now"; a finished one's last tool is history
-    // and would read as though it were still working.
-    const what = a.intent && a.status === "running" ? `<div>${cont}<span class="ag-what">• ${esc(a.intent)}</span></div>` : "";
+    const state = agentStateOf(a.status);
+    // Continuation lines are indented under the id, with the trunk drawn only while
+    // more rows follow. Four columns because that is where the id starts: two for the
+    // branch and its space, two for the pinned glyph cell and its space.
+    const cont = `<span class="guide">${last ? "    " : "│   "}</span>`;
+    // `task` is the generic worker's display name, so it names nothing here and
+    // collides with the assignment label below; the specific types (`scout`,
+    // `reviewer`) are worth the slot. Cost sits second because it is the field most
+    // worth reading and the last one an overflow would drop.
+    const kind = a.agent && a.agent !== "task" ? a.agent : "";
+    const meta = [kind, costOf(a.cost), elapsedOf(a)].filter(Boolean).join(" · ");
+    const volume = [tokensOf(a.tokens) ? `${tokensOf(a.tokens)} tok` : "", a.tools ? `${a.tools} tool${a.tools === 1 ? "" : "s"}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+    const id =
+      `<div class="ag-row ${a.status === "running" ? "" : "ag-done"}"><span class="guide">${last ? "└ " : "├ "}</span>` +
+      `<span class="ag-st ${state.cls}" aria-hidden="true">${state.glyph}</span>` +
+      `<span class="sr">${esc(a.status)} </span>` +
+      `<span class="ag-body"><span class="ag-id">${esc(a.id)}</span>` +
+      (meta ? ` <span class="ag-meta">${esc(meta)}</span>` : "") +
+      `</span></div>`;
+    const task = a.task ? `<div class="ag-row">${cont}<span class="ag-body ag-task">${esc(a.task)}</span></div>` : "";
+    // A running agent has a "right now"; a finished one's last tool is history and
+    // would read as though it were still working, so its row shows what the run cost
+    // instead. Both are the same slot, so the row height does not depend on state.
+    const tail = a.status === "running" ? (a.intent ? `• ${a.intent}` : "") : volume;
+    const what = tail ? `<div class="ag-row">${cont}<span class="ag-body ag-what">${esc(tail)}</span></div>` : "";
     return id + task + what;
   }).join("");
-  const more = hidden ? `<div><span class="guide">└ </span><span class="ag-more">… ${hidden} more</span></div>` : "";
-  return `<div class="agents"><div class="agents-h">Subagents<span class="count"> · ${esc(head)}</span></div>${body}${more}</div>`;
+  const more = hidden
+    ? `<div class="ag-row"><span class="guide">└ </span><span class="ag-body ag-more">… ${hidden} more</span></div>`
+    : "";
+  return `<div class="agents">${header}<div id="aglist">${body}${more}</div></div>`;
 }
 
 /* Tool outputs the user expanded. The transcript is re-rendered wholesale on every
@@ -800,6 +905,19 @@ async function refresh() {
     ? sessions.map(s => {
         const pct = s.context ? s.context.percent : 0;
         const state = s.needsAttention ? "ask" : s.streaming ? "run" : "";
+        /* "waiting", not "idle", when the turn ended but a detached fan-out is still
+           going: `idle` beside `⟳ 5 agents` on one row reads as a contradiction, and the
+           session really is neither working nor finished.
+
+           The chip's glyph is `status.running`, NOT the terminal badge's `icon.agents`
+           (`👥`) — an emoji breaks the monospace grid every other glyph in this app
+           keeps. Do not "restore fidelity" by pasting the emoji in.
+
+           Both notes live here rather than beside the markup below because that is one
+           template literal, and a backtick inside an HTML comment in it terminates the
+           string. `bun run check` does not parse this file's inline script, so the only
+           thing that catches it is loading the page. */
+        const work = s.needsAttention ? "needs answer" : s.streaming ? "working" : s.subagents ? "waiting" : "idle";
         return `<button class="card" data-pid="${s.pid}">
           <div class="card-top">
             <span class="dot ${state}"></span>
@@ -808,7 +926,7 @@ async function refresh() {
           </div>
           <div class="meta">
             <span>${esc(s.model ?? "?")}</span>
-            <span class="k">${s.needsAttention ? "needs answer" : s.streaming ? "working" : "idle"}</span>
+            <span class="k">${work}</span>
             ${s.queued ? `<span class="k">${s.queued} queued</span>` : ""}
             ${s.subagents ? `<span class="k ag-run">⟳ ${s.subagents} agent${s.subagents === 1 ? "" : "s"}</span>` : ""}
             <span class="k" style="display:flex;align-items:center;gap:5px">
@@ -924,6 +1042,9 @@ function open(pid) {
   // old session's frames kept overwriting the view the URL and header claimed.
   es?.close(); es = null;
   expandedTools = new Set();
+  // A collapse choice belongs to the session it was made in; another session's
+  // fan-out is a different size and deserves the size-based default again.
+  agentsOpen = null;
   current = pid;
   if (location.hash !== `#${pid}`) location.hash = `#${pid}`;
   $("list").hidden = true; $("detail").hidden = false;
@@ -987,12 +1108,27 @@ function open(pid) {
     $("todos").innerHTML = renderTodos(JSON.parse(e.data));
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
+  /* The panel is re-rendered wholesale on every push, so the toggle is re-bound each
+     time and the expanded state has to live outside the DOM (`agentsOpen`) — the same
+     reason `expandedTools` exists for tool cards. */
+  let lastSubagents = null;
+  const paintSubagents = () => {
+    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
+    $("subagents").innerHTML = renderSubagents(lastSubagents);
+    const toggle = $("agtoggle");
+    if (toggle) {
+      toggle.onclick = () => {
+        agentsOpen = toggle.getAttribute("aria-expanded") !== "true";
+        paintSubagents();
+      };
+    }
+    if (atBottom) main.scrollTop = main.scrollHeight;
+  };
   es.addEventListener("subagents", e => {
     // Same at-bottom guard as the todos panel: this block grows and shrinks under
     // the transcript, and a phone parked at the bottom must stay there.
-    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
-    $("subagents").innerHTML = renderSubagents(JSON.parse(e.data));
-    if (atBottom) main.scrollTop = main.scrollHeight;
+    lastSubagents = JSON.parse(e.data);
+    paintSubagents();
   });
   es.addEventListener("activity", e => {
     const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;

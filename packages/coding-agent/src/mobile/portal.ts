@@ -278,7 +278,10 @@ class Portal implements PortalHandle {
 						// an aborted session would otherwise have no resume button until
 						// something unrelated changed.
 						this.#push(record.pid, "activity", guest.activity);
-						this.#push(record.pid, "subagents", guest.subagents);
+						// Subagents are deliberately absent here: unlike the projections above,
+						// the guest schedules its own push when the welcome's roster lands, so
+						// pushing again would deliver the identical payload twice ~250ms apart
+						// and run the phone's scroll-anchoring logic twice for one event.
 					},
 					onEvent: event => this.#push(record.pid, "agent", { type: event.type }),
 					onActivity: activity => this.#push(record.pid, "activity", activity),

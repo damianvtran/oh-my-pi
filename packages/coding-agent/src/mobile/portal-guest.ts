@@ -61,6 +61,22 @@ const SUBAGENT_PUSH_THROTTLE_MS = 250;
 /** Characters of a live tool's argument summary kept on a subagent row. */
 const SUBAGENT_ARG_CHARS = 60;
 
+/**
+ * Characters of a description or intent kept on a subagent row. The UI clamps
+ * these to two lines anyway; this bounds the SSE payload, which carries up to
+ * {@link SUBAGENT_ROW_CAP} rows several times a second.
+ */
+const SUBAGENT_TEXT_CHARS = 160;
+
+/**
+ * Round a host-reported run duration down to whole seconds — the resolution the
+ * phone renders. Declared here rather than inlined because it is load-bearing for
+ * the push throttle, not cosmetic: see the note at its call site.
+ */
+function durationSeconds(ms: number | undefined): number | undefined {
+	return ms === undefined ? undefined : Math.floor(ms / 1000) * 1000;
+}
+
 const DEFAULT_DISPLAY_NAME = "omp-mobile";
 
 /** Last `max` characters, cut on a word boundary so the status line reads cleanly. */
@@ -102,7 +118,6 @@ function todoPhasesFrom(details: unknown): TodoPhase[] | null {
  * lifecycle, progress), which no single payload can answer.
  */
 interface SubagentProgressView {
-	task?: string;
 	description?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
@@ -120,24 +135,40 @@ interface SubagentLifecycleView {
 }
 
 /**
- * The two wire-boundary normalizers below exist because eleven fields across two
- * payloads need identical treatment, and because the failure mode has to be
- * per-field: a host on a different build that renamed or retyped `currentTool`
- * must cost that one line of the row, not the whole row. A schema parse of the
- * payload would drop everything on one bad field, which is the wrong trade for a
- * display-only projection.
+ * The wire-boundary normalizers below exist because ten fields across two payloads
+ * need identical treatment, and because the failure mode has to be per-field: a
+ * host on a different build that renamed or retyped `currentTool` must cost that
+ * one line of the row, not the whole row. A schema parse of the payload would drop
+ * everything on one bad field, which is the wrong trade for a display-only
+ * projection.
  */
 
-/** Non-blank string, trimmed; anything else reads as absent. */
-function wireText(value: unknown): string | undefined {
+/**
+ * Non-blank string, trimmed and length-capped; anything else reads as absent.
+ *
+ * Every string here is model-produced or file-derived and rides an SSE frame
+ * pushed several times a second, eight rows at a time, so the cap is a payload
+ * bound rather than a display concern (the UI clamps separately, and the TUI caps
+ * the same values too — `task/render.ts` clips an intent to 40 columns).
+ */
+function wireText(value: unknown, max = SUBAGENT_TEXT_CHARS): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.trim();
-	return trimmed ? trimmed : undefined;
+	return trimmed ? trimmed.slice(0, max) : undefined;
 }
 
 /** Finite number; `NaN`, `Infinity` and non-numbers read as absent. */
 function wireNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * A counter. Stricter than {@link wireNumber} because this one is rendered raw
+ * next to a noun (`4 tools`), where a negative or fractional value from a
+ * mismatched host would print verbatim.
+ */
+function wireCount(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 /**
@@ -159,15 +190,18 @@ function subagentProgressFrom(data: unknown): { id: string; view: SubagentProgre
 	return {
 		id,
 		view: {
-			task: wireText(progress.task),
 			description: wireText(progress.description),
-			currentTool: wireText(progress.currentTool),
-			currentToolArgs: wireText(progress.currentToolArgs)?.slice(0, SUBAGENT_ARG_CHARS),
+			currentTool: wireText(progress.currentTool, SUBAGENT_ARG_CHARS),
+			currentToolArgs: wireText(progress.currentToolArgs, SUBAGENT_ARG_CHARS),
 			lastIntent: wireText(progress.lastIntent),
-			tools: wireNumber(progress.toolCount),
+			tools: wireCount(progress.toolCount),
 			tokens: wireNumber(progress.tokens),
 			cost: wireNumber(progress.cost),
-			durationMs: wireNumber(progress.durationMs),
+			// Quantized to the second, which is all `elapsedOf` renders. The raw value is
+			// `Date.now() - startTime` recomputed on every emit, so carrying its
+			// milliseconds would make consecutive projections differ forever and defeat
+			// the unchanged-projection test that keeps a fan-out off the phone's radio.
+			durationMs: durationSeconds(wireNumber(progress.durationMs)),
 		},
 	};
 }
@@ -196,14 +230,6 @@ export class PortalGuest {
 	 * a guest already receives.
 	 */
 	activity: PortalActivity = { working: false };
-	/**
-	 * Live subagents, mirroring the TUI's Subagents HUD and status-line badge.
-	 * Recomputed on every roster or progress frame (the projection is bounded and
-	 * cheap) so a `/api/sessions` card and a cold SSE open both read current truth;
-	 * the PUSH to the phone is throttled separately, see
-	 * {@link SUBAGENT_PUSH_THROTTLE_MS}.
-	 */
-	subagents: PortalSubagents = { running: 0, total: 0, rows: [] };
 
 	readonly #events: PortalGuestEvents;
 	readonly #displayName: string;
@@ -238,8 +264,28 @@ export class PortalGuest {
 	#progress = new Map<string, SubagentProgressView>();
 	#lifecycle = new Map<string, SubagentLifecycleView>();
 	#subagentThrottle: Timer | undefined;
-	/** Last projection actually pushed, for the change test in {@link #flushSubagents}. */
+	/** Last projection actually pushed, for the change test in {@link #scheduleSubagents}. */
 	#lastSubagentsJson = "";
+	/**
+	 * Memoized projection, invalidated rather than rebuilt on each frame.
+	 *
+	 * A subagent emits progress roughly every 150ms, so a 32-wide fan-out lands
+	 * hundreds of frames a second, while every reader of {@link subagents} samples
+	 * far slower: a 2s session-list poll, a cold SSE open, and the throttled push
+	 * itself. Rebuilding eagerly threw away all but a few percent of the work; a
+	 * dirty flag keeps the getter's answer exactly as current with none of it.
+	 */
+	#subagentsCache: PortalSubagents = { running: 0, total: 0, rows: [] };
+	#subagentsDirty = false;
+
+	/** Live subagents, mirroring the TUI's Subagents HUD and status-line badge. */
+	get subagents(): PortalSubagents {
+		if (this.#subagentsDirty) {
+			this.#subagentsCache = this.#projectSubagents();
+			this.#subagentsDirty = false;
+		}
+		return this.#subagentsCache;
+	}
 
 	constructor(events: PortalGuestEvents, displayName = DEFAULT_DISPLAY_NAME) {
 		this.#events = events;
@@ -406,8 +452,7 @@ export class PortalGuest {
 				this.#events.onClose?.(frame.reason);
 				break;
 			case "agents":
-				this.#roster = frame.agents;
-				this.#refreshSubagents();
+				this.#adoptRoster(frame.agents);
 				break;
 			case "bus":
 				// Mirrored host EventBus traffic: the per-subagent detail the roster
@@ -418,13 +463,13 @@ export class PortalGuest {
 					const parsed = subagentProgressFrom(frame.data);
 					if (parsed) {
 						this.#progress.set(parsed.id, parsed.view);
-						this.#refreshSubagents();
+						this.#scheduleSubagents();
 					}
 				} else if (frame.channel === TASK_SUBAGENT_LIFECYCLE_CHANNEL) {
 					const parsed = subagentLifecycleFrom(frame.data);
 					if (parsed) {
 						this.#lifecycle.set(parsed.id, parsed.view);
-						this.#refreshSubagents();
+						this.#scheduleSubagents();
 					}
 				}
 				break;
@@ -453,14 +498,12 @@ export class PortalGuest {
 		const staleUi = this.pendingUi;
 		this.transcript = [];
 		this.todos = [];
-		// The roster and the bus detail describe the session being replaced, and
-		// only the roster is re-sent. Clearing both is what stops a resumed session
-		// from inheriting the previous one's subagent rows; the welcome's own roster
-		// then seeds the panel before the snapshot train finishes.
-		this.#progress.clear();
-		this.#lifecycle.clear();
-		this.#roster = agents;
-		this.#refreshSubagents();
+		// A resumed session does NOT get a clean subagent slate, because the host's
+		// agent registry is process-global and survives the switch: a detached
+		// fan-out still running belongs to the roster the new welcome carries. So the
+		// roster is adopted rather than reset, which also drops detail for anything it
+		// no longer lists — see {@link #adoptRoster}.
+		this.#adoptRoster(agents);
 		this.activity = { working: false };
 		this.pendingUi = undefined;
 		this.state = state;
@@ -643,15 +686,29 @@ export class PortalGuest {
 	}
 
 	/**
-	 * Rebuild {@link subagents} and schedule a push.
+	 * Take a fresh host roster as the whole truth, and forget bus detail for anything
+	 * it no longer lists.
 	 *
-	 * The field is rebuilt eagerly — every roster and progress frame — because it is
-	 * read synchronously by the session-list card and the cold SSE open, and a lag
-	 * there would show a stale count on the surface the count exists for. Only the
-	 * push is rate-limited.
+	 * The prune is what bounds the two detail maps: they are keyed by registry id and
+	 * a guest can live for days, so without it they would accumulate an entry per
+	 * subagent the session ever spawned — plus ids that can never produce a row at
+	 * all, since the host filters advisors out of the roster it sends. It also
+	 * replaces what used to be a wholesale clear on every welcome, which threw away
+	 * the label and live tool of agents that were still running across a `/resume`.
 	 */
-	#refreshSubagents(): void {
-		this.subagents = this.#projectSubagents();
+	#adoptRoster(agents: AgentSnapshot[]): void {
+		this.#roster = agents;
+		const live = new Set(agents.map(agent => agent.id));
+		for (const id of this.#progress.keys()) if (!live.has(id)) this.#progress.delete(id);
+		for (const id of this.#lifecycle.keys()) if (!live.has(id)) this.#lifecycle.delete(id);
+		this.#scheduleSubagents();
+	}
+
+	/**
+	 * Invalidate the projection and open a push window if one is not already open.
+	 */
+	#scheduleSubagents(): void {
+		this.#subagentsDirty = true;
 		if (this.#closed || this.#subagentThrottle) return;
 		// Same shape as the host's own broadcast throttles (`#scheduleAgentsBroadcast`):
 		// the first change opens a window, the timer emits whatever the projection
@@ -703,8 +760,15 @@ export class PortalGuest {
 			const progress = this.#progress.get(snapshot.id);
 			const lifecycle = this.#lifecycle.get(snapshot.id);
 			if (!isRunning && !progress && !lifecycle) continue;
+			// The terminal verdict, but only once the roster agrees the agent stopped.
+			// The executor emits `completed` synchronously at finalize while the roster's
+			// flip to `idle` rides a 100ms-debounced broadcast, so preferring the word
+			// unconditionally put a green tick and a vanished intent line on a row the
+			// header was still counting as running. Lagging the glyph by one frame is a
+			// far better failure than contradicting the count.
 			const ended =
-				lifecycle?.status === "completed" || lifecycle?.status === "failed" || lifecycle?.status === "aborted"
+				!isRunning &&
+				(lifecycle?.status === "completed" || lifecycle?.status === "failed" || lifecycle?.status === "aborted")
 					? lifecycle.status
 					: undefined;
 			// The row's label, and the two candidates it is NOT.

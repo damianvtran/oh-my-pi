@@ -108,13 +108,21 @@ A session that fans work out to `task` subagents shows them on the phone: a
 todos in the detail view, one row per agent:
 
 ```text
-Subagents · 4 running · 5 total
-├ ⟳ InstallPlanAudit  scout · 3m · 91.5k · 18 tools · $1.57
-│ • Reading health.ts
-├ ⟳ CollabHostAudit   scout · 3m · 84.9k · 22 tools · $1.59
-│ • Numbering state trigger events
-└ ✔ PortalRouteAudit  scout · 3m · 96.7k · 15 tools · $1.26
+Subagents · 2/3 running                                  ▾
+├ ⟳ InstallPlanAudit  scout · $1.57 · 3m
+│   • Reading health.ts
+├ ⟳ CollabHostAudit   scout · $1.59 · 3m
+│   • Numbering state trigger events
+└ ✔ PortalRouteAudit  scout · $1.26 · 3m
+    96.7k tok · 15 tools
 ```
+
+Two lines per agent, and the second one changes with the state: a running agent
+shows the tool it is in, a finished one shows what the run cost in tokens and tool
+calls. Cost is on the identity line because it is the field most worth reading, and
+the header collapses the panel — at the row cap it is ~470px tall directly above the
+composer, which is exactly when the transcript under it matters, so above four rows
+it starts collapsed and the header's counts carry the answer on their own.
 
 **Nothing new crosses the wire for it.** The host already broadcasts its
 agent-registry roster (a `agents` frame, 100ms-debounced on registry change, plus
@@ -144,7 +152,10 @@ Decisions worth knowing, because each one is a departure from something:
   names from fan-outs that ended hours ago. With no bus traffic for them such a row
   is a name and a dim glyph, pushing live work off a phone screen. One that
   finished while the portal was watching keeps its row, with the lifecycle's
-  verdict (`✔` / `✘` / `⏹`) rather than the registry's `idle`.
+  verdict (`✔` / `✘` / `⨯`) rather than the registry's `idle` — though only once the
+  roster agrees the agent stopped, since the executor's `completed` beats the
+  debounced roster flip and a green tick beside a header still counting the agent as
+  running is worse than a glyph one frame late.
 - **A row is labelled only with a real description.** A `task` batch names each
   spawn, and that name is the registry id *and* the description until the
   tiny-model label lands, so the obvious precedence printed the id twice; and the
@@ -154,9 +165,17 @@ Decisions worth knowing, because each one is a departure from something:
 - **Pushes are throttled, not debounced.** The executor coalesces progress at 150ms
   *per agent*, so a wide fan-out streams continuously and a reset-on-change
   debounce would never fire until the last agent finished. The guest emits at most
-  one `subagents` frame per 250ms and skips it entirely when the projection is
-  unchanged — most progress churn is `recentTools`/`recentOutput`, which the phone
-  does not render.
+  one `subagents` frame per 250ms, and skips it entirely when the projection is
+  unchanged — which is most of them, because the churn is in fields the phone does
+  not render (`recentTools`, `recentOutput`). That test only works because the
+  projection quantizes the host's run duration to whole seconds: it is
+  `Date.now() - startTime` recomputed on every emit, so carrying its milliseconds
+  made every projection differ and the comparison a no-op.
+- **Bus detail is pruned against the roster, not cleared on a rebind.** The host's
+  agent registry is process-global and survives a `/resume`, so a detached fan-out
+  still running belongs to the roster the new welcome carries; wiping the maps cost
+  those agents their label and live tool. Pruning to the roster's ids also bounds the
+  maps for a guest that stays attached for days.
 - **Rows are capped at 8**, matching the HUD's own limit, with a `… N more` row.
   The counts are uncapped so the panel can say what it hid.
 
