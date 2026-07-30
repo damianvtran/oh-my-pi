@@ -278,9 +278,11 @@ class Portal implements PortalHandle {
 						// an aborted session would otherwise have no resume button until
 						// something unrelated changed.
 						this.#push(record.pid, "activity", guest.activity);
+						this.#push(record.pid, "subagents", guest.subagents);
 					},
 					onEvent: event => this.#push(record.pid, "agent", { type: event.type }),
 					onActivity: activity => this.#push(record.pid, "activity", activity),
+					onSubagents: subagents => this.#push(record.pid, "subagents", subagents),
 					onUiRequest: request => this.#push(record.pid, "ui-request", request),
 					onUiRequestEnd: reqId => this.#push(record.pid, "ui-request-end", { reqId }),
 					onClose: reason => {
@@ -331,6 +333,10 @@ class Portal implements PortalHandle {
 			context: s?.contextUsage,
 			participants: s?.participants ?? [],
 			activity: entry.guest.activity,
+			// Just the count for the card. The roster itself rides the session's SSE
+			// stream, which only the open session has: a list of ten sessions must not
+			// carry ten rosters on a two-second poll.
+			subagents: entry.guest.subagents.running,
 			needsAttention: Boolean(entry.guest.pendingUi),
 			pendingUi: entry.guest.pendingUi,
 		};
@@ -516,6 +522,7 @@ class Portal implements PortalHandle {
 			}
 			if (action === "transcript") return Response.json(entry.guest.transcript.slice(-TRANSCRIPT_FETCH_LIMIT));
 			if (action === "todos") return Response.json(entry.guest.todos);
+			if (action === "subagents") return Response.json(entry.guest.subagents);
 		}
 		return new Response("not found", { status: 404 });
 	}
@@ -546,6 +553,7 @@ class Portal implements PortalHandle {
 				);
 				sendFn(`event: todos\ndata: ${JSON.stringify(entry.guest.todos)}\n\n`);
 				sendFn(`event: activity\ndata: ${JSON.stringify(entry.guest.activity)}\n\n`);
+				sendFn(`event: subagents\ndata: ${JSON.stringify(entry.guest.subagents)}\n\n`);
 				if (entry.guest.pendingUi) {
 					sendFn(`event: ui-request\ndata: ${JSON.stringify(entry.guest.pendingUi)}\n\n`);
 				}

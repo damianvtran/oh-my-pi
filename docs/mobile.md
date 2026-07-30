@@ -92,14 +92,78 @@ room as a guest, and serves:
 | `GET /healthz` | Unauthenticated liveness — health checks need it and it reveals nothing |
 | `GET`/`POST /login`, `GET /logout` | Form login, signed-cookie session |
 | `GET /api/sessions` | One summary per attached session |
-| `GET /api/sessions/:pid/events` | SSE: `state`, `transcript`, `todos`, `activity`, `ui-request`, `ui-request-end`, `closed` |
+| `GET /api/sessions/:pid/events` | SSE: `state`, `transcript`, `todos`, `subagents`, `activity`, `ui-request`, `ui-request-end`, `closed` |
 | `POST /api/sessions/:pid/prompt` | Steer the agent (`{text}`) |
 | `POST /api/sessions/:pid/interrupt` | Abort the current turn — the phone's stop button, the Escape key |
 | `POST /api/sessions/:pid/resume` | The resume button: send the hidden internal continue prompt |
 | `POST /api/sessions/:pid/ui/:reqId` | Answer an `ask` dialog (`{value}`) |
-| `GET /api/sessions/:pid/{transcript,todos}` | Snapshot fetches for a cold page load |
+| `GET /api/sessions/:pid/{transcript,todos,subagents}` | Snapshot fetches for a cold page load |
 | `GET /api/directories` | Picker choices for the new-session form: `{home, recent[]}` |
 | `POST /api/sessions/start` | Start a session in a directory (`{cwd}`), answering `{ok, cwd}` with the resolved path — see below |
+
+### Subagents
+
+A session that fans work out to `task` subagents shows them on the phone: a
+`⟳ N agents` chip on its card in the list, and a `Subagents` panel under the
+todos in the detail view, one row per agent:
+
+```text
+Subagents · 4 running · 5 total
+├ ⟳ InstallPlanAudit  scout · 3m · 91.5k · 18 tools · $1.57
+│ • Reading health.ts
+├ ⟳ CollabHostAudit   scout · 3m · 84.9k · 22 tools · $1.59
+│ • Numbering state trigger events
+└ ✔ PortalRouteAudit  scout · 3m · 96.7k · 15 tools · $1.26
+```
+
+**Nothing new crosses the wire for it.** The host already broadcasts its
+agent-registry roster (a `agents` frame, 100ms-debounced on registry change, plus
+one inside every `welcome`) and mirrors the `task:subagent:lifecycle` and
+`task:subagent:progress` EventBus channels as `bus` frames — that is what feeds
+the TUI's own Subagents HUD and Agent Hub for a terminal guest. The portal used to
+drop both frames on the floor; it now joins them on the registry id they share.
+
+Both halves are needed. The roster is the authoritative "which subagents exist and
+are they running" but carries no work description; the bus traffic carries the
+label, the live tool, tokens and cost but only flows while an agent is reporting.
+So a portal that attaches mid-run knows an agent exists before it knows what the
+agent is doing.
+
+Decisions worth knowing, because each one is a departure from something:
+
+- **The count is the TUI's count.** `running` uses exactly the status-line badge's
+  predicate (`kind === "sub" && status === "running"`), so the number on the phone
+  and the number in the terminal cannot disagree.
+- **Sync spawns are listed too**, unlike the TUI HUD. The HUD skips a blocking
+  `task` call because the parent's inline tool block already draws its progress
+  live; the phone's transcript renders a tool card with no progress at all, so
+  filtering here would hide running work with nothing else showing it.
+- **A finished agent nothing was heard from is dropped.** The registry keeps
+  finished subagents as `idle` and then `parked` until release and rehydrates
+  on-disk ones when the Agent Hub opens, so a long session's roster accumulates
+  names from fan-outs that ended hours ago. With no bus traffic for them such a row
+  is a name and a dim glyph, pushing live work off a phone screen. One that
+  finished while the portal was watching keeps its row, with the lifecycle's
+  verdict (`✔` / `✘` / `⏹`) rather than the registry's `idle`.
+- **A row is labelled only with a real description.** A `task` batch names each
+  spawn, and that name is the registry id *and* the description until the
+  tiny-model label lands, so the obvious precedence printed the id twice; and the
+  raw `progress.task` is the prompt with omp's wrapper preamble, identical across
+  every agent. An unlabelled row is honest — the live intent line under it already
+  says what the agent is doing.
+- **Pushes are throttled, not debounced.** The executor coalesces progress at 150ms
+  *per agent*, so a wide fan-out streams continuously and a reset-on-change
+  debounce would never fire until the last agent finished. The guest emits at most
+  one `subagents` frame per 250ms and skips it entirely when the projection is
+  unchanged — most progress churn is `recentTools`/`recentOutput`, which the phone
+  does not render.
+- **Rows are capped at 8**, matching the HUD's own limit, with a `… N more` row.
+  The counts are uncapped so the panel can say what it hid.
+
+There is deliberately no per-agent transcript view. The host exposes one
+(`fetch-transcript`, which the Agent Hub uses) but it needs the incremental
+byte-offset protocol and a reader worth the screen; the phone answers "how many,
+and what is each doing", not "what did that one say".
 
 ### Stop and resume
 

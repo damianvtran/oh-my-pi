@@ -30,13 +30,17 @@ import { PortalGuest } from "@oh-my-pi/pi-coding-agent/mobile/portal-guest";
 import type {
 	PortalActivity,
 	PortalGuestEvents,
+	PortalSubagents,
 	TodoPhase,
 	TranscriptItem,
 } from "@oh-my-pi/pi-coding-agent/mobile/types";
 import { INTERNAL_RESUME_MARKER, INTERNAL_RESUME_PROMPT } from "@oh-my-pi/pi-coding-agent/mobile/types";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "../collab/helpers/in-memory-relay";
 
 const RELAY_URL = "ws://localhost:7779";
@@ -152,6 +156,12 @@ interface HostHarness {
 	ctx: InteractiveModeContext;
 	/** Feed an agent event into the host's subscribe tap, as AgentSession does. */
 	emit(event: AgentSessionEvent): void;
+	/**
+	 * The real EventBus the host mirrors `task:subagent:*` traffic from. A real one
+	 * rather than a double: the mirroring path under test is `bus.on(channel)` in
+	 * the host, and a stub would let a channel-name typo pass.
+	 */
+	bus: EventBus;
 }
 
 /**
@@ -162,6 +172,7 @@ interface HostHarness {
  * tap every id write funnels through.
  */
 function makeHostHarness(loaded: LoadedSession): HostHarness {
+	const bus = new EventBus();
 	let listener: ((event: AgentSessionEvent) => void) | undefined;
 	const ctx = {
 		settings: { get: () => "" },
@@ -189,7 +200,7 @@ function makeHostHarness(loaded: LoadedSession): HostHarness {
 			},
 			emitNotice: () => {},
 		},
-		eventBus: undefined,
+		eventBus: bus,
 		statusLine: {
 			setCollabStatus: () => {},
 			invalidate: () => {},
@@ -199,7 +210,7 @@ function makeHostHarness(loaded: LoadedSession): HostHarness {
 		showStatus: () => {},
 		collabHost: undefined,
 	};
-	return { ctx: ctx as unknown as InteractiveModeContext, emit: event => listener?.(event) };
+	return { ctx: ctx as unknown as InteractiveModeContext, emit: event => listener?.(event), bus };
 }
 
 function switchSession(ctx: InteractiveModeContext, loaded: LoadedSession, next: Partial<LoadedSession>): void {
@@ -223,6 +234,7 @@ class GuestWatch {
 	asks: CollabUiRequest[] = [];
 	askEnds: number[] = [];
 	closes: string[] = [];
+	subagents: PortalSubagents[] = [];
 	readonly handlers: PortalGuestEvents;
 	#pending: { satisfied: () => boolean; resolve: () => void }[] = [];
 
@@ -254,6 +266,10 @@ class GuestWatch {
 			},
 			onUiRequestEnd: reqId => {
 				this.askEnds.push(reqId);
+				this.#settle();
+			},
+			onSubagents: subagents => {
+				this.subagents.push(subagents);
 				this.#settle();
 			},
 			onClose: reason => {
@@ -676,6 +692,260 @@ describe("mobile portal guest — stop and resume", () => {
 			ctx.sessionManager.onEntryAppended?.(messageEntry("a4", { ...assistantMessage([]), stopReason: "aborted" }));
 			await watch.until(() => watch.entries >= 3);
 			expect(guest.transcript.filter(i => i.kind === "stopped")).toHaveLength(2);
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+});
+
+/**
+ * The phone's subagent panel. Nothing new crosses the wire for it: the host
+ * already broadcasts the agent-registry roster (`agents`, and inside `welcome`)
+ * and mirrors the `task:subagent:*` EventBus channels (`bus`), and the portal
+ * guest used to drop both on the floor. So these drive the REAL sources — the
+ * process-global `AgentRegistry` and a real `EventBus` on the host context —
+ * rather than hand-rolled frames, which is what makes the join key (a registry
+ * id shared by `AgentSnapshot.id` and `AgentProgress.id`) part of the contract
+ * under test instead of an assumption.
+ */
+describe("mobile portal guest — subagents", () => {
+	/** The registry is process-global; a leaked ref would show up as another test's roster. */
+	beforeEach(() => AgentRegistry.resetGlobalForTests());
+	afterEach(() => AgentRegistry.resetGlobalForTests());
+
+	/** A progress payload shaped exactly as `task/executor.ts` emits it. */
+	function progressPayload(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+		return {
+			index: 0,
+			agent: "scout",
+			task: "map the collab wire",
+			progress: {
+				index: 0,
+				id,
+				agent: "scout",
+				status: "running",
+				task: "map the collab wire",
+				description: "map the collab wire",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 4,
+				requests: 2,
+				tokens: 12_300,
+				cost: 0.04,
+				durationMs: 8_000,
+				...over,
+			},
+		};
+	}
+
+	it("projects the host roster into rows and counts only running subagents", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "Main", displayName: "main", kind: "main", session: null });
+		registry.register({ id: "WireScout", displayName: "scout", kind: "sub", parentId: "Main", session: null });
+		// A fan-out that ended before this portal attached. The registry keeps it until
+		// release, so on a long session the roster accumulates these; with no bus
+		// traffic for it there is nothing to show but a name, and a phone screen holds
+		// eight rows.
+		registry.register({
+			id: "OldScout",
+			displayName: "scout",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			status: "parked",
+		});
+		// Advisors never reach a guest (the host filters them), so a row for one here
+		// would mean the portal invented it.
+		registry.register({ id: "Critic", displayName: "reviewer", kind: "advisor", session: null });
+
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
+		const { ctx } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			// The welcome carries the roster, so the projection is current before any
+			// `agents` frame — that is what lets a card show a count on a cold open.
+			expect(guest.subagents.total).toBe(1);
+			expect(guest.subagents.running).toBe(1);
+			expect(guest.subagents.rows.map(row => row.id)).toEqual(["WireScout"]);
+			expect(guest.subagents.rows[0]?.agent).toBe("scout");
+			expect(guest.subagents.rows[0]?.parentId).toBe("Main");
+			// No bus traffic yet: the roster alone cannot say what the agent is doing.
+			expect(guest.subagents.rows[0]?.task).toBeUndefined();
+
+			// A spawn finishing is a registry status change, which the host broadcasts as
+			// its own `agents` frame. Having never reported anything, this one leaves
+			// nothing behind worth a row — a name and a dim glyph is exactly what the
+			// `OldScout` filter above exists to suppress, and the rule cannot depend on
+			// when the agent happened to be registered. A real session always reports:
+			// its host owns an EventBus, so the next test covers the row that stays.
+			registry.setStatus("WireScout", "idle");
+			await watch.until(() => guest.subagents.running === 0);
+			expect(guest.subagents.rows).toEqual([]);
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("joins mirrored bus progress onto the matching roster row", async () => {
+		AgentRegistry.global().register({ id: "WireScout", displayName: "scout", kind: "sub", session: null });
+
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
+		const { ctx, bus } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			bus.emit(
+				TASK_SUBAGENT_PROGRESS_CHANNEL,
+				progressPayload("WireScout", { currentTool: "grep", currentToolArgs: "pattern=AgentSnapshot" }),
+			);
+			await watch.until(() => Boolean(guest.subagents.rows[0]?.task));
+			const row = guest.subagents.rows[0];
+			expect(row?.task).toBe("map the collab wire");
+			// The live tool is the working line for the row; args ride along because on a
+			// phone "grep" alone does not distinguish eight concurrent scouts.
+			expect(row?.intent).toBe("grep pattern=AgentSnapshot");
+			expect(row?.tools).toBe(4);
+			expect(row?.tokens).toBe(12_300);
+			expect(row?.durationMs).toBe(8_000);
+			// Still running per the registry, so the count is unchanged by bus traffic.
+			expect(guest.subagents.running).toBe(1);
+
+			// A terminal lifecycle word outranks the registry's `idle`: the registry
+			// releases a finished subagent back to idle, which would read as "sitting
+			// there doing nothing" for a scout that actually completed.
+			AgentRegistry.global().setStatus("WireScout", "idle");
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: "WireScout",
+				agent: "scout",
+				description: "map the collab wire",
+				status: "completed",
+				index: 0,
+			});
+			await watch.until(() => guest.subagents.rows[0]?.status === "completed");
+			expect(guest.subagents.running).toBe(0);
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("labels a row only with a real description, never the id or the raw prompt", async () => {
+		AgentRegistry.global().register({ id: "ThemeAudit", displayName: "scout", kind: "sub", session: null });
+
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
+		const { ctx, bus } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			// Exactly what a real `task` batch emits before its tiny-model label lands:
+			// the spawn's name is the registry id AND both descriptions, and `task` is the
+			// prompt with omp's wrapper preamble on the front. Taking either would put
+			// `ThemeAudit` on the row twice, or the same paragraph of boilerplate on every
+			// row in the panel.
+			bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: "ThemeAudit",
+				agent: "scout",
+				description: "ThemeAudit",
+				status: "started",
+				index: 0,
+			});
+			bus.emit(
+				TASK_SUBAGENT_PROGRESS_CHANNEL,
+				progressPayload("ThemeAudit", {
+					description: "ThemeAudit",
+					task: "Complete the assignment below, thoroughly.\n\n# Target\nAudit the theme presets",
+					lastIntent: "Reading UNICODE_SYMBOLS",
+				}),
+			);
+			await watch.until(() => guest.subagents.rows[0]?.intent === "Reading UNICODE_SYMBOLS");
+			// No label, and that is the honest row: the live intent above already says
+			// what this agent is doing.
+			expect(guest.subagents.rows[0]?.task).toBeUndefined();
+
+			// The tiny-model label lands a moment later and the row picks it up.
+			bus.emit(
+				TASK_SUBAGENT_PROGRESS_CHANNEL,
+				progressPayload("ThemeAudit", { description: "auditing the theme presets" }),
+			);
+			await watch.until(() => Boolean(guest.subagents.rows[0]?.task));
+			expect(guest.subagents.rows[0]?.task).toBe("auditing the theme presets");
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("coalesces a burst of progress into one push carrying the latest state", async () => {
+		AgentRegistry.global().register({ id: "WireScout", displayName: "scout", kind: "sub", session: null });
+
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
+		const { ctx, bus } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			// The welcome's own roster push has to land first, or it would be
+			// indistinguishable from the burst's push below.
+			await watch.until(() => watch.subagents.length >= 1);
+			const before = watch.subagents.length;
+
+			// Three tool calls inside one throttle window. The executor coalesces
+			// progress at 150ms PER AGENT, so a 32-wide fan-out streams continuously
+			// while it runs; one SSE frame per payload would wake a phone radio several
+			// times a second per agent for a number read at a glance.
+			for (const tool of ["read", "grep", "edit"]) {
+				bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload("WireScout", { currentTool: tool }));
+			}
+			await watch.until(() => watch.subagents.length > before);
+			expect(watch.subagents.length).toBe(before + 1);
+			expect(watch.subagents.at(-1)?.rows[0]?.intent).toBe("edit");
+
+			// A payload that changes nothing the panel renders must not push at all:
+			// most progress churn is `recentTools`/`recentOutput`, which the projection
+			// drops, so comparing the projection is what keeps the stream quiet.
+			const settled = watch.subagents.length;
+			bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload("WireScout", { currentTool: "edit" }));
+			bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload("WireScout", { currentTool: "bash" }));
+			await watch.until(() => watch.subagents.at(-1)?.rows[0]?.intent === "bash");
+			expect(watch.subagents.length).toBe(settled + 1);
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	});
+
+	it("drops the previous session's subagents when the room rebinds", async () => {
+		AgentRegistry.global().register({ id: "WireScout", displayName: "scout", kind: "sub", session: null });
+
+		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
+		const { ctx, bus } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		// Only a session-following room rebinds; a hand-shared `/collab` room ends.
+		await host.start(RELAY_URL, "", { followSession: true });
+
+		const { guest, watch } = await joinGuest(host.link);
+		try {
+			bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload("WireScout"));
+			await watch.until(() => Boolean(guest.subagents.rows[0]?.task));
+
+			// `collab.autoStart` rooms follow an in-session `/resume`: the host rebinds
+			// and re-welcomes. The roster is re-sent, the bus detail is NOT, so without
+			// clearing it the resumed session would describe the previous session's
+			// subagent work under whatever ids happen to collide.
+			AgentRegistry.global().unregister("WireScout");
+			switchSession(ctx, loaded, { id: "sess-b", cwd: "/tmp/project-b", entries: [] });
+			await watch.until(() => watch.resyncs >= 2);
+			expect(guest.subagents).toEqual({ running: 0, total: 0, rows: [] });
 		} finally {
 			guest.close();
 			await host.stop("test over");

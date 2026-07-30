@@ -272,6 +272,31 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 .task.done { color: var(--ok); text-decoration: line-through; }
 .task.blocked { color: var(--warn-text); }
 
+/* subagents — the TUI's anchored "Subagents" HUD. Same tree idiom as the todos
+   panel directly above it (accent header with a dim count, ├/└ guides), because
+   in the terminal these two blocks are deliberately the same shape and a phone
+   that drew them differently would imply a difference that is not there.
+   Two lines per agent: identity + meta, then the live tool underneath. */
+.agents { margin: 10px 0; }
+.agents-h { font-weight: 650; color: var(--accent-text); }
+.agents-h .count { color: var(--fg-faint); font-weight: 400; }
+.ag-id { color: var(--accent-text); font-weight: 650; }
+/* Status glyph inherits the row colour so a failed agent reads as failed from the
+   glyph alone — the id stays accent-coloured to keep the list scannable. */
+.ag-run { color: var(--accent); }
+.ag-ok { color: var(--ok); }
+.ag-err { color: var(--err); }
+.ag-off { color: var(--fg-faint); }
+.ag-meta { color: var(--fg-faint); font-weight: 400; }
+/* The assignment: clamped to two lines. A task prompt can be a paragraph, and an
+   eight-row panel that lets one row grow unbounded stops being glanceable. */
+.ag-task {
+  color: var(--fg-muted); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.ag-what { color: var(--fg-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-more { color: var(--fg-faint); }
+
 /* ── ask / approval prompt ───────────────────────────────────────────── */
 #ask {
   margin: 0 0 10px; padding: 10px 12px;
@@ -388,7 +413,7 @@ footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
       <button class="btn" id="cancelnew">cancel</button>
     </div>
     <div class="nf-status" id="newstatus" role="status" aria-live="polite"></div>
-  </div><div id="list"></div><div id="detail" hidden><div id="ask" role="group" aria-live="assertive" hidden></div><div id="log"></div><div id="todos"></div><div id="working" class="working" hidden></div></div></div></main>
+  </div><div id="list"></div><div id="detail" hidden><div id="ask" role="group" aria-live="assertive" hidden></div><div id="log"></div><div id="todos"></div><div id="subagents"></div><div id="working" class="working" hidden></div></div></div></main>
   <footer id="composer" hidden>
     <div class="wrap">
       <span class="prompt">›</span>
@@ -607,6 +632,79 @@ function renderTodos(phases) {
   return `<div class="todos"><div class="todos-h">Todos<span class="count"> · ${done}/${all.length}</span></div>${rows}</div>`;
 }
 
+/* Status glyph and colour per subagent. Glyphs are omp's own unicode preset
+   (theme.ts → UNICODE_SYMBOLS: status.running, status.success, status.error,
+   status.aborted, status.shadowed, status.done), so a row reads the same as the
+   Agent Hub row for the same agent. `idle` means the registry released it without
+   a lifecycle verdict ever arriving — done, but not known to have succeeded. */
+const AGENT_STATE = {
+  running:   { glyph: "⟳", cls: "ag-run" },
+  completed: { glyph: "✔", cls: "ag-ok" },
+  failed:    { glyph: "✘", cls: "ag-err" },
+  aborted:   { glyph: "⏹", cls: "ag-err" },
+  parked:    { glyph: "○", cls: "ag-off" },
+  idle:      { glyph: "•", cls: "ag-off" },
+};
+
+/* Elapsed time for a subagent. Separate from `ageOf`: subagents live for seconds
+   to minutes, and "just now" — the right answer for a session card — flattens the
+   whole range that matters here. `durationMs` is preferred when the host sent it
+   because it is computed host-side, so it carries no clock skew and freezes at the
+   right value when the agent stops. */
+function elapsedOf(a) {
+  const ms = Number.isFinite(a.durationMs) ? a.durationMs : Date.now() - a.startedAt;
+  const secs = Math.max(0, Math.round(ms / 1000));
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h`;
+}
+
+/* `12.3k` / `1.2M`, the TUI's token shorthand. A phone row cannot spend 7 columns
+   on a raw integer. */
+function tokensOf(n) {
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n < 1000) return String(n);
+  return n < 1e6 ? `${(n / 1000).toFixed(1)}k` : `${(n / 1e6).toFixed(1)}M`;
+}
+
+/* Spend per agent. Rounded to the cent it is worth reading and no further: a
+   fan-out is the most expensive thing this app can show you, and the raw float
+   the host sends (`1.116988`) is nine characters of noise on a phone row. */
+function costOf(n) {
+  return Number.isFinite(n) && n >= 0.01 ? `$${n.toFixed(2)}` : "";
+}
+
+/* The Subagents panel: the TUI HUD's `Id: description` rows, plus the live tool
+   call underneath because the phone has no Agent Hub to open for it. Returns ""
+   when the session has spawned nothing, so the panel is absent rather than an
+   empty header — the same contract `renderTodos` has. */
+function renderSubagents(s) {
+  const rows = s?.rows ?? [];
+  if (!rows.length) return "";
+  // `total` counts every agent the projection kept, `rows` is capped, so the header
+  // can say how many the cap is hiding rather than truncating silently.
+  const hidden = Math.max(0, (s.total ?? rows.length) - rows.length);
+  const head = s.running
+    ? `${s.running} running${s.total > s.running ? ` · ${s.total} total` : ""}`
+    : `${s.total} done`;
+  const body = rows.map((a, i) => {
+    const last = i === rows.length - 1 && !hidden;
+    const state = AGENT_STATE[a.status] ?? AGENT_STATE.idle;
+    const meta = [a.agent, elapsedOf(a), tokensOf(a.tokens), a.tools ? `${a.tools} tools` : "", costOf(a.cost)].filter(Boolean).join(" · ");
+    // Indent continuation lines under the row they belong to, with the trunk drawn
+    // only while more rows follow — the same guide arithmetic renderTodos uses.
+    const cont = `<span class="guide">${last ? "  " : "│ "}  </span>`;
+    const id = `<div><span class="guide">${last ? "└" : "├"} </span><span class="${state.cls}">${state.glyph}</span> <span class="ag-id">${esc(a.id)}</span> <span class="ag-meta">${esc(meta)}</span></div>`;
+    const task = a.task ? `<div>${cont}<span class="ag-task">${esc(a.task)}</span></div>` : "";
+    // Only a running agent has a "right now"; a finished one's last tool is history
+    // and would read as though it were still working.
+    const what = a.intent && a.status === "running" ? `<div>${cont}<span class="ag-what">• ${esc(a.intent)}</span></div>` : "";
+    return id + task + what;
+  }).join("");
+  const more = hidden ? `<div><span class="guide">└ </span><span class="ag-more">… ${hidden} more</span></div>` : "";
+  return `<div class="agents"><div class="agents-h">Subagents<span class="count"> · ${esc(head)}</span></div>${body}${more}</div>`;
+}
+
 /* Tool outputs the user expanded. The transcript is re-rendered wholesale on every
    frame, so an expansion that lived only as a removed class disappeared on the
    next token — unusable exactly while a turn is running, which is when someone
@@ -712,6 +810,7 @@ async function refresh() {
             <span>${esc(s.model ?? "?")}</span>
             <span class="k">${s.needsAttention ? "needs answer" : s.streaming ? "working" : "idle"}</span>
             ${s.queued ? `<span class="k">${s.queued} queued</span>` : ""}
+            ${s.subagents ? `<span class="k ag-run">⟳ ${s.subagents} agent${s.subagents === 1 ? "" : "s"}</span>` : ""}
             <span class="k" style="display:flex;align-items:center;gap:5px">
               <span class="gauge"><i style="width:${Math.min(100, pct).toFixed(0)}%"></i></span>${pct.toFixed(1)}%
             </span>
@@ -834,7 +933,11 @@ function open(pid) {
   // connect and decides between stop, resume, and neither.
   renderTurnControl(false, false);
   $("new").hidden = true;
+  // Every panel is cleared here, not just the log: the SSE snapshot burst repaints
+  // them a moment later, and until it lands they would be showing the session that
+  // was open before — a subagent list belonging to another agent is worse than none.
   $("log").textContent = "";
+  $("todos").innerHTML = ""; $("subagents").innerHTML = "";
   $("msg").placeholder = "steer this session";
   streaming = false; interrupted = false; openCwd = "";
   syncSendState();
@@ -882,6 +985,13 @@ function open(pid) {
   es.addEventListener("todos", e => {
     const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
     $("todos").innerHTML = renderTodos(JSON.parse(e.data));
+    if (atBottom) main.scrollTop = main.scrollHeight;
+  });
+  es.addEventListener("subagents", e => {
+    // Same at-bottom guard as the todos panel: this block grows and shrinks under
+    // the transcript, and a phone parked at the bottom must stay there.
+    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
+    $("subagents").innerHTML = renderSubagents(JSON.parse(e.data));
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
   es.addEventListener("activity", e => {
@@ -962,7 +1072,7 @@ function closeSession() {
   $("back").hidden = true; $("composer").hidden = true;
   renderTurnControl(false, false);
   $("new").hidden = false;
-  $("ask").hidden = true; $("todos").innerHTML = ""; $("sub").textContent = "sessions";
+  $("ask").hidden = true; $("todos").innerHTML = ""; $("subagents").innerHTML = ""; $("sub").textContent = "sessions";
   streaming = false; interrupted = false; openCwd = "";
   renderWorking(null);
   refresh();
