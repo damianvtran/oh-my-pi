@@ -924,8 +924,10 @@ describe("mobile portal guest — subagents", () => {
 		}
 	});
 
-	it("drops the previous session's subagents when the room rebinds", async () => {
-		AgentRegistry.global().register({ id: "WireScout", displayName: "scout", kind: "sub", session: null });
+	it("forgets bus detail for agents the roster drops, and keeps it for those it does not", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: "WireScout", displayName: "scout", kind: "sub", session: null });
+		registry.register({ id: "HostScout", displayName: "scout", kind: "sub", session: null });
 
 		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };
 		const { ctx, bus } = makeHostHarness(loaded);
@@ -936,16 +938,29 @@ describe("mobile portal guest — subagents", () => {
 		const { guest, watch } = await joinGuest(host.link);
 		try {
 			bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload("WireScout"));
-			await watch.until(() => Boolean(guest.subagents.rows[0]?.task));
+			bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload("HostScout"));
+			await watch.until(() => guest.subagents.rows.every(row => Boolean(row.task)));
+			expect(guest.subagents.total).toBe(2);
 
-			// `collab.autoStart` rooms follow an in-session `/resume`: the host rebinds
-			// and re-welcomes. The roster is re-sent, the bus detail is NOT, so without
-			// clearing it the resumed session would describe the previous session's
-			// subagent work under whatever ids happen to collide.
-			AgentRegistry.global().unregister("WireScout");
+			// `collab.autoStart` rooms follow an in-session `/resume`: the host rebinds and
+			// re-welcomes. The registry is process-global and does NOT reset across that,
+			// so an agent still on the roster is still this session's business and must
+			// keep its label and live tool — the guest adopts the roster rather than
+			// wiping what it knows.
+			registry.unregister("WireScout");
 			switchSession(ctx, loaded, { id: "sess-b", cwd: "/tmp/project-b", entries: [] });
-			await watch.until(() => watch.resyncs >= 2);
-			expect(guest.subagents).toEqual({ running: 0, total: 0, rows: [] });
+			await watch.until(() => watch.resyncs >= 2 && guest.subagents.total === 1);
+			expect(guest.subagents.rows[0]?.id).toBe("HostScout");
+			expect(guest.subagents.rows[0]?.task).toBe("map the collab wire");
+
+			// And the detail for the dropped id is gone, not merely unrendered: a later
+			// spawn reusing the name must not inherit the previous agent's label. Nothing
+			// else observes the maps, so re-registering the id is how the prune is proven.
+			registry.register({ id: "WireScout", displayName: "scout", kind: "sub", session: null });
+			await watch.until(() => guest.subagents.total === 2);
+			const revived = guest.subagents.rows.find(row => row.id === "WireScout");
+			expect(revived).toBeDefined();
+			expect(revived?.task).toBeUndefined();
 		} finally {
 			guest.close();
 			await host.stop("test over");
