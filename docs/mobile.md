@@ -367,6 +367,14 @@ The portal requires a form login and issues an HMAC-signed session cookie
 - Browser navigations without a cookie get `303 → /login?next=…` (same-origin
   targets only); API and SSE calls get a bare `401` so the client can react
   without parsing HTML. `omp mobile status` asserts both.
+- Credential-form responses are `Cache-Control: no-store`, and a form restored
+  from the browser's back/forward cache replaces itself with a GET to the same
+  URL. A valid cookie therefore reaches the server-side redirect instead of
+  leaving a stale login form on screen or replaying a POST-produced 401.
+- Before submitting credentials, the form probes `/healthz` with a GET. If an
+  identity-proxy session expired while the form was open, the probe replaces
+  the page with a GET and starts reauthentication there. This avoids Cloudflare
+  Access's 400 return path when its login flow is initiated by the form's POST.
 - `Secure` is set on the cookie only when the request arrived over HTTPS
   (`x-forwarded-proto`) or through a non-loopback `Host`. An unconditional
   `Secure` cookie is silently dropped on the loopback path, which breaks local

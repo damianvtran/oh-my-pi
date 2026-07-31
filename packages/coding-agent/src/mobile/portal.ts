@@ -38,6 +38,15 @@ const COOKIE = "omp_session";
 const SESSION_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 
 const HTML = { "content-type": "text/html; charset=utf-8" } as const;
+/**
+ * Login pages are never cacheable. Without `no-store`, the phone's back/forward
+ * cache restores the *form* when the user navigates back from a page the login
+ * redirect dropped them on — a stale form demanding credentials for a session
+ * cookie that is still valid, which reads exactly like being logged out. With
+ * it, going back re-requests `/login`, and the authorized 303 sends the phone
+ * forward again instead.
+ */
+const LOGIN_HTML = { ...HTML, "cache-control": "no-store" } as const;
 
 /**
  * How much transcript a client is handed. The SSE pushes are incremental
@@ -422,7 +431,7 @@ class Portal implements PortalHandle {
 				if (!ok) {
 					return new Response(loginPage("Incorrect username or password.", nextOf(url)), {
 						status: 401,
-						headers: HTML,
+						headers: LOGIN_HTML,
 					});
 				}
 				return new Response(null, {
@@ -431,7 +440,7 @@ class Portal implements PortalHandle {
 				});
 			}
 			if (this.#authorized(req)) return Response.redirect(nextOf(url), 303);
-			return new Response(loginPage(undefined, nextOf(url)), { headers: HTML });
+			return new Response(loginPage(undefined, nextOf(url)), { headers: LOGIN_HTML });
 		}
 		if (url.pathname === "/logout") {
 			return new Response(null, {
@@ -660,6 +669,55 @@ button:active{filter:brightness(.94)}
 	</label>
 	<button type="submit">Sign in</button>
 </form>
+<script>
+/*
+ * Cloudflare Access fronts this page, and its login flow can only be initiated
+ * by a GET: if the Access session lapses while this form is open, submitting is
+ * what gets intercepted, and the return trip from the identity provider fails
+ * with a 400 — Access sets its state cookie on the 302 that answers the POST,
+ * which WebKit never stores. Probe a GET first: a failure means Access (or the
+ * network) is in the way, so replace this history entry with the same URL. That
+ * navigation is a GET, the Access flow runs cleanly on it, and the resubmitted
+ * form then passes straight through.
+ * pageshow covers the remaining WebKit behavior: even a no-store page may come
+ * back from the back/forward cache without touching the server. Use the same
+ * GET replacement there — location.reload could replay a POST-produced 401
+ * form and trigger Safari's form-resubmission prompt. If the portal cookie is
+ * valid, /login redirects; if it is not, the fresh form simply remains.
+ *
+ * reportValidity because form.submit() skips constraint validation, and a flag
+ * because the probe is async and a second tap must not start another.
+ */
+const refreshWithGet = () => location.replace(location.pathname + location.search);
+addEventListener("pageshow", event => {
+	if (event.persisted) refreshWithGet();
+});
+document.querySelector("form").addEventListener("submit", event => {
+	event.preventDefault();
+	const form = event.currentTarget;
+	if (form.dataset.probing) return;
+	if (!form.reportValidity()) return;
+	form.dataset.probing = "1";
+	fetch("/healthz", { credentials: "same-origin" })
+		.then(probe => {
+			const reachedPortal =
+				probe.ok && !probe.redirected && probe.url === location.origin + "/healthz";
+			if (!reachedPortal) {
+				refreshWithGet();
+				return;
+			}
+			// The probe is asynchronous and the inputs stay editable. Validate
+			// again immediately before form.submit(), which bypasses validation,
+			// so clearing a field during the probe cannot post empty credentials.
+			if (!form.reportValidity()) {
+				delete form.dataset.probing;
+				return;
+			}
+			form.submit();
+		})
+		.catch(() => refreshWithGet());
+});
+</script>
 </body>
 </html>`;
 }
