@@ -57,15 +57,7 @@ interface PortalUi {
 	setAgentsOpen(open: boolean | null): void;
 }
 
-/**
- * Evaluate the shipped script and hand back the pieces under test.
- *
- * Every unresolved global lands on one recursive no-op proxy, so the top level's
- * DOM work, event wiring and `setInterval` all succeed without a DOM. A fresh
- * environment per call keeps the module-level `agentsOpen` from leaking between
- * tests.
- */
-function loadPortalUi(): PortalUi {
+function portalScript(): string {
 	const source = String(portalHtml);
 	const open = source.indexOf("<script>");
 	// The FIRST close tag, matching the HTML parser: it terminates a `<script>` at
@@ -75,7 +67,19 @@ function loadPortalUi(): PortalUi {
 	const close = source.indexOf("</script>", open);
 	if (open < 0 || close < 0) throw new Error("portal-ui.html has no inline script");
 	if (source.split("</script>").length !== 2) throw new Error("portal-ui.html has more than one script block");
-	const script = source.slice(open + "<script>".length, close);
+	return source.slice(open + "<script>".length, close);
+}
+
+/**
+ * Evaluate the shipped script and hand back the pieces under test.
+ *
+ * Every unresolved global lands on one recursive no-op proxy, so the top level's
+ * DOM work, event wiring and `setInterval` all succeed without a DOM. A fresh
+ * environment per call keeps the module-level `agentsOpen` from leaking between
+ * tests.
+ */
+function loadPortalUi(): PortalUi {
+	const script = portalScript();
 
 	const sink: unknown = new Proxy(function noop() {} as unknown as Record<string, unknown>, {
 		get: (_target, key) => (key === Symbol.toPrimitive || key === "toString" ? () => "" : sink),
@@ -110,6 +114,158 @@ function loadPortalUi(): PortalUi {
 	return load(stubs);
 }
 
+interface PortalElementStub {
+	hidden: boolean;
+	value: string;
+	dataset: Record<string, string>;
+	style: Record<string, string>;
+	classList: { add(...names: string[]): void; remove(...names: string[]): void };
+	textContent: string;
+	innerHTML: string;
+	placeholder: string;
+	className: string;
+	title: string;
+	disabled: boolean;
+	scrollTop: number;
+	clientHeight: number;
+	scrollHeight: number;
+	onclick?: () => void;
+	setAttribute(name: string, value: string): void;
+	removeAttribute(name: string): void;
+	getAttribute(name: string): string | null;
+	querySelector(selector: string): PortalElementStub | null;
+	querySelectorAll(selector: string): PortalElementStub[];
+}
+
+interface PortalHistoryStub {
+	state: unknown;
+	backCalls: number;
+	pushCalls: number;
+	replaceCalls: number;
+	back(): void;
+	pushState(state: unknown, title: string, next: string): void;
+	replaceState(state: unknown, title: string, next: string): void;
+}
+
+interface PortalNavigationHarness {
+	open(pid: number): void;
+	pressBack(): void;
+	current(): number | null;
+	location: { origin: string; pathname: string; search: string; hash: string; href: string };
+	history: PortalHistoryStub;
+	list: PortalElementStub;
+}
+
+function loadPortalNavigation(options: { hash?: string; state?: unknown } = {}): PortalNavigationHarness {
+	const script = portalScript();
+	const makeElement = (): PortalElementStub => {
+		const attributes = new Map<string, string>();
+		const element: PortalElementStub = {
+			hidden: false,
+			value: "",
+			dataset: {},
+			style: {},
+			classList: { add: () => {}, remove: () => {} },
+			textContent: "",
+			innerHTML: "",
+			placeholder: "",
+			className: "",
+			title: "",
+			disabled: false,
+			scrollTop: 0,
+			clientHeight: 0,
+			scrollHeight: 0,
+			setAttribute: (name, value) => attributes.set(name, value),
+			removeAttribute: name => attributes.delete(name),
+			getAttribute: name => attributes.get(name) ?? null,
+			querySelector: () => null,
+			querySelectorAll: () => [],
+		};
+		return element;
+	};
+	const elements = new Map<string, PortalElementStub>();
+	const getElement = (id: string): PortalElementStub => {
+		let element = elements.get(id);
+		if (!element) {
+			element = makeElement();
+			elements.set(id, element);
+		}
+		return element;
+	};
+
+	const origin = "http://127.0.0.1:4098";
+	const location = {
+		origin,
+		pathname: "/",
+		search: "",
+		hash: options.hash ?? "",
+		href: `${origin}/${options.hash ?? ""}`,
+	};
+	const applyUrl = (next: string): void => {
+		const resolved = new URL(next, location.href);
+		location.pathname = resolved.pathname;
+		location.search = resolved.search;
+		location.hash = resolved.hash;
+		location.href = resolved.href;
+	};
+	const history: PortalHistoryStub = {
+		state: options.state ?? null,
+		backCalls: 0,
+		pushCalls: 0,
+		replaceCalls: 0,
+		back() {
+			this.backCalls++;
+		},
+		pushState(state, _title, next) {
+			this.state = state;
+			this.pushCalls++;
+			applyUrl(next);
+		},
+		replaceState(state, _title, next) {
+			this.state = state;
+			this.replaceCalls++;
+			applyUrl(next);
+		},
+	};
+	const sink: unknown = new Proxy(function noop() {} as unknown as Record<string, unknown>, {
+		get: (_target, key) => (key === Symbol.toPrimitive || key === "toString" ? () => "" : sink),
+		set: () => true,
+		apply: () => sink,
+		construct: () => sink as object,
+		has: () => true,
+	});
+	const document = {
+		documentElement: { dataset: {} },
+		getElementById: getElement,
+		querySelector: (selector: string) => (selector === "main" ? getElement("main") : null),
+		querySelectorAll: () => [] as PortalElementStub[],
+		createElement: () => makeElement(),
+	};
+	const stubs = {
+		document,
+		location,
+		history,
+		addEventListener: () => {},
+		setInterval: () => 0,
+		clearInterval: () => {},
+		setTimeout: () => 0,
+		localStorage: { getItem: () => null, setItem: () => {} },
+		EventSource: sink,
+		fetch: () => Promise.withResolvers<Response>().promise,
+		matchMedia: () => sink,
+	};
+	const load = new Function(
+		"stubs",
+		`with (stubs) { ${script}
+		return {
+			open,
+			pressBack: () => document.getElementById("back").onclick(),
+			current: () => current,
+		}; }`,
+	) as (env: typeof stubs) => Pick<PortalNavigationHarness, "open" | "pressBack" | "current">;
+	return { ...load(stubs), location, history, list: getElement("list") };
+}
+
 function row(over: Partial<PortalSubagentRow> = {}): PortalSubagentRow {
 	return {
 		id: "WireScout",
@@ -129,6 +285,45 @@ describe("portal UI script", () => {
 	it("parses and exposes its render functions", () => {
 		const ui = loadPortalUi();
 		expect(typeof ui.renderSubagents).toBe("function");
+	});
+});
+
+describe("portal UI session history", () => {
+	it("pushes a marked entry for a card-opened session and unwinds to the list", () => {
+		const harness = loadPortalNavigation();
+		harness.open(42);
+		expect(harness.location.hash).toBe("#42");
+		expect(harness.history.pushCalls).toBe(1);
+		expect(harness.history.state).toEqual({ __ompSessionFromList: true });
+
+		harness.pressBack();
+		expect(harness.history.backCalls).toBe(1);
+		expect(harness.history.replaceCalls).toBe(0);
+	});
+
+	it("keeps unwinding a marked detail entry restored by Forward or reload", () => {
+		const harness = loadPortalNavigation({
+			hash: "#42",
+			state: { __ompSessionFromList: true },
+		});
+		harness.open(42);
+		expect(harness.history.pushCalls).toBe(0);
+
+		harness.pressBack();
+		expect(harness.history.backCalls).toBe(1);
+		expect(harness.history.replaceCalls).toBe(0);
+	});
+
+	it("strips a cold-opened deep-link hash in place instead of returning to login", () => {
+		const harness = loadPortalNavigation({ hash: "#42" });
+		harness.open(42);
+		harness.pressBack();
+
+		expect(harness.history.backCalls).toBe(0);
+		expect(harness.history.replaceCalls).toBe(1);
+		expect(harness.location.hash).toBe("");
+		expect(harness.current()).toBeNull();
+		expect(harness.list.hidden).toBe(false);
 	});
 });
 

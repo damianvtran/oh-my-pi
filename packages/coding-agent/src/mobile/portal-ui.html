@@ -907,6 +907,12 @@ function renderTranscript(items) {
 }
 
 let current = null, es = null;
+/* The history entry created when a card opens carries its provenance with it.
+   Memory-only state is not enough: Forward and a reload restore the entry but
+   rebuild this script, and the back button still has to know the list is
+   directly underneath. A hash that arrived with the page load (login redirect
+   or bookmark) has no marker and must be stripped in place instead. */
+const SESSION_HISTORY_STATE = "__ompSessionFromList";
 /* Spinner frames from omp's unicode preset (SPINNER_FRAMES.status). A single
    shared timer drives every spinner on the page: one interval, no per-element
    state, and it stops dead when nothing is running so an idle phone does not
@@ -1114,7 +1120,13 @@ function open(pid) {
   // fan-out is a different size and deserves the size-based default again.
   agentsOpen = null;
   current = pid;
-  if (location.hash !== `#${pid}`) location.hash = `#${pid}`;
+  if (location.hash !== `#${pid}`) {
+    // `pushState` changes the hash without firing `hashchange`; `open()` is
+    // already mounting the detail view, and the marker survives Forward and a
+    // reload of this entry. A cold-opened hash skips this branch and therefore
+    // remains distinguishable from a card opened over the list.
+    history.pushState({ [SESSION_HISTORY_STATE]: true }, "", `#${pid}`);
+  }
   $("list").hidden = true; $("detail").hidden = false;
   $("back").hidden = false; $("composer").hidden = false;
   hideNewForm();
@@ -1310,10 +1322,15 @@ function closeSession() {
   refresh();
 }
 $("back").onclick = () => {
-  if (location.hash) {
+  // A marked entry was pushed by open() and has the list directly under it, so
+  // unwinding is safe even after Forward or reload. An unmarked hash arrived
+  // with the page load (the login redirect's `next`, or a bookmark): its prior
+  // entry may be the credential form, so strip the hash in place instead.
+  if (location.hash && history.state?.[SESSION_HISTORY_STATE] === true) {
     history.back();
     return;
   }
+  if (location.hash) history.replaceState(history.state, "", location.pathname + location.search);
   closeSession();
 };
 $("send").onclick = async () => {
