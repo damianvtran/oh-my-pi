@@ -22,6 +22,7 @@ import type {
 	NativeScrollbackLiveRegion,
 	OverlayHandle,
 	SlashCommand,
+	ViewportMode,
 } from "@oh-my-pi/pi-tui";
 import {
 	Container,
@@ -1345,12 +1346,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	/** Flip between append and fullscreen at runtime, persisting the choice. */
+	/**
+	 * Switch viewport mode at runtime and persist the choice, so the next launch
+	 * starts the way the user left it. Persisting also matters mid-session: the
+	 * collapsed-preview sizing and the click-vs-keybinding hint both read the
+	 * setting rather than the engine, so they follow the same source of truth.
+	 */
+	setViewportMode(mode: ViewportMode): void {
+		if (this.ui.viewportMode === mode) return;
+		this.ui.setViewportMode(mode);
+		this.settings.set("tui.viewport", mode);
+		this.showStatus(mode === "fullscreen" ? "Fullscreen viewport" : "Native scrollback");
+	}
+
+	/** Flip between append and fullscreen at runtime. */
 	toggleViewportMode(): void {
-		const next = this.ui.viewportMode === "fullscreen" ? "append" : "fullscreen";
-		this.ui.setViewportMode(next);
-		this.settings.set("tui.viewport", next);
-		this.showStatus(next === "fullscreen" ? "Fullscreen viewport" : "Native scrollback");
+		this.setViewportMode(this.ui.viewportMode === "fullscreen" ? "append" : "fullscreen");
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
