@@ -67,6 +67,19 @@
   --hover-wash: color-mix(in srgb, var(--fg) 5%, transparent);
   --radius-card: 8px; --radius-ctl: 6px;
   --line-height: 18px;
+  /* Text-entry controls are 16px while everything else stays 12px, and that is
+     not a taste call. WebKit zooms the page whenever a control with a computed
+     font-size under 16px takes focus, and on iOS it does not zoom back out on
+     blur: the layout viewport stays wider than the screen, so the app has to be
+     panned sideways for the rest of the visit. `user-scalable=no` and
+     `maximum-scale=1` cannot fix it — WebKit ignores both so that pinch-zoom
+     always works, which is the right call and the reason the *size* has to be
+     the fix. No pointer media query either: an iPad with a trackpad answers
+     `pointer: fine` and would zoom anyway, and this surface is phone-first. */
+  --input-size: 16px;
+  /* 18px is a 1.5 ratio on 12px text; on 16px it is 1.125, which puts the caret
+     into the descenders of the line above in a wrapped field. */
+  --input-line: 21px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -81,14 +94,30 @@ body {
   -webkit-font-smoothing: antialiased;
   overscroll-behavior-y: none;
 }
-button, input, select { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+button, input, select, textarea { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+/* Only the fields: a `button` cannot take a focus zoom, and growing the chrome
+   with them would cost the dense look for nothing. */
+input, select, textarea { font-size: var(--input-size); }
 button { cursor: pointer; background: none; border: 0; }
 :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-input { caret-color: var(--accent); }
+input, textarea { caret-color: var(--accent); }
 
 /* ── frame ───────────────────────────────────────────────────────────── */
-#app { display: grid; grid-template-rows: auto minmax(0,1fr) auto; height: 100dvh; }
+/* `--app-h` is set only while an on-screen keyboard is covering part of the
+   screen and the browser did not shrink the layout viewport itself — see
+   `applyViewport`. `100dvh` is the better answer the rest of the time.
+
+   `grid-template-columns: minmax(0,1fr)` is what fixes the screen width, and it is
+   not decoration. With no explicit column the implicit one is `auto`, which is
+   sized to its widest item's *max-content* and is free to exceed a definite
+   container: the new-session `<select>` reports the width of its longest option —
+   a directory path — so one deep recent path widened the entire shell to 411px on
+   a 390px screen. Nothing scrolled inside `main`; the document itself became
+   pannable, which on a phone is indistinguishable from a zoom that never came
+   back, and `send` ended up past the right edge. A definite column also gives the
+   `width: 100%` on that select something real to resolve against. */
+#app { display: grid; grid-template-rows: auto minmax(0,1fr) auto; grid-template-columns: minmax(0,1fr); height: var(--app-h, 100dvh); }
 
 header {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -439,11 +468,37 @@ footer {
   padding: 8px 12px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--hairline); background: var(--bg);
 }
-/* Same 880px column as `.wrap`, so the input lines up with the transcript. */
-footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
-.prompt { color: var(--accent-text); flex: none; }
+/* An open keyboard covers the home indicator, so reserving its inset as well
+   floats the composer a third of an inch above the keys for no reason. `.kb` is
+   set from the visual viewport, the only place that knows. */
+body.kb footer { padding-bottom: 8px; }
+/* Same 880px column as `.wrap`, so the input lines up with the transcript.
+   `flex-end` rather than `center`: the field grows with its content, and send
+   and stop belong beside its last line instead of floating at its middle. */
+footer .wrap { display: flex; gap: 8px; align-items: flex-end; padding: 0; }
+/* Pinned to the field's *first* line: the field's border plus its padding-top,
+   with the field's line box, so the glyph stays with the first row of text
+   however tall the field has grown. */
+.prompt { color: var(--accent-text); flex: none; align-self: flex-start; padding-top: 11px; line-height: var(--input-line); }
+/* A textarea, not a single-line input: a steer is regularly a paragraph or a
+   pasted stack trace, and a one-line field showed a ~30-character window onto it
+   with no way to see or fix what had already been typed. It grows from one row to
+   five and then scrolls, so the transcript keeps the screen in the common case.
+
+   The vertical metrics are picked so that one row is exactly the 44px the rest of
+   the row's controls use — 21px line + 20px padding + 2px border — and `max-height`
+   is the same sum over five rows. `overflow-wrap` because a pasted URL is one
+   unbreakable token and must not be allowed to widen the viewport.
+
+   `overflow-y: hidden` is the resting state and `syncComposer` turns it to `auto`
+   only once the content is genuinely past the cap. It cannot simply stay `auto`:
+   WebKit reports 52px of scroll height for an *empty* textarea (the placeholder's
+   box), so on iOS the field was draggable while empty and a stray swipe scrolled
+   the placeholder out of sight, leaving what looks like a broken blank control. */
 #msg {
-  flex: 1; min-width: 0; min-height: 44px; padding: 6px 8px;
+  flex: 1; min-width: 0; min-height: 44px; padding: 10px 8px;
+  line-height: var(--input-line); max-height: calc(var(--input-line) * 5 + 22px);
+  resize: none; overflow-y: hidden; overflow-wrap: anywhere;
   background: var(--bg-inset); border: 1px solid var(--hairline);
   border-radius: var(--radius-ctl); color: var(--fg);
 }
@@ -486,7 +541,9 @@ footer .wrap { display: flex; gap: 8px; align-items: center; padding: 0; }
   <footer id="composer" hidden>
     <div class="wrap">
       <span class="prompt">›</span>
-      <input id="msg" placeholder="steer this session" enterkeyhint="send" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <!-- `enterkeyhint` is corrected at runtime: Enter is a newline on a soft
+           keyboard and send on a hardware one. -->
+      <textarea id="msg" rows="1" placeholder="steer the agent" enterkeyhint="enter" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
       <!-- No `hidden` attribute: this slot is hidden with `visibility` so the row's
            geometry never depends on turn state, and `[hidden]`'s
            `display:none !important` would win over that and blank the control in
@@ -1096,6 +1153,17 @@ function renderTurnControl(isStreaming, isInterrupted) {
   turn.style.pointerEvents = "none";
 }
 
+/* Composer placeholders, as constants because three paths set them and because they
+   have a hard width budget. The field is the only flexible item in a row of fixed
+   controls, which leaves it 180px on a 375px iPhone — 17 monospace characters at
+   16px. Longer copy does not ellipsise: a textarea wraps it to a second line that
+   the one-row field then clips mid-word, which is exactly what the previous copy
+   ("steer this session", "what should it work on?") did once the fields went to
+   16px. Measured at 375px and 390px. A 320px screen wraps either way — the field is
+   125px there — and is left as it was. */
+const PLACEHOLDER_STEER = "steer the agent";
+const PLACEHOLDER_FIRST = "what to work on?";
+
 /* An empty transcript is the guaranteed first screen of a phone-started session,
    so it has to say something: which directory the session is in (the header
    truncates it to a basename on a narrow screen) and what to do next. The cwd
@@ -1106,7 +1174,7 @@ function renderEmptyLog() {
   $("log").innerHTML = `<div class="empty">no messages yet — send the first instruction below${
     openCwd ? `<div class="card-cwd" style="display:block;margin-top:6px">${esc(openCwd)}</div>` : ""
   }</div>`;
-  $("msg").placeholder = "what should it work on?";
+  $("msg").placeholder = PLACEHOLDER_FIRST;
 }
 
 function open(pid) {
@@ -1139,9 +1207,9 @@ function open(pid) {
   // was open before — a subagent list belonging to another agent is worse than none.
   $("log").textContent = "";
   $("todos").innerHTML = ""; $("subagents").innerHTML = "";
-  $("msg").placeholder = "steer this session";
+  $("msg").placeholder = PLACEHOLDER_STEER;
   streaming = false; interrupted = false; openCwd = "";
-  syncSendState();
+  syncComposer();
   renderWorking(null);
   es = new EventSource(`/api/sessions/${pid}/events`);
   es.addEventListener("state", e => {
@@ -1160,7 +1228,7 @@ function open(pid) {
     if (items.length === 0) renderEmptyLog();
     else {
       $("log").innerHTML = renderTranscript(items);
-      $("msg").placeholder = "steer this session";
+      $("msg").placeholder = PLACEHOLDER_STEER;
     }
     for (const b of $("log").querySelectorAll("[data-expand]")) {
       b.onclick = () => {
@@ -1294,6 +1362,12 @@ function showAsk(req) {
 }
 
 const main = document.querySelector("main");
+/* A phone reads this transcript from the bottom, and several things move under it
+   without being asked to: a keyboard opening, the composer growing a line, a
+   subagent panel appearing. Each one has to leave a reader who was at the latest
+   message still at the latest message. The slack absorbs sub-pixel scroll
+   positions and the couple of pixels a fractional device ratio leaves behind. */
+const isAtBottom = (slack = 40) => main.scrollTop + main.clientHeight >= main.scrollHeight - slack;
 /* Every request funnels through here so an expired cookie lands on the login
    page instead of failing silently — the SPA would otherwise just stop updating
    with no visible cause. */
@@ -1337,7 +1411,7 @@ $("send").onclick = async () => {
   const text = $("msg").value.trim();
   if (!text) return;
   $("msg").value = "";
-  syncSendState();
+  syncComposer();
   const res = await post(`/api/sessions/${current}/prompt`, { text }).catch(() => null);
   if (res?.ok) {
     $("msg").classList.remove("err");
@@ -1347,16 +1421,68 @@ $("send").onclick = async () => {
   // and the composer looked identical to a successful send while the text was gone.
   $("msg").value = text;
   $("msg").classList.add("err");
-  syncSendState();
+  syncComposer();
 };
-/* The accent fill is a promise that tapping does something. With an empty field it
+/* The five-row cap, read from the stylesheet rather than repeated here, and read
+   once because it is a constant. `Infinity` if it ever stops being a length, which
+   only turns the scroll toggle below into a no-op. */
+let composerCap = 0;
+function composerCapOf(msg) {
+  if (!composerCap) composerCap = Number.parseFloat(getComputedStyle(msg).maxHeight) || Infinity;
+  return composerCap;
+}
+/* Everything that follows the field's value: the send button's enabled state, the
+   field's height and whether it scrolls. All three have to move on every path that
+   writes `value`, not just on input — a draft restored after a failed send is as
+   much a change of content as a keystroke.
+   The accent fill is a promise that tapping does something. With an empty field it
    did nothing at all, which reads as an unresponsive app — and in the stopped
    state it advertised a dead primary next to the live `resume`. */
-function syncSendState() {
-  $("send").disabled = $("msg").value.trim().length === 0;
+function syncComposer() {
+  const msg = $("msg");
+  $("send").disabled = msg.value.trim().length === 0;
+  const pinned = isAtBottom();
+  if (msg.value === "") {
+    // An empty field is one row by definition, and WebKit will not say so: asked for
+    // the `scrollHeight` of an empty textarea it answers ~1.5 rows (measured 52px
+    // against 42px for a one-character value, on the same element) because the
+    // placeholder's box is in the measurement. Trusting it left the field 10px
+    // taller than the row of 44px controls beside it, on the iPhone specifically.
+    // Dropping the inline height hands the sizing back to `min-height`, which is
+    // that one row exactly.
+    msg.style.height = "";
+    msg.style.overflowY = "hidden";
+  } else {
+    // Otherwise height comes from content, because a textarea has no intrinsic one.
+    // `auto` first, or `scrollHeight` reports the height the field already has and it
+    // could only ever grow. `scrollHeight` covers content and padding but not the
+    // border, which `box-sizing: border-box` makes the height property's job — the
+    // difference of the two heights is that border, measured rather than hard-coded.
+    msg.style.height = "auto";
+    const wanted = msg.scrollHeight + msg.offsetHeight - msg.clientHeight;
+    // Past the cap the assignment is clamped by `max-height`, and that is the only
+    // state where the field itself scrolls. Below it the overflow stays off, because
+    // WebKit claims a scrollable empty textarea and would let a swipe drag the text
+    // out of a field that has room for all of it.
+    msg.style.height = `${wanted}px`;
+    msg.style.overflowY = wanted > composerCapOf(msg) ? "auto" : "hidden";
+  }
+  if (pinned) main.scrollTop = main.scrollHeight;
 }
-$("msg").oninput = syncSendState;
-$("msg").onkeydown = e => { if (e.key === "Enter") $("send").click(); };
+$("msg").oninput = syncComposer;
+/* Enter is a newline on a soft keyboard and send on a hardware one. A phone
+   keyboard's return key is the only way to type a newline at all, and every
+   messaging app on the platform spends it that way; `send` is a 44px accent
+   button one thumb-width to the right. A desktop guest keeps Enter-to-send with
+   Shift+Enter for a newline, which is the same split omp's own editor uses.
+   `isComposing` guards an IME candidate window, where Enter is a commit. */
+const softKeyboard = Boolean(matchMedia("(pointer: coarse)").matches);
+$("msg").enterKeyHint = softKeyboard ? "enter" : "send";
+$("msg").onkeydown = e => {
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing || softKeyboard) return;
+  e.preventDefault();
+  $("send").click();
+};
 
 /* The one turn control: stop while a turn runs, resume after one was stopped.
    Both give immediate feedback by disabling — over a phone tunnel the round trip
@@ -1649,6 +1775,68 @@ addEventListener("hashchange", applyHash);
 /* The header label switches between basename and full path on width, so a rotation
    has to re-render it: an idle session may never push another frame. */
 addEventListener("resize", renderHeader);
+
+/* ── keyboard-aware viewport ──────────────────────────────────────────────
+   `#app` is a `100dvh` grid with the composer in its last row, which is correct
+   on every platform whose on-screen keyboard resizes the *layout* viewport —
+   Chrome on Android does, via `interactive-widget=resizes-content` in the meta
+   tag at the top of this file.
+
+   iOS is not one of them. WebKit leaves the layout viewport at full height, so
+   `dvh` and `innerHeight` do not move, and shrinks only the visual viewport: the
+   composer ends up behind the keyboard, and WebKit compensates by scrolling the
+   whole document up to chase the caret. That scroll is the jank — the header
+   leaves the top of the screen, and nothing scrolls it back when the keyboard
+   goes away, so the app stays displaced until it is reloaded.
+
+   So while a keyboard is open the shell is sized from the visual viewport and the
+   document is pinned back to the top. Where the layout viewport already resized
+   the measured inset is ~0 and none of this runs, which is what lets one code
+   path be right on both platforms.
+
+   `--app-h` is *removed* rather than set to the full height when the keyboard
+   closes: `100dvh` is the better answer whenever it applies, because the browser
+   tracks its own toolbar transitions with it and we would be writing a style
+   property on every scroll frame to do the same job worse. */
+const KEYBOARD_MIN_PX = 80;
+/* How much of the screen an on-screen keyboard is covering, or 0 for none.
+
+   Two things must not be mistaken for a keyboard. A pinch-zoom shrinks the visual
+   viewport in exactly the same way, and binding the layout to it there would
+   fight the pan the user is performing — hence the scale gate rather than a
+   height comparison alone. And a collapsing browser toolbar moves both viewports
+   together, so it nets out to a few pixels, well under the floor; a real keyboard
+   is never under a third of the screen. */
+function keyboardInsetOf(layoutHeight, viewport) {
+  if (!viewport || viewport.scale > 1.01) return 0;
+  const inset = layoutHeight - viewport.height - viewport.offsetTop;
+  return inset > KEYBOARD_MIN_PX ? inset : 0;
+}
+const viewport = typeof visualViewport === "undefined" ? null : visualViewport;
+if (viewport) {
+  let pending = 0;
+  const applyViewport = () => {
+    pending = 0;
+    const inset = keyboardInsetOf(innerHeight, viewport);
+    // Read before the write: resizing the shell is what changes `scrollHeight`.
+    const pinned = isAtBottom();
+    if (inset > 0) document.documentElement.style.setProperty("--app-h", `${viewport.height}px`);
+    else document.documentElement.style.removeProperty("--app-h");
+    document.body.classList.toggle("kb", inset > 0);
+    // WebKit has usually already scrolled the document chasing the caret. The
+    // resized shell puts the caret on screen without it, and leaving the scroll
+    // is what strands the header off the top of the screen afterwards.
+    if (scrollY !== 0) scrollTo(0, 0);
+    if (pinned) main.scrollTop = main.scrollHeight;
+  };
+  // Both events fire in bursts for the length of the keyboard animation, so this
+  // coalesces to one layout write per frame.
+  const scheduleViewport = () => {
+    if (!pending) pending = requestAnimationFrame(applyViewport);
+  };
+  viewport.addEventListener("resize", scheduleViewport);
+  viewport.addEventListener("scroll", scheduleViewport);
+}
 
 async function boot() {
   await refresh();

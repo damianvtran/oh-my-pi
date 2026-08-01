@@ -622,13 +622,21 @@ function nextOf(url: URL): string {
  *
  * The autocomplete hints and the `action`/`method` pair are what make iOS and
  * 1Password offer to fill and then save this as a normal login.
+ *
+ * The fields are 16px while the page's type is 13px, which is the same floor
+ * `portal-ui.html` keeps and for the same reason: WebKit zooms the page whenever a
+ * control with a computed font-size under 16px takes focus, and on iOS it does not
+ * zoom back out on blur. Left at 13px, signing in is enough to leave the phone on
+ * a session list that has to be panned sideways. `user-scalable=no` and
+ * `maximum-scale=1` are not alternatives — WebKit ignores both so that pinch-zoom
+ * always works.
  */
 function loginPage(error: string | undefined, next: string): string {
 	return `<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#0F0b14">
 <title>omp \u2014 sign in</title>
@@ -648,7 +656,10 @@ form{width:100%;max-width:320px;display:flex;flex-direction:column;gap:14px}
 .brand b{font-size:15px;font-weight:650;letter-spacing:.01em}
 .brand span{color:var(--fg-faint);font-size:11px}
 label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--fg-muted)}
-input{font:inherit;color:var(--fg);background:var(--bg-inset);border:1px solid var(--border);
+/* 16px, not the body's 13px. See this function's own comment: the floor is what
+keeps WebKit from zooming the page on focus and never zooming back out. Note for
+anyone editing this block: it is a template literal, so no backticks. */
+input{font:inherit;font-size:16px;color:var(--fg);background:var(--bg-inset);border:1px solid var(--border);
 border-radius:var(--radius);padding:11px 12px;min-height:44px}
 input:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px oklch(0.674 0.23 341 / 22%)}
 button{font:inherit;font-weight:600;min-height:44px;cursor:pointer;color:oklch(0.15 0.02 307);
