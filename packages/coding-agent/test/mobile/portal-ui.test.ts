@@ -286,9 +286,12 @@ function loadPortalNavigation(options: { hash?: string; state?: unknown } = {}):
 		EventSource: sink,
 		fetch: () => Promise.withResolvers<Response>().promise,
 		matchMedia: () => sink,
-		// The composer reads its row height and five-row cap off the stylesheet once.
-		// These are the two values `#msg` actually resolves to, so the row arithmetic
-		// under test runs on the numbers it runs on in a browser.
+		// `open()` calls `syncComposer`, which reads the field's row height and five-row
+		// cap off the stylesheet on its first call: without this the harness throws
+		// before it reaches the navigation behaviour under test. The values are the ones
+		// `#msg` resolves to in a browser, but nothing here asserts on them — this stub
+		// exists to let the script run, not to cover the composer's sizing, which is
+		// exercised against a real engine instead.
 		getComputedStyle: () => ({ lineHeight: "21px", maxHeight: "105px" }),
 	};
 	const load = new Function(
@@ -359,8 +362,19 @@ function fieldFontSizes(): { selector: string; px: number }[] {
 	const inputSize = Number.parseFloat(tokens[0]);
 	const fields = /(^|[\s,>])(input|textarea|select|#msg|#newdir|#newsuggest)\b/;
 	const sizes: { selector: string; px: number }[] = [];
-	const sizeOf = (value: string): number =>
-		value.includes("var(--input-size)") ? inputSize : Number.parseFloat(value);
+	/* Lengths are converted rather than parsed raw. `rem` and `em` on these selectors
+	   resolve against the 16px root (nothing in the chain sets a font-size in a
+	   relative unit), and `pt` is 4/3 of a px. Without this, `font: 1rem …` — a valid
+	   16px declaration — reported 1 and failed the floor with the message of a real
+	   regression. An unrecognised unit is 0, because the guard must not wave through a
+	   size it cannot read. */
+	const PX_PER_UNIT: Record<string, number> = { px: 1, rem: 16, em: 16, pt: 4 / 3 };
+	const sizeOf = (value: string): number => {
+		if (value.includes("var(--input-size)")) return inputSize;
+		const length = /((?:\d*\.)?\d+)([a-z%]*)/.exec(value);
+		if (!length) return Number.NaN;
+		return Number.parseFloat(length[1]) * (PX_PER_UNIT[length[2]] ?? 0);
+	};
 	for (const [, selector, body] of style.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
 		if (!fields.test(selector)) continue;
 		for (const [, value] of body.matchAll(/(?:^|;)\s*font-size:\s*([^;]+)/g)) {
@@ -372,10 +386,13 @@ function fieldFontSizes(): { selector: string; px: number }[] {
 		for (const [, value] of body.matchAll(/(?:^|;)\s*font:\s*([^;]+)/g)) {
 			const shorthand = value.trim();
 			if (/^(inherit|initial|unset|revert)$/.test(shorthand)) continue;
-			const size = /(?:^|[\s/])((?:\d*\.)?\d+)(px|rem|em|pt)/.exec(shorthand);
+			// The size is the first token carrying a LENGTH unit: a shorthand leads with
+			// style, variant and weight, and `font: 400 13px/1.5 …` would otherwise be read
+			// as a 400px field.
+			const size = /(?:^|[\s/])((?:\d*\.)?\d+(?:px|rem|em|pt))/.exec(shorthand);
 			// A shorthand whose size cannot be read is reported as 0 rather than skipped:
 			// an unreadable size on a field is exactly the state this must not wave through.
-			sizes.push({ selector: selector.trim(), px: size ? sizeOf(size[1] + size[2]) : 0 });
+			sizes.push({ selector: selector.trim(), px: size ? sizeOf(size[1]) : 0 });
 		}
 	}
 	return sizes;

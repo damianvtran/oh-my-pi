@@ -248,7 +248,7 @@ describe("portal login page", () => {
 		const res = await fetch(url("/login"), { ...FORM_POST, body: loginBody(USERNAME, "wrong") });
 		expect(res.status).toBe(401);
 		expect(res.headers.get("cache-control")).toContain("no-store");
-		expect(await res.text()).toContain("Incorrect username or password.");
+		expect(await res.text()).toContain("incorrect username or password");
 	});
 
 	it("accepts good credentials with a 303 and a signed cookie", async () => {

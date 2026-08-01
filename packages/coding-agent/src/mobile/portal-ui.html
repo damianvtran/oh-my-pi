@@ -488,6 +488,11 @@ footer .wrap { display: flex; gap: 8px; align-items: flex-end; padding: 0; }
    thumb left them. `syncComposer` owns the class, and only removes it when the
    field is emptied — see the hysteresis note there. */
 footer .wrap.grown { flex-wrap: wrap; }
+/* The 20px this reserves is the sigil's pinned width plus the row gap. Pinned
+   because the reserve is arithmetic: the glyph's natural advance is 9.6-9.9px
+   depending on which mono face the platform resolves, so there were about 2px of
+   slack, and past it the field no longer fits beside the sigil and drops to a flex
+   line of its own — a silently three-row composer. */
 footer .wrap.grown .field { flex: 1 1 calc(100% - 20px); }
 footer .wrap.grown #turn { margin-left: auto; }
 /* Pinned to the field's *first* line, sharing its size and line box so the glyph
@@ -495,7 +500,7 @@ footer .wrap.grown #turn { margin-left: auto; }
    `--input-size`, same line height, and a padding-top equal to the field's border
    plus its padding. At 12px against 16px text its baseline sat 1.2px high. */
 .prompt {
-  color: var(--accent-text); flex: none; align-self: flex-start;
+  color: var(--accent-text); flex: none; align-self: flex-start; width: 12px;
   font-size: var(--input-size); line-height: var(--input-line); padding-top: 11px;
   cursor: text;
 }
@@ -517,7 +522,7 @@ footer .wrap.grown #turn { margin-left: auto; }
 .field {
   flex: 1; min-width: 0; display: flex; min-height: 44px; padding: 10px 8px;
   background: var(--bg-inset); border: 1px solid var(--hairline);
-  border-radius: var(--radius-ctl);
+  border-radius: var(--radius-ctl); cursor: text;
 }
 /* The field's only focus cue used to be the shared `--ring`, which measures 2.57:1
    against the light background — under WCAG 1.4.11's 3:1 for a focus indicator.
@@ -538,11 +543,14 @@ footer .wrap.grown #turn { margin-left: auto; }
 #msg::placeholder { color: var(--fg-faint); }
 /* Stop and resume are two states of one control, so they share one fixed slot: the
    row's geometry cannot shift under a thumb that is already reaching for it. `send`
-   shares that width because the pair reads as a pair, and because a 84px `stop`
+   shares that width because the pair reads as a pair, and because an 84px `stop`
    beside a 56px `send` made the secondary control the largest thing in the row —
    the inversion `.nf-actions .btn-accent` exists to prevent in the other form.
-   76px is `resume`, the longest label either takes, plus 5px. */
-#turn, #send { flex: none; min-width: 76px; }
+   72px holds `resume`, the longest label either takes, at its 70.5px natural width.
+   It is deliberately tight: this rule and `.prompt`'s `font-size` are the two things
+   that own the placeholder's width budget, and at 76px both placeholders wrapped and
+   clipped on a 375px screen. Change either one and re-measure the copy. */
+#turn, #send { flex: none; min-width: 72px; }
 
 @media (max-width: 640px) {
   .wrap { padding: 8px 10px 14px; }
@@ -574,7 +582,16 @@ footer .wrap.grown #turn { margin-left: auto; }
       <button class="btn" id="cancelnew">cancel</button>
     </div>
     <div class="nf-status" id="newstatus" role="status" aria-live="polite"></div>
-  </div><div id="list"></div><div id="detail" hidden><div id="ask" role="group" aria-live="assertive" hidden></div><div id="log"></div><div id="todos"></div><div id="subagents"></div><div id="working" class="working" hidden></div></div></div></main>
+  </div><div id="list"></div><div id="detail" hidden><div id="ask" role="group" aria-live="assertive" hidden></div><div id="log"></div><div id="todos"></div><div id="subagents"></div><div id="working" class="working" hidden></div><!--
+    A steer the portal could not deliver. In the scroll area rather than the
+    composer, and that placement is the whole reason it exists: as a footer row it
+    would cost the composer 26px of a 375px screen, here it costs nothing — it
+    occupies space that already scrolls and scrolls away with the transcript. It is
+    the same `.ask-err` line, with the same words, that a rejected `ask` answer
+    already gets 40 lines up in this file. The red border alone says "something";
+    it cannot say which something, and a restored draft is indistinguishable from
+    one that was never sent.
+  --><div id="sendfail" class="ask-err" role="status" hidden>could not send that steer — try again</div></div></div></main>
   <footer id="composer" hidden>
     <div class="wrap">
       <!-- Decorative: the field carries its own name, and unhidden this glyph was
@@ -1197,16 +1214,22 @@ function renderTurnControl(isStreaming, isInterrupted) {
 }
 
 /* Composer placeholders, as constants because three paths set them and because they
-   have a hard width budget. A placeholder is only ever seen in the one-row state,
-   where the field shares its row with `stop` and `send` and so gets 180px on a
-   375px iPhone — 16 monospace characters at 16px, 17 at 390px. Longer copy does not
-   ellipsise: a textarea wraps it to a second line that the one-row field then clips
-   mid-word, which is exactly what the previous copy ("steer this session", "what
-   should it work on?") did once the fields went to 16px. Both strings below are 16
-   characters or fewer, measured at 375px and 390px. A 320px screen wraps either way
-   — the field is 125px there — and is left as it was. */
+   have a hard width budget that two other rules own.
+
+   A placeholder is only ever seen in the compact state, where the field shares its
+   row with `stop` and `send`. That leaves it 153px of content on a 375px iPhone and
+   168px on a 390px one: 15 and 17 monospace characters at 16px. The two rules that
+   set it are `#turn, #send`'s `min-width` and `.prompt`'s `font-size` — both moved in
+   this change, which is how copy that had been measured at 390px ended up wrapping at
+   375px. Change either and re-measure the strings.
+
+   Longer copy does not ellipsise: a textarea wraps it to a second line that the
+   one-row field then hides, so the resting composer read `steer the` and nobody could
+   tell it was truncated. Both strings below are 15 characters, verified as one line at
+   375px and 390px. A 320px screen wraps either way — the field is 98px there — and is
+   left as it was. */
 const PLACEHOLDER_STEER = "steer the agent";
-const PLACEHOLDER_FIRST = "what to work on?";
+const PLACEHOLDER_FIRST = "what to work on";
 
 /* An empty transcript is the guaranteed first screen of a phone-started session,
    so it has to say something: which directory the session is in (the header
@@ -1252,6 +1275,10 @@ function open(pid) {
   $("log").textContent = "";
   $("todos").innerHTML = ""; $("subagents").innerHTML = "";
   $("msg").placeholder = PLACEHOLDER_STEER;
+  // Every other panel is cleared here for the reason above, and a failure belongs to
+  // the session it happened in just as much as a subagent list does: without this the
+  // composer opened red, and announced itself invalid, in a session that never saw it.
+  markSendFailed(false);
   streaming = false; interrupted = false; openCwd = "";
   syncComposer();
   renderWorking(null);
@@ -1451,12 +1478,18 @@ $("back").onclick = () => {
   if (location.hash) history.replaceState(history.state, "", location.pathname + location.search);
   closeSession();
 };
-/* A failed send marks the field rather than the textarea now that the chrome lives
-   on the container, and marks it for assistive tech too: the red border is the only
-   signal, and a border is not announced. */
+/* A failed send marks three things: the field rather than the textarea, now that the
+   chrome lives on the container; the field for assistive tech, because a border is
+   not announced; and the line at the end of the transcript that says which thing
+   failed. The line re-pins a bottom-parked transcript, since the failure answers a
+   send the reader just made — but only if they were at the bottom, because a reader
+   who has scrolled up to check something did not ask to be moved. */
 function markSendFailed(failed) {
+  const atBottom = isAtBottom();
   $("composer").querySelector(".field").classList.toggle("err", failed);
   $("msg").setAttribute("aria-invalid", failed ? "true" : "false");
+  $("sendfail").hidden = !failed;
+  if (failed && atBottom) main.scrollTop = main.scrollHeight;
 }
 $("send").onclick = async () => {
   const text = $("msg").value.trim();
@@ -1474,6 +1507,12 @@ $("send").onclick = async () => {
   markSendFailed(true);
   syncComposer();
 };
+/* How many rows the compact field is allowed before the composer hands it the whole
+   width. Two, not one: a two-row draft still reads fine at 17 characters a line, and
+   the wide layout costs 32px of transcript to show the same text — a bad trade for a
+   steer of 20-odd characters, which is most of them. The third row is where the
+   compact field genuinely stops being enough. */
+const COMPACT_ROWS = 2;
 /* One row and the five-row cap, read from the stylesheet rather than repeated here,
    and read once because both are constants. Falling back to `Infinity` for the cap
    and `0` for the row only makes the two toggles below inert, never wrong. */
@@ -1515,24 +1554,34 @@ function syncComposer() {
     // than the row of 44px controls beside it, on the iPhone specifically. Dropping
     // the inline height hands the sizing back to `min-height`, which is one row.
     wrap.classList.remove("grown");
+    // The failure described the text that was put back; with the field empty there is
+    // nothing left for the border or `aria-invalid` to be about, and an empty field
+    // announced as an invalid entry in a session the failure never touched is worse
+    // than no signal at all. Only a successful send cleared it before.
+    markSendFailed(false);
     msg.style.height = "";
     msg.style.overflowY = "hidden";
   } else {
-    let wanted = composerHeightOf(msg);
-    /* The full-width layout latches on at the second row, and off only when the field
-       is emptied. It cannot be re-decided from the width it produces: text needing two
-       rows at 162px needs one at 330px, which would unlatch it, which would need two
-       rows again. Emptying is the one state whose row count does not depend on width.
+    /* The layout is decided at a fixed reference geometry — the compact width, with
+       the class off — so the answer is a function of the text alone and never of what
+       the field happened to be doing when the question was asked.
 
-       Latching also has to happen *before* the height is settled, and that is why the
-       measurement runs a second time here: the first one answered for the narrow field,
-       and using it would leave a field sized for six rows showing three. The second
-       measurement only ever sets the height — never the latch — so there is no loop.
+       Deciding it at the *current* width cannot work: the class sets the width the row
+       count is measured at, so text needing two rows at 165px needs one at 348px,
+       which would turn the class off, which would need two rows again. Latching damped
+       that, at the price of a layout that depended on history — the same two-character
+       draft drew 61px tall when typed and 113px tall when deleted back to. Removing the
+       class before measuring removes the feedback instead of damping it.
+
+       The cost is one extra measurement per keystroke. Both are synchronous, inside one
+       frame, so nothing paints at the reference geometry.
 
        Rows rather than pixels: the textarea is a flex child of a box whose `min-height`
        is the 44px tap floor, so at one row it stretches a pixel past its line box and a
-       `wanted > composerRow` test fired on a five-character draft. */
-    if (!wrap.classList.contains("grown") && composerRow && Math.round(wanted / composerRow) > 1) {
+       raw pixel test fired on a five-character draft. */
+    wrap.classList.remove("grown");
+    let wanted = composerHeightOf(msg);
+    if (composerRow && Math.round(wanted / composerRow) > COMPACT_ROWS) {
       wrap.classList.add("grown");
       wanted = composerHeightOf(msg);
     }
@@ -1573,8 +1622,13 @@ $("msg").onkeydown = e => {
   $("send").click();
 };
 /* The sigil is 27px of composer at the very edge of the screen, exactly where a
-   thumb reaching for the start of the field lands, and it used to focus nothing. */
+   thumb reaching for the start of the field lands, and it used to focus nothing.
+   `.field` has the same problem on the inside: its 10px of padding is chrome now that
+   the textarea holds only text, so an exact tap in the ring between the border and
+   the first character landed on nothing. Between them the whole 44px control is live,
+   which is what the tap-target floor was measured against in the first place. */
 $("composer").querySelector(".prompt").onclick = () => $("msg").focus();
+$("composer").querySelector(".field").onclick = () => $("msg").focus();
 
 /* The one turn control: stop while a turn runs, resume after one was stopped.
    Both give immediate feedback by disabling — over a phone tunnel the round trip
@@ -1864,9 +1918,17 @@ function applyHash() {
   if (document.querySelector(`.card[data-pid="${wanted}"]`) || current !== null) open(wanted);
 }
 addEventListener("hashchange", applyHash);
-/* The header label switches between basename and full path on width, so a rotation
-   has to re-render it: an idle session may never push another frame. */
-addEventListener("resize", renderHeader);
+/* A rotation changes two things this app computes rather than inherits. The header
+   label switches between basename and full path on width, and an idle session may
+   never push another frame to re-render it. And the composer's height is a function
+   of the field's *width*: a 91-character draft composed in landscape needs two rows
+   there and three in portrait, and nothing else re-measures it, so the third line of
+   the user's own text was drawn outside a scrollport that `overflow-y: hidden` gives
+   no way to scroll — until the next keystroke happened to fix it. */
+addEventListener("resize", () => {
+  renderHeader();
+  if (!$("composer").hidden) syncComposer();
+});
 
 /* ── keyboard-aware viewport ──────────────────────────────────────────────
    `#app` is a `100dvh` grid with the composer in its last row, which is correct
@@ -1916,8 +1978,11 @@ if (viewport) {
     // which is how far WebKit has already scrolled the *visual* viewport down inside
     // the layout viewport to chase the caret — a scroll `scrollTo` cannot undo,
     // because it moves the document and the document here is not the scroller. Using
-    // `viewport.height` while that offset stood left the shell short by exactly it:
-    // a dead strip under the composer and as much of the header pushed off the top.
+    // `viewport.height` while that offset stood left the shell short by exactly it,
+    // so a strip of unusable app sat between the composer and the keyboard. What this
+    // does not do is recover the header: the shell still starts at layout y 0, so an
+    // `offsetTop` holds that much of it above the visible band either way. Fixing
+    // that means offsetting the shell, not resizing it.
     if (inset > 0) document.documentElement.style.setProperty("--app-h", `${innerHeight - inset}px`);
     else document.documentElement.style.removeProperty("--app-h");
     document.body.classList.toggle("kb", inset > 0);
