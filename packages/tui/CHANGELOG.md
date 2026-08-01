@@ -75,6 +75,18 @@
 ### Fixed
 
 - Fixed Kitty and Ghostty keyboard shortcuts on non-Latin keyboard layouts by requesting base-layout key reporting from the terminal.
+- Fixed Kitty/Ghostty shortcuts on non-Latin keyboard layouts by requesting base-layout key reporting from the terminal ([#7320](https://github.com/can1357/oh-my-pi/issues/7320)).
+### Added
+
+- Added a fullscreen viewport mode: the transcript scrolls inside omp instead of the terminal, following new output until you scroll up and resuming when you scroll back to the bottom.
+- Added clickable and hoverable regions to the fullscreen viewport, so components can respond to the pointer wherever they are nested and at whatever scroll position they are drawn.
+- Added drag-to-select and copy-on-release in the fullscreen viewport, replacing the terminal selection that mouse reporting takes away.
+- Added bottom chrome pinning in the fullscreen viewport, so the status line and composer stay at the base of the window while the transcript scrolls under them.
+- Added `disclosureCollapsed` and `disclosureExpanded` to `SymbolTheme` for collapsible row markers.
+
+### Changed
+
+- Fullscreen frames now repaint only the rows that changed, keeping streaming replies smooth on tall terminals.
 
 ## [17.2.4] - 2026-08-01
 

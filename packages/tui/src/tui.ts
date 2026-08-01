@@ -20,8 +20,18 @@ import { performance } from "node:perf_hooks";
 import { $flag, getDebugLogPath } from "@oh-my-pi/pi-utils";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { planDeccaraFills } from "./deccara";
+import {
+	type HitZone,
+	HitZoneSink,
+	hitTestZones,
+	isHitZoneProvider,
+	type MouseZoneTarget,
+	type ZoneMouseEvent,
+} from "./hit-zones";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
+import { parseSgrMouse, type SgrMouseEvent } from "./mouse";
+import { extractSelectionText, highlightLineSpan, Selection, type SelectionPoint } from "./selection";
 import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteImage,
@@ -184,6 +194,63 @@ export interface Component {
 	 * their children; leaf components without resources may omit it.
 	 */
 	dispose?(): void;
+}
+
+/**
+ * How the engine occupies the terminal.
+ *
+ * - `append` — the historical model, and still the default. The transcript
+ *   lives on the NORMAL screen and rows commit into native scrollback exactly
+ *   once, in order, and are never rewritten. Scrolling, selection and copy all
+ *   belong to the terminal emulator. Everything in `docs/tui-core-renderer.md`
+ *   describes this mode.
+ *
+ * - `fullscreen` — the app owns the alternate screen. The whole component tree
+ *   paints into a viewport, the engine owns the scroll offset, and pointer
+ *   reporting is on so regions can be clicked and hovered. Native scrollback,
+ *   native selection and native copy are all forfeited (the terminal no longer
+ *   sees the transcript or the mouse), which is why the engine implements
+ *   selection itself — see `selection.ts`.
+ *
+ * The two are mutually exclusive by construction: in `fullscreen` the entire
+ * commit ledger (`#committedRows`, `#windowTopRow`, the emitters, the audit) is
+ * bypassed, so none of the append-only invariants apply — they are statements
+ * about native history, and in fullscreen there is none.
+ */
+export type ViewportMode = "append" | "fullscreen";
+
+/**
+ * Marks a root child as bottom chrome in `fullscreen` mode: it is excluded from
+ * the scrolling region and pinned to the base of the viewport.
+ *
+ * The engine treats pinning as a partition, not a per-child flag: the FIRST
+ * root child reporting `true` begins the pinned run, and every child after it
+ * is pinned too. That matches the real layout (transcript and HUDs above, then
+ * status/editor/hook widgets welded to the bottom) and avoids interleaved
+ * pinned and scrolling regions, which have no sensible scroll semantics.
+ */
+export interface FullscreenPinned {
+	isFullscreenPinned(): boolean;
+}
+
+/**
+ * Zero-height marker that starts the pinned run in `fullscreen` mode.
+ *
+ * Inserting a sentinel beats tagging the chrome containers themselves: the
+ * boundary is declared in one place, at the root composition site where the
+ * layout order is actually visible, instead of being a property smeared across
+ * five container instances that would each have to be a bespoke subclass. It
+ * renders nothing, so `append` mode is bit-identical with or without it.
+ */
+export class FullscreenPinBoundary implements Component, FullscreenPinned {
+	static readonly #EMPTY: readonly string[] = [];
+	isFullscreenPinned(): boolean {
+		return true;
+	}
+	render(): readonly string[] {
+		return FullscreenPinBoundary.#EMPTY;
+	}
+	invalidate(): void {}
 }
 
 /** Lets an overlay root delegate keyboard focus to components it owns. */
@@ -852,6 +919,31 @@ export class Container
 		this.#memoLines = lines;
 		return lines;
 	}
+
+	/**
+	 * Walk children publishing their hit zones, translating each child's local
+	 * rows into this container's coordinate space.
+	 *
+	 * Row offsets come from `#memoChildLines`, which `render()` has already
+	 * populated for the current frame — so this costs a tree walk, never a
+	 * re-render. When the memo is stale (a container collected before its first
+	 * render) there is no safe offset mapping, so nothing is published rather
+	 * than publishing zones at wrong rows.
+	 */
+	publishHitZones(sink: HitZoneSink): void {
+		const refs = this.#memoChildLines;
+		if (refs.length !== this.children.length) return;
+		let offset = 0;
+		for (let i = 0; i < this.children.length; i++) {
+			const childLines = refs[i];
+			if (childLines === undefined) return;
+			const child = this.children[i]!;
+			if (isHitZoneProvider(child)) {
+				sink.withOffset(offset, () => child.publishHitZones(sink));
+			}
+			offset += childLines.length;
+		}
+	}
 }
 
 /**
@@ -1410,6 +1502,47 @@ export class TUI extends Container {
 	// Holds an alternate-screen exit until its replacement full paint can emit it
 	// atomically. It must survive a deferred Ghostty image frame.
 	#pendingAltExit = "";
+	// Last caret sequence emitted on the alt buffer. Tracked so a frame whose
+	// rows are all identical but whose caret moved (arrow keys in the composer)
+	// still emits, and one where neither moved emits nothing at all.
+	#altPreviousCursorSequence = "";
+
+	// ---- fullscreen viewport state -------------------------------------------
+	// All of this is inert while #viewportMode is "append"; the fullscreen path
+	// is a disjoint branch in #doRender that touches none of the ledger fields
+	// above it.
+	#viewportMode: ViewportMode = "append";
+	// First frame row of the scrolling region shown at the top of the viewport.
+	#scrollTop = 0;
+	// While true the viewport re-pins to the bottom on every frame, so streaming
+	// output stays in view. Any upward scroll clears it and any scroll back to
+	// within one row of the bottom restores it — the behaviour that stops the
+	// view yanking under the reader mid-stream.
+	#stickyBottom = true;
+	// Scroll region of the last fullscreen frame: the composed rows of every
+	// root child before the pinned run. Retained because pointer hit testing and
+	// selection extraction both address frame rows, not screen rows.
+	#fullscreenScrollFrame: string[] = [];
+	#fullscreenScrollViewportRows = 0;
+	// Hit zones of the last frame, in frame coordinates, tree order.
+	#zones: readonly HitZone[] = [];
+	#zoneSink = new HitZoneSink();
+	#hoveredZoneKey: string | null = null;
+	#hoveredZoneTarget: MouseZoneTarget | null = null;
+	// The zone a press landed in. A click only fires when the release lands in
+	// the same zone, so dragging off a control cancels it like every other UI.
+	#pressedZoneKey: string | null = null;
+	#selection = new Selection();
+	// Set while the pointer is down inside the scroll region, so motion reports
+	// extend a selection instead of being treated as hover.
+	#selecting = false;
+	/**
+	 * Invoked with the selected text when a drag-select is released. The app
+	 * wires this to its clipboard plumbing; the engine has none of its own.
+	 */
+	onCopy: ((text: string) => void) | undefined;
+	/** Invoked when the scroll offset or sticky state changes. */
+	onScrollChange: (() => void) | undefined;
 
 	// Persistent composed frame. The render override splices only rows at/after
 	// the stable prefix each frame; cursor markers are stripped at ingestion so
@@ -1950,6 +2083,96 @@ export class TUI extends Container {
 		// DECCARA fill rectangles arrive after shortened row text; synchronized
 		// output hides that intermediate default-background state from users.
 		return TERMINAL.deccara && this.#synchronizedOutputEnabled;
+	}
+	// ---- fullscreen viewport API ---------------------------------------------
+
+	get viewportMode(): ViewportMode {
+		return this.#viewportMode;
+	}
+
+	/**
+	 * Switch between native-scrollback and full-screen rendering at runtime.
+	 *
+	 * Entering forces a repaint so the alt buffer gets a complete frame rather
+	 * than a diff against the normal screen's last window. Leaving hands the
+	 * normal screen back and replays through the ordinary full-paint path, which
+	 * already knows how to rebuild the transcript from row zero.
+	 */
+	setViewportMode(mode: ViewportMode): void {
+		if (mode === this.#viewportMode) return;
+		this.#viewportMode = mode;
+		this.#scrollTop = 0;
+		this.#stickyBottom = true;
+		this.#selection.clear();
+		this.#zones = [];
+		this.#hoveredZoneKey = null;
+		this.#hoveredZoneTarget = null;
+		this.#altPreviousLines = [];
+		if (mode === "append") {
+			// The normal screen still holds whatever was there when we borrowed
+			// the alt buffer; a destructive replay is the only way to get the
+			// transcript back in a known state.
+			this.requestRender(true, { clearScrollback: true });
+		} else {
+			this.requestRender(true);
+		}
+	}
+
+	/** Rows of the scrolling region that do not fit the viewport. */
+	get maxScrollTop(): number {
+		return Math.max(0, this.#fullscreenScrollFrame.length - this.#fullscreenScrollViewportRows);
+	}
+
+	get scrollTop(): number {
+		return this.#scrollTop;
+	}
+
+	/** True while the viewport is following the tail of the transcript. */
+	get isStickyBottom(): boolean {
+		return this.#stickyBottom;
+	}
+
+	/**
+	 * Scroll by `delta` rows (negative scrolls toward the top).
+	 *
+	 * Sticky-follow is re-derived from where we land rather than from the
+	 * direction of travel: scrolling back to the last row resumes following,
+	 * which is what makes "scroll up to read, scroll down to catch up" work
+	 * without a separate gesture.
+	 */
+	scrollBy(delta: number): boolean {
+		return this.scrollTo(this.#scrollTop + delta);
+	}
+
+	scrollTo(row: number): boolean {
+		if (this.#viewportMode !== "fullscreen") return false;
+		const max = this.maxScrollTop;
+		const next = Math.max(0, Math.min(max, Math.round(row)));
+		const sticky = next >= max;
+		if (next === this.#scrollTop && sticky === this.#stickyBottom) return false;
+		this.#scrollTop = next;
+		this.#stickyBottom = sticky;
+		this.onScrollChange?.();
+		this.requestRender();
+		return true;
+	}
+
+	/** Jump to the tail and resume following it. */
+	scrollToBottom(): void {
+		this.#stickyBottom = true;
+		this.scrollTo(this.maxScrollTop);
+	}
+
+	/** True when a drag-selection is currently held. Click handlers check this. */
+	get hasSelection(): boolean {
+		return this.#selection.isActive;
+	}
+
+	/** Drop any active selection. Returns true when a repaint is needed. */
+	clearSelection(): boolean {
+		const cleared = this.#selection.clear();
+		if (cleared) this.requestRender();
+		return cleared;
 	}
 
 	setFocus(component: Component | null): void {
@@ -2974,6 +3197,18 @@ export class TUI extends Container {
 			return;
 		}
 
+		// Pointer input for the full-screen app. Modal overlays still decode SGR
+		// themselves (they hit-test against their own frame and predate zones),
+		// so this only claims the stream when the app owns the screen.
+		if (
+			this.#viewportMode === "fullscreen" &&
+			data.startsWith("\x1b[<") &&
+			this.#getTopmostVisibleOverlay() === undefined &&
+			this.#routePointerInput(data)
+		) {
+			return;
+		}
+
 		// Global debug key handler (Shift+Ctrl+D)
 		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {
 			this.onDebug();
@@ -3012,6 +3247,120 @@ export class TUI extends Container {
 				this.requestRender();
 			}
 		}
+	}
+
+	/** Rows a single wheel notch scrolls. Matches opencode's default feel. */
+	static readonly #WHEEL_SCROLL_ROWS = 3;
+
+	/**
+	 * Dispatch one decoded pointer report against the current frame's zones.
+	 *
+	 * The press/release pairing here is what makes clicking coexist with
+	 * selection: a press arms both a candidate click target and a selection
+	 * anchor, and the release decides which one actually happened. If the
+	 * pointer moved off the press cell it was a drag, so the selection wins and
+	 * no click fires; otherwise the click fires only when the release lands in
+	 * the same zone the press did. This is why every clickable element does NOT
+	 * need its own "was the user selecting?" guard the way opencode's do — the
+	 * engine has already decided.
+	 *
+	 * Returns true when the report was consumed.
+	 */
+	#routePointerInput(data: string): boolean {
+		const event = parseSgrMouse(data);
+		if (!event) return false;
+		const { row, col } = event;
+
+		if (event.wheel !== null) {
+			const zone = hitTestZones(this.#zones, row, col);
+			if (zone?.target.onZoneWheel?.(event.wheel, this.#zoneEvent(event, zone))) {
+				this.requestRender();
+				return true;
+			}
+			this.scrollBy(event.wheel * TUI.#WHEEL_SCROLL_ROWS);
+			return true;
+		}
+
+		if (event.motion) {
+			if (this.#selecting) {
+				const point = this.#viewportPointAt(row, col);
+				if (point && this.#selection.extend(point)) this.requestRender();
+				return true;
+			}
+			this.#updateHover(row, col);
+			return true;
+		}
+
+		if (event.leftClick) {
+			const zone = hitTestZones(this.#zones, row, col);
+			this.#pressedZoneKey = zone?.target.zoneKey ?? null;
+			// A fresh press always drops the previous selection, matching every
+			// text surface: click-to-dismiss is how a user cancels a selection.
+			const cleared = this.#selection.clear();
+			const point = this.#viewportPointAt(row, col);
+			if (point) {
+				this.#selection.begin(point);
+				this.#selecting = true;
+			}
+			if (cleared) this.requestRender();
+			return true;
+		}
+		if (event.release) {
+			const wasSelecting = this.#selecting;
+			this.#selecting = false;
+			this.#selection.end();
+			if (wasSelecting && this.#selection.isActive) {
+				const range = this.#selection.range;
+				if (range && this.onCopy) {
+					this.onCopy(extractSelectionText(this.#fullscreenScrollFrame, range, this.terminal.columns));
+				}
+				this.requestRender();
+				return true;
+			}
+			const zone = hitTestZones(this.#zones, row, col);
+			const pressed = this.#pressedZoneKey;
+			this.#pressedZoneKey = null;
+			if (zone && pressed === zone.target.zoneKey && zone.target.onZoneClick?.(this.#zoneEvent(event, zone))) {
+				this.requestRender();
+			}
+			return true;
+		}
+
+		// Any other report (middle/right button, modifier-only) is still ours to
+		// swallow: leaking it to the focused component would type escape noise
+		// into the composer.
+		return true;
+	}
+
+	#zoneEvent(raw: SgrMouseEvent, zone: HitZone): ZoneMouseEvent {
+		return {
+			raw,
+			localRow: raw.row - zone.row,
+			localCol: raw.col - (Number.isFinite(zone.colStart) ? zone.colStart : 0),
+		};
+	}
+
+	/**
+	 * Frame coordinates for a screen cell, or null when the cell is not inside
+	 * the scrolling region. Selection is deliberately confined to the transcript:
+	 * dragging across the composer should move the caret, not select chrome.
+	 */
+	#viewportPointAt(screenRow: number, col: number): SelectionPoint | null {
+		if (screenRow < 0 || screenRow >= this.#fullscreenScrollViewportRows) return null;
+		return { row: this.#scrollTop + screenRow, col: Math.max(0, col) };
+	}
+
+	/** Move hover to the zone under the pointer, repainting only on a change. */
+	#updateHover(row: number, col: number): void {
+		const zone = hitTestZones(this.#zones, row, col);
+		const key = zone?.target.zoneKey ?? null;
+		if (key === this.#hoveredZoneKey) return;
+		let dirty = false;
+		if (this.#hoveredZoneTarget?.onZoneHover?.(false)) dirty = true;
+		this.#hoveredZoneKey = key;
+		this.#hoveredZoneTarget = zone?.target ?? null;
+		if (zone?.target.onZoneHover?.(true)) dirty = true;
+		if (dirty) this.requestRender();
 	}
 
 	#consumeCellSizeResponse(data: string): boolean {
@@ -3394,13 +3743,23 @@ export class TUI extends Container {
 		const componentScopedOnly = this.#pendingRenderComponentsOnly;
 		this.#pendingRenderComponentsOnly = false;
 
-		// Fullscreen alt-screen short-circuit. While the topmost visible overlay
-		// requests it, borrow the terminal's alternate buffer and paint only the
-		// modal there; the normal screen and all accounting stay untouched.
+		// Alt-screen short-circuit. Two things route here:
+		//   - a fullscreen OVERLAY (the vim/less idiom): borrow the alt buffer,
+		//     paint only the modal, leave the normal screen untouched;
+		//   - viewportMode "fullscreen": the app owns the alt buffer for its
+		//     whole lifetime and the entire component tree paints into it.
+		// Both bypass the commit ledger completely; they differ only in what
+		// gets composited (modal over blank, vs the root tree with a scroll
+		// offset and pinned bottom chrome).
 		let deferredAltExit = this.#pendingAltExit;
 		const topOverlay = this.#getTopmostVisibleOverlay();
-		const wantAlt = topOverlay?.options?.fullscreen === true;
-		const wantMouseTracking = wantAlt && topOverlay.options?.mouseTracking !== false;
+		const appFullscreen = this.#viewportMode === "fullscreen";
+		const wantAlt = appFullscreen || topOverlay?.options?.fullscreen === true;
+		// Pointer reporting stays on for the whole app in fullscreen mode. An
+		// overlay may still opt out (a selection-first modal), but only when it
+		// is the thing driving the alt buffer — otherwise closing it would strip
+		// the app's own mouse handling.
+		const wantMouseTracking = appFullscreen ? true : wantAlt && topOverlay?.options?.mouseTracking !== false;
 		if (wantAlt && !this.#altActive) {
 			// Enhanced keyboard modes can be buffer-local: re-push the active
 			// modified-key reporting sequence on the freshly entered alternate
@@ -3454,7 +3813,14 @@ export class TUI extends Container {
 		}
 		if (this.#altActive) {
 			this.#componentRenderTargets.clear();
-			this.#renderAltFrame(width, height);
+			// A modal that asked for the whole screen still gets the blank-base
+			// painter even when the app itself is full-screen: it wants to cover
+			// the transcript, not composite over it.
+			if (topOverlay?.options?.fullscreen === true) {
+				this.#renderAltFrame(width, height);
+			} else {
+				this.#renderFullscreenFrame(width, height);
+			}
 			return;
 		}
 
@@ -5028,12 +5394,135 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Full per-row viewport rewrite on the alt buffer. Emits only sync-output
-	 * brackets, a cursor home, and per-row rewrites — never ED3, append-tail, or
-	 * any native-scrollback byte, so it is fully isolated from the planner and
-	 * #commit. The hardware cursor stays hidden (it is never re-shown here).
+	 * Compose and paint one full-screen application frame on the alt buffer.
+	 *
+	 * Layout is a two-way partition of the root children (see
+	 * {@link FullscreenPinned}): everything before the first pinned child
+	 * scrolls, everything from it down is welded to the bottom of the viewport.
+	 * The scrolling region is composed in full — the same whole-frame compose
+	 * the append path does — and then windowed, which is what lets a selection
+	 * and a scroll offset both address stable frame rows.
+	 *
+	 * None of the commit ledger runs here. There is no native scrollback to
+	 * protect, so there is nothing to commit, audit or re-anchor.
 	 */
-	#emitAltFrame(lines: string[], width: number, height: number): void {
+	#renderFullscreenFrame(width: number, height: number): void {
+		const children = this.children;
+		let pinnedFrom = children.length;
+		for (let i = 0; i < children.length; i++) {
+			if ((children[i] as Component & Partial<FullscreenPinned>).isFullscreenPinned?.() === true) {
+				pinnedFrom = i;
+				break;
+			}
+		}
+
+		// Row counts are captured here so zone collection can map each child to
+		// its screen rows without a second render pass.
+		const rowCounts: number[] = new Array(children.length);
+		const scrollLines: string[] = [];
+		for (let i = 0; i < pinnedFrom; i++) {
+			const rows = children[i]!.render(width);
+			rowCounts[i] = rows.length;
+			for (let j = 0; j < rows.length; j++) scrollLines.push(rows[j]!);
+		}
+		const pinnedLines: string[] = [];
+		for (let i = pinnedFrom; i < children.length; i++) {
+			const rows = children[i]!.render(width);
+			rowCounts[i] = rows.length;
+			for (let j = 0; j < rows.length; j++) pinnedLines.push(rows[j]!);
+		}
+
+		// Bottom chrome gets the rows it asks for, but never the whole screen:
+		// a composer expanded to twenty lines must not squeeze the transcript to
+		// nothing. When it does not fit we keep its TAIL, because the editor and
+		// its caret live at the bottom of that run.
+		const pinnedRows = Math.min(pinnedLines.length, Math.max(0, height - TUI.#MIN_FULLSCREEN_SCROLL_ROWS));
+		const pinnedWindow = pinnedLines.slice(pinnedLines.length - pinnedRows);
+		const viewportRows = Math.max(0, height - pinnedRows);
+
+		this.#fullscreenScrollFrame = scrollLines;
+		this.#fullscreenScrollViewportRows = viewportRows;
+
+		// Re-pin before windowing so content that arrived this frame is visible
+		// in this frame rather than one frame later.
+		const maxScroll = Math.max(0, scrollLines.length - viewportRows);
+		if (this.#stickyBottom) this.#scrollTop = maxScroll;
+		else if (this.#scrollTop > maxScroll) this.#scrollTop = maxScroll;
+
+		const screen: string[] = new Array(height);
+		for (let r = 0; r < viewportRows; r++) {
+			const frameRow = this.#scrollTop + r;
+			let line = scrollLines[frameRow] ?? "";
+			const span = this.#selection.spanForRow(frameRow, width);
+			if (span) line = highlightLineSpan(line, span.start, span.end, width);
+			screen[r] = line;
+		}
+		for (let r = 0; r < pinnedRows; r++) screen[viewportRows + r] = pinnedWindow[r] ?? "";
+		for (let r = viewportRows + pinnedRows; r < height; r++) screen[r] = "";
+
+		// Markers are stripped from the composed screen, so the caret is placed
+		// in viewport coordinates directly — no window/commit translation, which
+		// is the whole reason the fullscreen cursor path is three lines and the
+		// append one is not.
+		const markers = this.#extractCursorMarkers(screen);
+		const cursor = markers.length > 0 ? markers[0]! : null;
+
+		this.#collectFullscreenZones(children, rowCounts, pinnedFrom, viewportRows, pinnedLines.length - pinnedRows);
+
+		let lines = this.#compositeOverlaysIntoWindow(screen, width, height);
+		lines = this.#prepareLinesArray(lines, width);
+		this.#emitAltFrame(lines, width, height, cursor);
+	}
+
+	/** Minimum transcript rows the pinned chrome may never take. */
+	static readonly #MIN_FULLSCREEN_SCROLL_ROWS = 3;
+
+	/**
+	 * Rebuild the pointer zone list for this frame, normalized to SCREEN
+	 * coordinates so a single hit test serves both regions. Scroll-region zones
+	 * are shifted by the scroll offset (off-screen ones simply never match);
+	 * pinned zones are shifted to sit below the viewport.
+	 */
+	#collectFullscreenZones(
+		children: readonly Component[],
+		rowCounts: readonly number[],
+		pinnedFrom: number,
+		viewportRows: number,
+		pinnedClipped: number,
+	): void {
+		const sink = this.#zoneSink;
+		sink.reset();
+		// Scroll-region children start above the viewport by the scroll offset;
+		// pinned children restart at the top of the pinned run, minus whatever
+		// was clipped off its head when it did not fit.
+		let offset = -this.#scrollTop;
+		for (let i = 0; i < children.length; i++) {
+			if (i === pinnedFrom) offset = viewportRows - pinnedClipped;
+			const child = children[i]!;
+			if (isHitZoneProvider(child)) {
+				const base = offset;
+				sink.withOffset(base, () => child.publishHitZones(sink));
+			}
+			offset += rowCounts[i] ?? 0;
+		}
+		this.#zones = sink.zones;
+	}
+
+	/**
+	 * Paint the alt buffer.
+	 *
+	 * Diffs per row against the previous alt frame and rewrites only the rows
+	 * that changed, addressed absolutely (`CSI row;1 H`). The alt buffer has no
+	 * scrollback, so absolute addressing is unambiguous and there is no
+	 * scrolled reader to disturb — the two constraints that force the normal
+	 * screen into relative moves and a commit ledger.
+	 *
+	 * This matters for the full-screen app in a way it never did for a modal:
+	 * a streaming assistant reply changes two or three rows per frame, and
+	 * rewriting the whole viewport for each of them at 60 Hz is the difference
+	 * between smooth and visibly chugging.
+	 */
+	#emitAltFrame(lines: string[], width: number, height: number, cursor?: { row: number; col: number } | null): void {
 		const fitted: string[] = new Array(height);
 		for (let r = 0; r < height; r++) fitted[r] = lines[r] ?? "";
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
@@ -5048,31 +5537,49 @@ export class TUI extends Container {
 			for (const seq of imageTransmits) transmitBuffer += seq;
 			this.terminal.write(transmitBuffer);
 		}
-		// Skip an identical repaint (the modal is mostly static between
-		// keystrokes) — unless a forced repaint (resetDisplay,
-		// requestRender(true)) is pending: the redraw gesture must repair a
-		// corrupted modal even when our cached frame is byte-identical.
+		// A forced repaint (resetDisplay, requestRender(true)) must repair a
+		// corrupted screen even when our cached frame says nothing changed.
 		const force = this.#forceViewportRepaintOnNextRender;
 		this.#forceViewportRepaintOnNextRender = false;
+		const cursorSeq = this.#altCursorSequence(cursor, height, width);
+
 		if (!force && this.#altPreviousLines.length === height) {
-			let same = true;
+			let buffer = "";
+			let changed = 0;
 			for (let r = 0; r < height; r++) {
-				if (fitted[r] !== this.#altPreviousLines[r]) {
-					same = false;
-					break;
-				}
+				if (fitted[r] === this.#altPreviousLines[r]) continue;
+				changed++;
+				buffer += `\x1b[${r + 1};1H${this.#lineRewriteSequence(fitted[r]!, width)}`;
 			}
-			if (same) return;
+			if (changed === 0 && cursorSeq === this.#altPreviousCursorSequence) return;
+			this.terminal.write(this.#paintBeginSequence + buffer + cursorSeq + this.#paintEndSequence);
+			this.#altPreviousLines = fitted;
+			this.#altPreviousCursorSequence = cursorSeq;
+			return;
 		}
+
 		let buffer = `${this.#paintBeginSequence}\x1b[H`;
 		for (let r = 0; r < height; r++) {
 			if (r > 0) buffer += "\r\n";
 			buffer += this.#lineRewriteSequence(fitted[r], width, r, -1, -1, this.#osc66SpacerGlyphWidth(fitted, r));
 		}
-		buffer += this.#paintEndSequence;
+		buffer += cursorSeq + this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#altPreviousLines = fitted;
+		this.#altPreviousCursorSequence = cursorSeq;
 		this.#fullRedrawCount += 1;
+	}
+
+	/**
+	 * Park and show the hardware caret for a full-screen frame, or keep it
+	 * hidden when the frame reported no marker (every modal overlay draws its
+	 * own in-band caret, so this stays empty for them).
+	 */
+	#altCursorSequence(cursor: { row: number; col: number } | null | undefined, height: number, width: number): string {
+		if (!cursor || !this.#showHardwareCursor) return "";
+		const row = Math.max(0, Math.min(height - 1, cursor.row));
+		const col = Math.max(0, Math.min(width - 1, cursor.col));
+		return `\x1b[${row + 1};${col + 1}H\x1b[?25h`;
 	}
 
 	/**

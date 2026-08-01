@@ -3,10 +3,11 @@
  * Shares the same kernel session as the agent's eval tool.
  */
 
-import { Container, type Loader, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { Container, type HitZoneSink, type Loader, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { highlightCode, theme } from "../../modes/theme/theme";
 import type { TruncationMeta } from "../../tools/output-meta";
+import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import {
 	buildExecutionFrame,
 	buildStatusFooter,
@@ -19,6 +20,10 @@ import {
 const PREVIEW_LINES = 20;
 const MAX_DISPLAY_LINE_CHARS = 4000;
 
+// Stable per-instance counter so a block's hit zone keeps its identity while
+// the transcript above it changes.
+let evalExecutionInstanceSeq = 0;
+
 export type EvalExecutionLanguage = "python" | "js";
 
 export class EvalExecutionComponent extends Container {
@@ -29,6 +34,15 @@ export class EvalExecutionComponent extends Container {
 	#truncation?: TruncationMeta;
 	#expanded = false;
 	#contentContainer: Container;
+	#headerText: Text;
+	#headerRow = 0;
+	#headerRowCount = 1;
+	// The engine repaints after a consumed click, so the toggle only has to
+	// rebuild this block's display.
+	readonly #header = new CollapsibleBlockHeader(`eval:${++evalExecutionInstanceSeq}`, () =>
+		this.setExpanded(!this.#expanded),
+	);
+	readonly #headerPainter = new HeaderRowPainter();
 
 	#highlightLang(): "python" | "javascript" {
 		return this.language === "js" ? "javascript" : "python";
@@ -57,7 +71,8 @@ export class EvalExecutionComponent extends Container {
 		this.#contentContainer = contentContainer;
 		this.#loader = loader;
 
-		this.#contentContainer.addChild(this.#formatHeader(colorKey));
+		this.#headerText = this.#formatHeader(colorKey);
+		this.#contentContainer.addChild(this.#headerText);
 		this.#contentContainer.addChild(this.#loader);
 	}
 
@@ -78,6 +93,25 @@ export class EvalExecutionComponent extends Container {
 	override invalidate(): void {
 		super.invalidate();
 		this.#updateDisplay();
+	}
+
+	override render(width: number): readonly string[] {
+		const lines = super.render(width);
+		// The header is the code, which sits immediately below the frame's top
+		// border. Both are children rendered at this same width, so their
+		// memoized line counts give the header's row without re-rendering.
+		this.#headerRow = this.children[0]?.render(width).length ?? 0;
+		this.#headerRowCount = Math.max(1, this.#headerText.render(width).length);
+		return this.#headerPainter.paint(lines, this.#headerRow, this.#header, this.#expanded);
+	}
+
+	/**
+	 * One zone over the code rows only. The output below stays outside it so it
+	 * remains drag-selectable.
+	 */
+	override publishHitZones(sink: HitZoneSink): void {
+		super.publishHitZones(sink);
+		this.#header.publish(sink, this.#headerRow, this.#headerRowCount);
 	}
 
 	appendOutput(chunk: string): void {
@@ -117,11 +151,13 @@ export class EvalExecutionComponent extends Container {
 		// Only the collapsed preview hides lines; when expanded the footer must
 		// not keep advertising hidden lines / ctrl+o.
 		const hiddenLineCount = this.#expanded ? 0 : availableLines.length - previewLogicalLines.length;
+		this.#header.noteOverflow(hiddenLineCount > 0);
 
 		this.#contentContainer.clear();
 
 		const colorKey: ExecutionColorKey = this.excludeFromContext ? "dim" : "pythonMode";
-		this.#contentContainer.addChild(this.#formatHeader(colorKey));
+		this.#headerText = this.#formatHeader(colorKey);
+		this.#contentContainer.addChild(this.#headerText);
 
 		if (availableLines.length > 0) {
 			if (this.#expanded) {

@@ -26,6 +26,7 @@ import type {
 import {
 	Container,
 	clearRenderCache,
+	FullscreenPinBoundary,
 	Loader,
 	Markdown,
 	ProcessTerminal,
@@ -165,6 +166,7 @@ import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/plan-review-overlay";
 import { StatusLineComponent } from "./components/status-line";
+import { SubagentFooter } from "./components/subagent-footer";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
 import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
@@ -526,6 +528,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	subagentFooter: SubagentFooter;
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -697,6 +700,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	focusParentSession(): Promise<void> {
 		return this.#focusController.focusParent();
 	}
+	focusSiblingSession(direction: 1 | -1): Promise<void> {
+		return this.#focusController.focusSibling(direction);
+	}
 	unfocusSession(): Promise<void> {
 		return this.#focusController.unfocus();
 	}
@@ -794,6 +800,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
+		// Chosen here, before anything can paint: entering the alternate screen
+		// after the first frame would leave that frame stranded in the user's
+		// scrollback, visible again the moment omp exits.
+		if (settings.get("tui.viewport") === "fullscreen") this.ui.setViewportMode("fullscreen");
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
@@ -857,6 +867,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		// spraying events no longer runs `getTopBorder` synchronously in the
 		// hot path where the render never gets to paint the result.
 		this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		this.subagentFooter = new SubagentFooter({
+			state: () => {
+				const agentId = this.#focusController.focusedAgentId;
+				if (!agentId) return { agentId: undefined, label: "", position: 0, siblingCount: 0 };
+				// The agent is one of its own siblings, so the same list carries the
+				// display label and the position without a second registry lookup.
+				const siblings = this.#focusController.siblings();
+				const index = siblings.findIndex(ref => ref.id === agentId);
+				return {
+					agentId,
+					label: siblings[index]?.displayName || agentId,
+					position: index + 1,
+					siblingCount: siblings.length,
+				};
+			},
+			navigate: action => {
+				if (action === "parent") void this.focusParentSession();
+				else void this.focusSiblingSession(action === "sibling.next" ? 1 : -1);
+			},
+			keysFor: action =>
+				this.keybindings.getKeys(action === "parent" ? "app.session.parent" : `app.session.${action}`),
+		});
 
 		this.hideToolActivity = settings.get("display.hideToolActivity");
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
@@ -1070,11 +1102,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Working loader / transient status sits below the sticky todo + subagent
 		// HUDs, just above the editor's hook-widget top margin — so it reads next to
 		// the prompt while keeping the one-line gap above the editor.
+		// Everything from here down is bottom chrome: in fullscreen mode it is
+		// welded to the base of the viewport while the transcript above scrolls
+		// under it. The boundary renders no rows, so append mode is unaffected.
+		this.ui.addChild(new FullscreenPinBoundary());
+		// First pinned row: while drilled into a subagent it stays visible above
+		// the loader no matter how far the transcript is scrolled, which is the
+		// whole point of a "how do I get back up" affordance.
+		this.ui.addChild(this.subagentFooter);
 		this.ui.addChild(this.statusContainer);
 		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
+		this.#setupFullscreenViewport();
 		this.ui.setFocus(this.editor);
 
 		this.#inputController.setupKeyHandlers();
@@ -1282,6 +1323,34 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusLine.watchBranch(() => {
 			this.ui.requestRender();
 		});
+	}
+	/**
+	 * Give the engine the one capability it cannot supply itself: a clipboard.
+	 *
+	 * Mouse reporting takes native selection away from the terminal, so in
+	 * fullscreen mode omp owes the user a working copy. The mode itself is set
+	 * far earlier, at TUI construction, so nothing paints on the normal screen
+	 * first.
+	 */
+	#setupFullscreenViewport(): void {
+		this.ui.onCopy = text => {
+			if (!text) return;
+			void copyToClipboard(text).then(
+				() => {
+					const lines = text.split("\n").length;
+					this.showStatus(lines > 1 ? `Copied ${lines} lines` : "Copied");
+				},
+				() => this.showStatus("Copy failed"),
+			);
+		};
+	}
+
+	/** Flip between append and fullscreen at runtime, persisting the choice. */
+	toggleViewportMode(): void {
+		const next = this.ui.viewportMode === "fullscreen" ? "append" : "fullscreen";
+		this.ui.setViewportMode(next);
+		this.settings.set("tui.viewport", next);
+		this.showStatus(next === "fullscreen" ? "Fullscreen viewport" : "Native scrollback");
 	}
 
 	/** Reload the title-generation system prompt override for the provided working

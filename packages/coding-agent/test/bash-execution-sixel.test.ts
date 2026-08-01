@@ -163,10 +163,15 @@ describe("BashExecutionComponent expand footer", () => {
 		return component;
 	};
 
+	// The footer now routes through formatExpandHint, so it names whatever key is
+	// bound rather than a hardcoded "ctrl+o" and adapts to the fullscreen click
+	// affordance. Assert the key label and the action, not the bracket glyphs,
+	// which come from the active theme.
 	it("advertises hidden lines while collapsed", () => {
 		const rendered = makeComponent().render(120).join("\n");
 		expect(rendered).toContain("more lines");
-		expect(rendered).toContain("ctrl+o to expand");
+		expect(rendered).toContain("Ctrl+O");
+		expect(rendered).toContain("Expand");
 	});
 
 	it("drops the hidden-lines footer once expanded", () => {
@@ -174,7 +179,7 @@ describe("BashExecutionComponent expand footer", () => {
 		component.setExpanded(true);
 		const rendered = component.render(120).join("\n");
 		expect(rendered).not.toContain("more lines");
-		expect(rendered).not.toContain("ctrl+o to expand");
+		expect(rendered).not.toContain("Expand");
 		// Every line is now present, including the previously hidden prefix.
 		expect(rendered).toContain("entry0");
 		expect(rendered).toContain("entry26");
@@ -186,6 +191,7 @@ describe("BashExecutionComponent expand footer", () => {
 		component.setExpanded(false);
 		const rendered = component.render(120).join("\n");
 		expect(rendered).toContain("more lines");
-		expect(rendered).toContain("ctrl+o to expand");
+		expect(rendered).toContain("Ctrl+O");
+		expect(rendered).toContain("Expand");
 	});
 });

@@ -928,7 +928,7 @@ export class PlanReviewOverlay implements Component {
 			// A pointer hovering an option paints a highlight band behind its label,
 			// distinct from the keyboard selection (cursor glyph + bold accent) which
 			// stays where it is. One space of padding gives the band a button shape.
-			if (hovered) text = theme.bg("selectedBg", ` ${text} `);
+			if (hovered) text = theme.hoverBg(` ${text} `);
 			return cursor + text;
 		});
 	}

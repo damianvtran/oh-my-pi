@@ -5,12 +5,13 @@
  * task execution in the terminal UI.
  */
 import path from "node:path";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Container, Markdown, Text } from "@oh-my-pi/pi-tui";
+import type { Component, HitZoneProvider, HitZoneSink, MouseZoneTarget, ZoneMouseEvent } from "@oh-my-pi/pi-tui";
+import { Container, Markdown, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
+import { SessionFocusController } from "../modes/controllers/session-focus-controller";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 import { stripGeneratedOutputNotice, stripRawOutputArtifactNotice } from "../tools/output-meta";
 import {
@@ -34,7 +35,15 @@ import {
 	parseFindingDetails,
 	type SubmitReviewDetails,
 } from "../tools/review";
-import { framedBlock, renderStatusLine } from "../tui";
+import {
+	CachedOutputBlock,
+	framedBlock,
+	markFramedBlockComponent,
+	type OutputBlockOptions,
+	outputBlockContentWidth,
+	padToWidth,
+	renderStatusLine,
+} from "../tui";
 import { repairDoubleEncodedJsonString } from "./repair-args";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails, YieldItem } from "./types";
@@ -58,6 +67,62 @@ interface TaskRenderContext {
 	nowMs?: number;
 }
 type TaskRenderOptions = RenderResultOptions & { renderContext?: TaskRenderContext };
+
+/** A body line that drills into a live subagent when clicked. */
+interface AgentRowAnchor {
+	/** Body-line index, relative to the array the emitting call returns. */
+	readonly line: number;
+	readonly agentId: string;
+}
+
+/**
+ * Per-frame pointer state for the agent rows, threaded down the render tree by
+ * {@link TaskAgentBlock}. Absent in append mode and in any host without mouse
+ * reporting, which is what keeps those hosts byte-identical to before.
+ */
+interface AgentRowContext {
+	/** Filled by the emitting call, in its own line coordinates. */
+	readonly anchors: AgentRowAnchor[];
+	readonly hoveredAgentId: string | undefined;
+	/** Frame interior width, so a hovered row's wash spans the whole row. */
+	readonly contentWidth: number;
+	isEnterable(agentId: string): boolean;
+}
+
+/**
+ * Record `agentId`'s status line as drillable and wash it when hovered. The
+ * wash is padded out to the frame interior first: the zone covers the full row,
+ * so a highlight that stopped at the end of the text would not match its
+ * target.
+ */
+function markAgentRow(
+	statusLine: string,
+	agentId: string,
+	line: number,
+	rows: AgentRowContext | undefined,
+	theme: Theme,
+): string {
+	if (!rows?.isEnterable(agentId)) return statusLine;
+	rows.anchors.push({ line, agentId });
+	if (rows.hoveredAgentId !== agentId) return statusLine;
+	return theme.hoverBg(padToWidth(statusLine, rows.contentWidth));
+}
+
+/**
+ * A child render context sharing this frame's state but collecting its own
+ * anchors. `indent` is the prefix the caller will prepend to every child line:
+ * without subtracting it, a hovered row padded to the full interior would
+ * overflow and wrap once the prefix went on.
+ */
+function childAgentRows(rows: AgentRowContext | undefined, indent = 0): AgentRowContext | undefined {
+	return rows && { ...rows, anchors: [], contentWidth: Math.max(1, rows.contentWidth - indent) };
+}
+
+/** Re-base a child render's anchors onto the parent's line coordinates. */
+function absorbAgentRows(rows: AgentRowContext | undefined, child: AgentRowContext | undefined, base: number): void {
+	if (!rows || !child) return;
+	for (const anchor of child.anchors) rows.anchors.push({ line: base + anchor.line, agentId: anchor.agentId });
+}
 
 const MAX_NESTED_TASK_RENDER_DEPTH = 8;
 
@@ -896,6 +961,7 @@ function renderAgentProgress(
 	seenNestedTasks?: WeakSet<object>,
 	nestedDepth = 0,
 	nowMs = Date.now(),
+	rows?: AgentRowContext,
 ): string[] {
 	const lines: string[] = [];
 
@@ -959,7 +1025,7 @@ function renderAgentProgress(
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
 	}
 
-	lines.push(statusLine);
+	lines.push(markAgentRow(statusLine, progress.id, 0, rows, theme));
 
 	lines.push(...renderTaskSection(progress.assignment ?? progress.task, continuePrefix, expanded, theme));
 
@@ -1079,6 +1145,7 @@ function renderAgentProgress(
 	const inflight = progress.inflightTaskDetails;
 	if (completedTaskCalls.length > 0 || inflight) {
 		const snapshots = inflight ? [...completedTaskCalls, inflight] : completedTaskCalls;
+		const nestedRows = childAgentRows(rows, visibleWidth(continuePrefix));
 		const nestedLines = renderNestedTaskTree(
 			snapshots,
 			expanded,
@@ -1088,7 +1155,10 @@ function renderAgentProgress(
 			seenNestedTasks,
 			nestedDepth,
 			nowMs,
+			nestedRows,
 		);
+		// The prefix loop below is 1:1, so the nested anchors keep their indices.
+		absorbAgentRows(rows, nestedRows, lines.length);
 		for (const line of nestedLines) {
 			lines.push(`${continuePrefix}${line}`);
 		}
@@ -1218,6 +1288,7 @@ function renderAgentResult(
 	theme: Theme,
 	seenNestedTasks?: WeakSet<object>,
 	nestedDepth = 0,
+	rows?: AgentRowContext,
 ): string[] {
 	const lines: string[] = [];
 
@@ -1273,7 +1344,7 @@ function renderAgentResult(
 		statusLine += ` ${theme.fg("warning", "[truncated]")}`;
 	}
 
-	lines.push(statusLine);
+	lines.push(markAgentRow(statusLine, result.id, 0, rows, theme));
 
 	lines.push(...renderTaskSection(result.assignment ?? result.task, continuePrefix, expanded, theme));
 
@@ -1478,6 +1549,103 @@ function selectCollapsedResults(ordered: readonly SingleResult[]): readonly Sing
 }
 
 /**
+ * Body-section index the agent rows live in. Both `renderResult` frames put the
+ * context and assignment briefs first, then a single trailing section holding
+ * every agent row, so the row section is always the last one.
+ */
+function lastSectionIndex(options: OutputBlockOptions): number {
+	return (options.sections?.length ?? 0) - 1;
+}
+
+/**
+ * The task frame, rendered exactly like any other tool block but pointer-aware:
+ * clicking an agent row drills the main view into that subagent's session.
+ *
+ * Rows stay plain strings. The build pass records the body-line index of every
+ * drillable row, and `publishHitZones` maps those indices onto frame rows using
+ * the block's own row origins — so wrapping, section dividers, and the frame
+ * border are accounted for without this component re-deriving the layout.
+ */
+class TaskAgentBlock implements Component, HitZoneProvider {
+	readonly #block = new CachedOutputBlock(true);
+	readonly #zones = new Map<string, MouseZoneTarget>();
+	#anchors: AgentRowAnchor[] = [];
+	#agentSection = -1;
+	#hoveredAgentId: string | undefined;
+
+	constructor(
+		private theme: Theme,
+		private build: (width: number, rows: AgentRowContext) => OutputBlockOptions,
+	) {
+		markFramedBlockComponent(this);
+	}
+
+	render(width: number): readonly string[] {
+		const focus = SessionFocusController.active();
+		const rows: AgentRowContext = {
+			anchors: [],
+			hoveredAgentId: this.#hoveredAgentId,
+			contentWidth: outputBlockContentWidth(width),
+			isEnterable: id => focus?.canFocus(id) === true,
+		};
+		const options = this.build(width, rows);
+		this.#anchors = rows.anchors;
+		this.#agentSection = lastSectionIndex(options);
+		return this.#block.render(options, this.theme);
+	}
+
+	invalidate(): void {
+		this.#block.invalidate();
+	}
+
+	publishHitZones(sink: HitZoneSink): void {
+		if (this.#anchors.length === 0 || this.#agentSection < 0) return;
+		const origins = this.#block.rowOrigins;
+		for (const anchor of this.#anchors) {
+			let start = -1;
+			let rowCount = 0;
+			for (let row = 0; row < origins.length; row++) {
+				const origin = origins[row];
+				const match = origin?.section === this.#agentSection && origin.line === anchor.line;
+				if (match && start < 0) start = row;
+				if (match) rowCount++;
+				else if (start >= 0) break;
+			}
+			// A row folded away by the collapsed cap between build and publish has
+			// no frame row; skip it rather than guessing one.
+			if (start < 0) continue;
+			sink.zone(this.#zoneTarget(anchor.agentId), start, rowCount);
+		}
+	}
+
+	/** Zone targets are keyed, not compared by identity, so one per agent is reused across frames. */
+	#zoneTarget(agentId: string): MouseZoneTarget {
+		const existing = this.#zones.get(agentId);
+		if (existing) return existing;
+		const target: MouseZoneTarget = {
+			zoneKey: `task-agent:${agentId}`,
+			onZoneClick: (_event: ZoneMouseEvent) => {
+				const focus = SessionFocusController.active();
+				if (!focus?.canFocus(agentId)) return false;
+				void focus.focusAgent(agentId);
+				return true;
+			},
+			onZoneHover: hovered => {
+				const next = hovered ? agentId : undefined;
+				// A move between two rows delivers the leave after the enter, so
+				// only drop a hover this row still owns.
+				if (!hovered && this.#hoveredAgentId !== agentId) return false;
+				if (this.#hoveredAgentId === next) return false;
+				this.#hoveredAgentId = next;
+				return true;
+			},
+		};
+		this.#zones.set(agentId, target);
+		return target;
+	}
+}
+
+/**
  * Render the tool result.
  */
 export function renderResult(
@@ -1566,7 +1734,7 @@ export function renderResult(
 		theme,
 	);
 
-	return framedBlock(theme, width => {
+	return new TaskAgentBlock(theme, (width, rows) => {
 		const { expanded, isPartial, spinnerFrame } = options;
 		const frozen = options.renderContext?.frozen === true;
 		const nowMs = options.renderContext?.nowMs ?? Date.now();
@@ -1587,15 +1755,31 @@ export function renderResult(
 				lines.push(formatHiddenProgressLine(ordered.slice(0, ordered.length - visible.length), theme));
 			}
 			for (const progress of visible) {
-				lines.push(
-					...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen, undefined, 0, nowMs),
+				const childRows = childAgentRows(rows);
+				const rendered = renderAgentProgress(
+					progress,
+					"",
+					"  ",
+					expanded,
+					theme,
+					spinnerFrame,
+					frozen,
+					undefined,
+					0,
+					nowMs,
+					childRows,
 				);
+				absorbAgentRows(rows, childRows, lines.length);
+				lines.push(...rendered);
 			}
 		} else if (details.results && details.results.length > 0) {
 			const ordered = orderResultsForDisplay(details.results);
 			const visible = expanded ? ordered : selectCollapsedResults(ordered);
 			for (const res of visible) {
-				lines.push(...renderAgentResult(res, "", "  ", expanded, theme));
+				const childRows = childAgentRows(rows);
+				const rendered = renderAgentResult(res, "", "  ", expanded, theme, undefined, 0, childRows);
+				absorbAgentRows(rows, childRows, lines.length);
+				lines.push(...rendered);
 			}
 			if (visible.length < ordered.length) {
 				const hint = formatExpandHint(theme, false, true);
@@ -1614,9 +1798,22 @@ export function renderResult(
 					)
 				: [];
 			for (const progress of supplementalProgress) {
-				lines.push(
-					...renderAgentProgress(progress, "", "  ", expanded, theme, spinnerFrame, frozen, undefined, 0, nowMs),
+				const childRows = childAgentRows(rows);
+				const rendered = renderAgentProgress(
+					progress,
+					"",
+					"  ",
+					expanded,
+					theme,
+					spinnerFrame,
+					frozen,
+					undefined,
+					0,
+					nowMs,
+					childRows,
 				);
+				absorbAgentRows(rows, childRows, lines.length);
+				lines.push(...rendered);
 			}
 
 			const summaryParts: string[] = [];
@@ -1671,7 +1868,18 @@ export function renderResult(
 			}
 		}
 
-		while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+		// Dropping leading blanks shifts every body line up, and the anchors
+		// recorded above are indices into this array.
+		let trimmed = 0;
+		while (lines.length > 0 && lines[0].trim() === "") {
+			lines.shift();
+			trimmed++;
+		}
+		if (trimmed > 0) {
+			for (const anchor of rows.anchors.splice(0)) {
+				if (anchor.line >= trimmed) rows.anchors.push({ line: anchor.line - trimmed, agentId: anchor.agentId });
+			}
+		}
 		return {
 			header,
 			sections: [
@@ -1757,6 +1965,7 @@ function renderNestedTaskTree(
 	seen: WeakSet<object> = new WeakSet<object>(),
 	depth = 0,
 	nowMs = Date.now(),
+	rows?: AgentRowContext,
 ): string[] {
 	const lines: string[] = [];
 	for (const details of detailsList) {
@@ -1776,7 +1985,19 @@ function renderNestedTaskTree(
 			const hiddenCount = ordered.length - visible.length;
 			visible.forEach((result, index) => {
 				const { prefix, continuePrefix } = nestedMarkers(hiddenCount === 0 && index === visible.length - 1, theme);
-				lines.push(...renderAgentResult(result, prefix, continuePrefix, expanded, theme, seen, depth + 1));
+				const childRows = childAgentRows(rows);
+				const childLines = renderAgentResult(
+					result,
+					prefix,
+					continuePrefix,
+					expanded,
+					theme,
+					seen,
+					depth + 1,
+					childRows,
+				);
+				absorbAgentRows(rows, childRows, lines.length);
+				lines.push(...childLines);
 			});
 			if (hiddenCount > 0) {
 				const { prefix } = nestedMarkers(true, theme);
@@ -1792,20 +2013,22 @@ function renderNestedTaskTree(
 			const hiddenCount = ordered.length - visible.length;
 			visible.forEach((prog, index) => {
 				const { prefix, continuePrefix } = nestedMarkers(hiddenCount === 0 && index === visible.length - 1, theme);
-				lines.push(
-					...renderAgentProgress(
-						prog,
-						prefix,
-						continuePrefix,
-						expanded,
-						theme,
-						spinnerFrame,
-						frozen,
-						seen,
-						depth + 1,
-						nowMs,
-					),
+				const childRows = childAgentRows(rows);
+				const childLines = renderAgentProgress(
+					prog,
+					prefix,
+					continuePrefix,
+					expanded,
+					theme,
+					spinnerFrame,
+					frozen,
+					seen,
+					depth + 1,
+					nowMs,
+					childRows,
 				);
+				absorbAgentRows(rows, childRows, lines.length);
+				lines.push(...childLines);
 			});
 			if (hiddenCount > 0) {
 				const { prefix } = nestedMarkers(true, theme);

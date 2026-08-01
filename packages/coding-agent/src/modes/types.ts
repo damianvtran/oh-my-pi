@@ -132,8 +132,10 @@ export interface InteractiveModeContext {
 	readonly focusedAgentId: string | undefined;
 	/** Focus the main view on an agent's live session (delegates to SessionFocusController.focusAgent). */
 	focusAgentSession(id: string): Promise<void>;
-	/** Focus the focused agent's parent session, falling back to main (delegates to focusParent). */
+	/** Pop one level of the drill-down path, back to main at the top (delegates to focusParent). */
 	focusParentSession(): Promise<void>;
+	/** Cycle to the next (`1`) or previous (`-1`) sibling agent (delegates to focusSibling). */
+	focusSiblingSession(direction: 1 | -1): Promise<void>;
 	/** Return the view to the main session (delegates to SessionFocusController.unfocus). */
 	unfocusSession(): Promise<void>;
 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */

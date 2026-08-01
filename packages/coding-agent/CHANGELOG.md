@@ -481,6 +481,22 @@
 
 ### Added
 
+- Added a fullscreen viewport mode, off by default and enabled with `tui.viewport: fullscreen`, where the transcript scrolls inside omp with the status line and composer pinned to the bottom of the window.
+- Added click to expand or collapse any tool call, edit, or read group in the fullscreen viewport, with its header highlighting as the pointer passes over it.
+- Added drag to select and release to copy in the fullscreen viewport, which replaces the terminal selection that mouse reporting takes away.
+- Added a compact one-line form for settled tool output in the fullscreen viewport, where a single click on the header restores the full output.
+- Added subagent drill-down: click an agent row in a task block to open that agent's transcript, then use `Alt+Up`, `Alt+Left`, `Alt+Right`, or the footer buttons to move to its parent or its siblings.
+- Added the `Theme.hoverBg()` and `Theme.interactiveHint()` interactive-state roles for mouse-driven surfaces. Both derive from colors a theme already declares, so every built-in and user theme gets a hover wash with no edits: `hoverBg` reuses `selectedBg` when it separates from the theme's surface and otherwise moves the surface away from itself (lighter on dark themes, darker on light ones), and `interactiveHint` maps to `dim`.
+- Added `disclosureCollapsed` / `disclosureExpanded` to `getSymbolTheme()` and `theme.nav`, aliasing the existing `nav.expand` / `nav.collapse` glyphs so theme overrides keep applying.
+
+### Fixed
+
+- Fixed the mouse hover band being invisible in the roughly 45 themes that set `selectedBg` to their own surface color (`dark-terminal`, `light-mint`, `obsidian`, `dark-slate`, and others). Every pointer-hover surface now paints with `Theme.hoverBg()`: select lists, the settings list, the model browser, the model hub sidebar and roles pane, the OAuth provider picker, and plan review options. The band keeps its previous footprint and never covers the keyboard-selected row, so hover stays distinct from the cursor-plus-accent selection.
+
+## [17.2.4] - 2026-08-01
+
+### Added
+
 - Added `requestIdFormat` (`"string"` | `"number"`, default `"number"`) to MCP server config, honored by the stdio, HTTP, and SSE transports. JSON-RPC 2.0 permits both id shapes, but Apple's `xcrun mcpbridge` decodes `id` as an integer only and silently drops string ids (`mcpbridge.DecodeError Code=1`), hanging every request until it times out. The option is OMP-specific, so set it in an OMP-owned config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, a project `mcp.json`/`.mcp.json`, or an OMP plugin); servers imported from another tool's config ignore it ([#7053](https://github.com/can1357/oh-my-pi/issues/7053)).
 - Fixed Anthropic web search sending unsupported temperature parameters to sampling-restricted Claude models ([#7195](https://github.com/can1357/oh-my-pi/pull/7195) by [@will-bogusz](https://github.com/will-bogusz)).
 - Fixed mid-turn steering/peer-interrupt tool skips rendering as errors (red ✘, red border/text) in the TUI; pending and in-flight interrupt placeholders now render as neutral info cards while preserving whether `tool.execute` started ([#7199](https://github.com/can1357/oh-my-pi/issues/7199)).

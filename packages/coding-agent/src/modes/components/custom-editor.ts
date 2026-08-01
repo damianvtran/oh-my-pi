@@ -39,7 +39,13 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
 	| "app.clipboard.copyPrompt"
+	| "app.session.parent"
+	| "app.session.sibling.next"
+	| "app.session.sibling.prev"
 >;
+
+/** Which way {@link CustomEditor.onSessionNavigate} should move the view. */
+export type SessionNavigationAction = "parent" | "sibling.next" | "sibling.prev";
 
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.interrupt": ["escape"],
@@ -61,6 +67,9 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.session.parent": ["alt+up"],
+	"app.session.sibling.next": ["alt+right"],
+	"app.session.sibling.prev": ["alt+left"],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -565,6 +574,13 @@ export class CustomEditor extends Editor {
 	onPasteTextRaw?: () => void;
 	/** Called when the configured dequeue shortcut is pressed. */
 	onDequeue?: () => void;
+	/**
+	 * Called when a session-navigation shortcut is pressed. Returns true when
+	 * the view consumed it. Alt+Up is shared with dequeue and Alt+Left/Right
+	 * with word motion, so the drill-down gets first refusal and declines
+	 * whenever the main session is on screen.
+	 */
+	onSessionNavigate?: (action: SessionNavigationAction) => boolean;
 	/** Called when the configured retry shortcut is pressed. */
 	onRetry?: () => void;
 	/** Called when Caps Lock is pressed. */
@@ -952,6 +968,20 @@ export class CustomEditor extends Editor {
 			if (this.#matchesAction(canonical, "app.exit")) {
 				this.onExit?.();
 				return;
+			}
+
+			// Session navigation, checked ahead of dequeue and of the parent's word
+			// motion because it shares their chords. It declines unless a subagent
+			// view is open, so the shared keys keep their usual meaning otherwise.
+			if (this.onSessionNavigate) {
+				const navigation = this.#matchesAction(canonical, "app.session.parent")
+					? "parent"
+					: this.#matchesAction(canonical, "app.session.sibling.next")
+						? "sibling.next"
+						: this.#matchesAction(canonical, "app.session.sibling.prev")
+							? "sibling.prev"
+							: undefined;
+				if (navigation && this.onSessionNavigate(navigation)) return;
 			}
 
 			// Intercept configured dequeue shortcut (restore queued message to editor)

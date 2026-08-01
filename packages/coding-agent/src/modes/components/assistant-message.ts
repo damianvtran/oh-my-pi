@@ -1,6 +1,7 @@
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	Container,
+	type HitZoneSink,
 	Image,
 	type ImageBudget,
 	ImageProtocol,
@@ -19,6 +20,7 @@ import { convertImageToPng } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
+import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 
 /**
  * Max lines of a turn-ending provider error rendered inline in the transcript.
@@ -31,6 +33,10 @@ const MAX_TRANSCRIPT_ERROR_LINES = 8;
 
 /** Opening or closing fence of a code block: ≥3 backticks/tildes plus info string. */
 const CODE_FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+// Stable per-instance counter so a block's hit zone keeps its identity while
+// the transcript above it changes.
+let assistantMessageInstanceSeq = 0;
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
@@ -262,6 +268,23 @@ export class AssistantMessageComponent extends Container {
 	 *  session-wide {@link sharedSpeedTracker} can't surface a previous turn's rate
 	 *  on a fresh block that has no live token throughput of its own. */
 	#thinkingRateLive = false;
+	/**
+	 * Click target for the inline turn-ending error. The clickable row is the
+	 * `Error: …` line rather than the turn's first row: the prose above it is
+	 * not collapsible, so making the whole message hoverable would advertise an
+	 * expansion that most of it does not have.
+	 *
+	 * The engine repaints after a consumed click, so the toggle only has to
+	 * rebuild this block's content.
+	 */
+	readonly #errorHeader = new CollapsibleBlockHeader(`assistant-error:${++assistantMessageInstanceSeq}`, () =>
+		this.setExpanded(!this.#errorExpanded),
+	);
+	readonly #errorHeaderPainter = new HeaderRowPainter();
+	/** Index of the `Error: …` child inside `#contentContainer`; -1 when absent. */
+	#errorHeaderChildIndex = -1;
+	/** Local row the `Error: …` line landed on in the last render; -1 when absent. */
+	#errorHeaderRow = -1;
 
 	#textColorTransform?: (text: string) => string;
 
@@ -322,7 +345,34 @@ export class AssistantMessageComponent extends Container {
 
 	override render(width: number): readonly string[] {
 		this.#lastRenderWidth = width;
-		return super.render(width);
+		const lines = super.render(width);
+		this.#errorHeaderRow = this.#resolveErrorHeaderRow(width);
+		return this.#errorHeaderPainter.paint(lines, this.#errorHeaderRow, this.#errorHeader, this.#errorExpanded);
+	}
+
+	/**
+	 * Local row of the `Error: …` line, summed from the already-rendered child
+	 * line counts (all memoized at this width, so this costs a walk rather than
+	 * a re-render). -1 when this turn drew no truncatable error.
+	 */
+	#resolveErrorHeaderRow(width: number): number {
+		if (this.#errorHeaderChildIndex < 0) return -1;
+		const children = this.#contentContainer.children;
+		if (this.#errorHeaderChildIndex >= children.length) return -1;
+		let row = this.#markerSlot.render(width).length;
+		for (let i = 0; i < this.#errorHeaderChildIndex; i++) {
+			row += children[i]!.render(width).length;
+		}
+		return row;
+	}
+
+	/**
+	 * One zone over the inline error's first row. The error body below stays
+	 * outside it so it remains drag-selectable.
+	 */
+	override publishHitZones(sink: HitZoneSink): void {
+		super.publishHitZones(sink);
+		this.#errorHeader.publish(sink, this.#errorHeaderRow);
 	}
 
 	setHideThinkingBlock(hide: boolean): void {
@@ -542,6 +592,7 @@ export class AssistantMessageComponent extends Container {
 	 * the complete message is reachable. Mirrors {@link ErrorBannerComponent}.
 	 */
 	#appendErrorBlock(message: string): void {
+		this.#errorHeaderChildIndex = this.#contentContainer.children.length;
 		if (this.#errorExpanded) {
 			const [first = "Unknown error", ...rest] = replaceTabs(message.replace(/\s+$/, "")).split("\n");
 			this.#contentContainer.addChild(new Text(theme.fg("error", `Error: ${first}`), 1, 0));
@@ -560,6 +611,7 @@ export class AssistantMessageComponent extends Container {
 		}
 		if (total > lines.length) {
 			const hidden = total - lines.length;
+			this.#errorHeader.noteOverflow(true);
 			this.#contentContainer.addChild(
 				new Text(
 					theme.fg("dim", `  … +${hidden} more line${hidden === 1 ? "" : "s"} (${expandKeyHint()} to expand)`),
@@ -852,6 +904,7 @@ export class AssistantMessageComponent extends Container {
 		this.#contentContainer.clear();
 		this.#thinkingDots = undefined;
 		this.#hasTruncatableError = false;
+		this.#errorHeaderChildIndex = -1;
 
 		// Determine if we should capture Markdown instances for next fast path
 		const shouldCapture = this.#canFastPath(message);

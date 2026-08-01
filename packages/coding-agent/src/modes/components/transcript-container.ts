@@ -1,6 +1,8 @@
 import {
 	type Component,
 	Container,
+	type HitZoneSink,
+	isHitZoneProvider,
 	type NativeScrollbackCommittedRows,
 	type NativeScrollbackLiveRegion,
 	type NativeScrollbackWidthEpoch,
@@ -102,6 +104,17 @@ function stripPlainBlankEdges(lines: readonly string[]): readonly string[] {
 	while (start < end && isPlainBlank(lines[start]!)) start++;
 	while (end > start && isPlainBlank(lines[end - 1]!)) end--;
 	return start === 0 && end === lines.length ? lines : lines.slice(start, end);
+}
+
+// Rows `stripPlainBlankEdges` drops from a block's head. Every mapping between
+// a block's own render coordinates and its assembled rows depends on this, so
+// it stays single-sourced: a second copy drifts the first time the stripping
+// rule changes, and the failure modes (a scrollback split at the wrong row, a
+// click landing on the wrong block) are silent.
+function leadingTrimmedRows(rawRef: readonly string[]): number {
+	let trimmed = 0;
+	while (trimmed < rawRef.length && isPlainBlank(rawRef[trimmed]!)) trimmed++;
+	return trimmed;
 }
 
 /**
@@ -245,11 +258,37 @@ export class TranscriptContainer
 			// Transcript assembly strips plain blank edges from each block. Map the
 			// committed contribution back into the child's raw render coordinates so
 			// nested containers can split the prefix against their exact child rows.
-			let leadingTrimmedRows = 0;
-			while (leadingTrimmedRows < segment.rawRef.length && isPlainBlank(segment.rawRef[leadingTrimmedRows]!)) {
-				leadingTrimmedRows++;
-			}
-			setBlockCommittedRows(child, Math.min(segment.rawRef.length, leadingTrimmedRows + committedContribution));
+			const trimmed = leadingTrimmedRows(segment.rawRef);
+			setBlockCommittedRows(child, Math.min(segment.rawRef.length, trimmed + committedContribution));
+		}
+	}
+
+	/**
+	 * Publish each block's hit zones at the frame rows its content actually
+	 * landed on.
+	 *
+	 * `Container`'s inherited walk is not merely unused here, it is unsafe:
+	 * this container assembles `#lines` itself and never populates the base
+	 * class's render memo, so that walk would derive offsets from absent or
+	 * stale child line arrays. The segment ledger written during render is the
+	 * only record of where a block's rows ended up, and it already accounts for
+	 * the separator row and the blank edges assembly stripped.
+	 */
+	override publishHitZones(sink: HitZoneSink): void {
+		const segments = this.#segments;
+		if (segments.length !== this.children.length) return;
+		for (let i = 0; i < this.children.length; i++) {
+			const child = this.children[i]!;
+			const segment = segments[i];
+			// A ledger that no longer describes this child cannot be mapped, and a
+			// block that contributed nothing this frame owns no rows to claim.
+			// Publishing at a guessed row would hand its neighbour's rows away.
+			if (segment === undefined || segment.component !== child || segment.rowCount <= 0) continue;
+			if (!isHitZoneProvider(child)) continue;
+			// The block's local row 0 is its raw render row 0, which assembly
+			// placed after the separator and after the rows it trimmed off the head.
+			const localRowZero = segment.startRow + segment.sep - leadingTrimmedRows(segment.rawRef);
+			sink.withOffset(localRowZero, () => child.publishHitZones(sink));
 		}
 	}
 

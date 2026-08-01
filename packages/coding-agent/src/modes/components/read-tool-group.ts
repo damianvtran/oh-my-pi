@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
-import type { Component } from "@oh-my-pi/pi-tui";
+import type { Component, HitZoneSink } from "@oh-my-pi/pi-tui";
 import { Container, Text } from "@oh-my-pi/pi-tui";
 import { InternalUrlRouter, XD_URL_PREFIX } from "../../internal-urls";
 import { getLanguageFromPath, theme } from "../../modes/theme/theme";
@@ -8,6 +8,7 @@ import { parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tool
 import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
 import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "./usage-row";
 
@@ -134,6 +135,10 @@ type ReadUsageRow = {
 
 /** Number of code lines to show in collapsed preview mode */
 const COLLAPSED_PREVIEW_LINES = PREVIEW_LIMITS.OUTPUT_COLLAPSED;
+
+// Stable per-instance counter so a group's hit zone keeps its identity while
+// the transcript above it changes.
+let readToolGroupInstanceSeq = 0;
 
 type ReadDisplayTarget = {
 	entry: ReadEntry;
@@ -345,6 +350,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	// Forced terminal even with a still-pending entry: the turn ended (abort or
 	// completion) so no late result is coming. Set via `seal()`.
 	#sealed = false;
+	// The engine repaints after a consumed click, so the toggle only has to
+	// rebuild this group's display.
+	readonly #header = new CollapsibleBlockHeader(`read:${++readToolGroupInstanceSeq}`, () =>
+		this.setExpanded(!this.#expanded),
+	);
+	readonly #headerPainter = new HeaderRowPainter();
 
 	constructor(options: ReadToolGroupOptions = {}) {
 		super();
@@ -510,10 +521,42 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return this;
 	}
 
+	override render(width: number): readonly string[] {
+		const lines = super.render(width);
+		// The summary line is always this group's first row, whether it is the
+		// `Read <path>` one-liner, the `Read (N)` tree head, or the title row of
+		// a single entry's code preview.
+		return this.#headerPainter.paint(lines, 0, this.#header, this.#expanded);
+	}
+
+	/**
+	 * One zone over the summary row. Preview code below stays outside it so it
+	 * remains drag-selectable.
+	 */
+	override publishHitZones(sink: HitZoneSink): void {
+		super.publishHitZones(sink);
+		this.#header.publish(sink, 0);
+	}
+
+	/**
+	 * Whether expanding would actually reveal anything. Only content previews
+	 * are capped when collapsed; a group that shows nothing but paths already
+	 * shows everything it has.
+	 */
+	#hasCappedPreview(): boolean {
+		if (!this.#showContentPreview) return false;
+		for (const entry of this.#entries.values()) {
+			if (!entry.contentText) continue;
+			if (entry.contentText.split("\n").length > COLLAPSED_PREVIEW_LINES) return true;
+		}
+		return false;
+	}
+
 	#updateDisplay(): void {
 		const entries = [...this.#entries.values()];
 		const displayTargets = this.#displayTargetsForEntries(entries);
 		const displayRows = this.#buildSummaryRows(displayTargets);
+		this.#header.noteOverflow(this.#hasCappedPreview());
 
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();

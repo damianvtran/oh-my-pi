@@ -44,6 +44,9 @@ interface AppKeybindings {
 	"app.session.fork": true;
 	"app.session.resume": true;
 	"app.session.observe": true;
+	"app.session.parent": true;
+	"app.session.sibling.next": true;
+	"app.session.sibling.prev": true;
 	"app.session.togglePath": true;
 	"app.session.toggleSort": true;
 	"app.session.rename": true;
@@ -189,6 +192,22 @@ export const KEYBINDINGS = {
 	"app.session.observe": {
 		defaultKeys: "ctrl+s",
 		description: "Open the agent hub",
+	},
+	"app.session.parent": {
+		// Bare Up is what opencode uses, but here it collides with scrolling the
+		// fullscreen viewport. Alt+Up is also the dequeue shortcut; the editor
+		// gives this action first refusal and it only claims the chord while a
+		// subagent view is open.
+		defaultKeys: "alt+up",
+		description: "Return to the parent session",
+	},
+	"app.session.sibling.next": {
+		defaultKeys: "alt+right",
+		description: "View the next sibling agent",
+	},
+	"app.session.sibling.prev": {
+		defaultKeys: "alt+left",
+		description: "View the previous sibling agent",
 	},
 	"app.session.togglePath": {
 		defaultKeys: "ctrl+p",

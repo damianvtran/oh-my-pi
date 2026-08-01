@@ -391,6 +391,10 @@ describe("formatExpandHint / expandKeyHint", () => {
 	// rendered hint is deterministic regardless of the active theme's bracket glyphs.
 	const plainTheme = {
 		fg: (_color: unknown, text: string) => text,
+		// The hint now carries the interactive-affordance role rather than a raw
+		// dim colour, so the stub passes it through and the assertions stay on
+		// the text instead of on escape codes.
+		interactiveHint: (text: string) => text,
 		format: { bracketLeft: "[", bracketRight: "]" },
 	} as unknown as Theme;
 

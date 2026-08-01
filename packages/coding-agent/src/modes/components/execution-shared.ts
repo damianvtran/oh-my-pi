@@ -10,6 +10,7 @@
 import { type Component, Container, Loader, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import { formatTruncationMetaNotice, type TruncationMeta } from "../../tools/output-meta";
+import { formatExpandHint } from "../../tools/render-utils";
 import { DynamicBorder } from "./dynamic-border";
 import { truncateToVisualLines } from "./visual-truncate";
 
@@ -71,11 +72,19 @@ export function buildStatusFooter(opts: {
 	hiddenLineCount: number;
 	/** Suppress the "… N more lines" hint (used when sixel passthrough renders the full output). */
 	suppressHiddenCount?: boolean;
+	/**
+	 * Drop the blank row above the footer. A one-line collapsed preview cannot
+	 * afford a separator that is as tall as the content it separates.
+	 */
+	compact?: boolean;
 }): Text | undefined {
 	const parts: string[] = [];
 
 	if (opts.hiddenLineCount > 0 && !opts.suppressHiddenCount) {
-		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines (ctrl+o to expand)`));
+		// Routed through formatExpandHint rather than naming ctrl+o inline: in
+		// fullscreen the affordance is a click, and this is also the call that
+		// reports the block as collapsible so its header becomes a hit zone.
+		parts.push(`${theme.fg("dim", `… ${opts.hiddenLineCount} more lines`)} ${formatExpandHint(theme, false, true)}`);
 	}
 	if (opts.status === "cancelled") {
 		parts.push(theme.fg("warning", "(cancelled)"));
@@ -85,9 +94,8 @@ export function buildStatusFooter(opts: {
 	if (opts.truncation) {
 		parts.push(theme.fg("warning", formatTruncationMetaNotice(opts.truncation)));
 	}
-
 	if (parts.length === 0) return undefined;
-	return new Text(`\n${parts.join("\n")}`, 1, 0);
+	return new Text(opts.compact ? parts.join("\n") : `\n${parts.join("\n")}`, 1, 0);
 }
 
 /**

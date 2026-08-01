@@ -113,6 +113,8 @@ export function getSymbolTheme(): SymbolTheme {
 			table: box,
 			quoteBorder: "|",
 			hrChar: "-",
+			disclosureCollapsed: "+",
+			disclosureExpanded: "-",
 			colorSwatch: "[]",
 			spinnerFrames: ["-", "\\", "|", "/"],
 		};
@@ -127,6 +129,8 @@ export function getSymbolTheme(): SymbolTheme {
 		table: theme.boxSharp,
 		quoteBorder: theme.md.quoteBorder,
 		hrChar: theme.md.hrChar,
+		disclosureCollapsed: theme.nav.disclosureCollapsed,
+		disclosureExpanded: theme.nav.disclosureExpanded,
 		colorSwatch: theme.md.colorSwatch,
 		spinnerFrames: theme.getSpinnerFrames("activity"),
 	};
@@ -220,7 +224,10 @@ export function getSelectListTheme(): SelectListTheme {
 		scrollInfo: (text: string) => theme.fg("muted", text),
 		noMatch: (text: string) => theme.fg("muted", text),
 		symbols: getSymbolTheme(),
-		hovered: (text: string) => theme.bg("selectedBg", text),
+		// Not raw `selectedBg`: dozens of themes set it to their own surface, which
+		// left the hover band invisible. Both lists skip the wash on the keyboard-
+		// selected row, so it never competes with the cursor + accent selection.
+		hovered: (text: string) => theme.hoverBg(text),
 	};
 }
 
@@ -273,6 +280,9 @@ export function getSettingsListTheme(): SettingsListTheme {
 			dimmed ? theme.fg("dim", theme.underline(text)) : theme.fg("muted", theme.bold(theme.underline(text))),
 		section: (text: string, active: boolean) =>
 			active ? theme.fg("accent", theme.bold(text)) : theme.fg("muted", text),
-		hovered: (text: string) => theme.bg("selectedBg", text),
+		// Not raw `selectedBg`: dozens of themes set it to their own surface, which
+		// left the hover band invisible. Both lists skip the wash on the keyboard-
+		// selected row, so it never competes with the cursor + accent selection.
+		hovered: (text: string) => theme.hoverBg(text),
 	};
 }

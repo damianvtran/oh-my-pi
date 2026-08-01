@@ -5,9 +5,11 @@ import {
 	type Component,
 	Container,
 	getImageDimensions,
+	type HitZoneSink,
 	Image,
 	ImageProtocol,
 	imageFallback,
+	isHitZoneProvider,
 	type NativeScrollbackLiveRegion,
 	Spacer,
 	TERMINAL,
@@ -22,13 +24,22 @@ import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
 import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
 import { isWaitingPollDetails } from "../../tools/hub";
-import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../../tools/render-utils";
+import {
+	firstContentRow,
+	formatStatusIcon,
+	isFullscreenViewport,
+	measureCollapsedOverflow,
+	PREVIEW_LIMITS,
+	replaceTabs,
+	resolveImageOptions,
+} from "../../tools/render-utils";
 import { type FirstResultViewportRepaint, type ToolRenderer, toolRenderers } from "../../tools/renderers";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../../tools/todo";
 import type { XdevState } from "../../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
+import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import { renderDiff } from "./diff";
 
 /**
@@ -177,6 +188,11 @@ class SafeToolRendererComponent implements Component {
 		const handleInput = this.#component.handleInput;
 		if (handleInput === undefined) return;
 		handleInput.call(this.#component, data);
+	}
+
+	/** Sink is passed through unshifted: this wrapper adds no rows of its own. */
+	publishHitZones(sink: HitZoneSink): void {
+		if (isHitZoneProvider(this.#component)) this.#component.publishHitZones(sink);
 	}
 
 	invalidate(): void {
@@ -388,6 +404,17 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		expanded: false,
 		isPartial: true,
 	};
+	/**
+	 * Per-block click target over the card's header row. Keyed off the
+	 * monotonic instance id (the same identity the inline-image budget uses)
+	 * so it stays stable while the transcript above this block changes. The
+	 * engine repaints after a consumed click, so the toggle only has to
+	 * rebuild this block's display.
+	 */
+	readonly #header = new CollapsibleBlockHeader(`tool:${this.#instanceId}`, () => this.setExpanded(!this.#expanded));
+	readonly #headerPainter = new HeaderRowPainter();
+	/** Local row the header landed on in the last render; -1 when nothing drew. */
+	#headerRow = -1;
 
 	constructor(
 		toolName: string,
@@ -969,14 +996,43 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return [];
-		const lines = super.render(width);
+		// The probe catches whichever renderer drew this card reporting that its
+		// collapsed form left something out; that is the only signal the block
+		// has, since renderers are pure formatters that cannot see it.
+		const { value: lines, overflow } = measureCollapsedOverflow(() => super.render(width));
+		this.#header.noteOverflow(overflow || (this.#expanded && this.#outputExceedsCollapsedCap()));
+		this.#headerRow = firstContentRow(lines);
 		// Update the paint-tracking flags after `super.render(width)` — the
 		// override runs on every compose the parent Container performs, so a
 		// frame that never gets composed leaves the flags false and prevents a
 		// spurious `resetDisplay()`.
 		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
 		this.#partialResultShapePainted = this.#result !== undefined && this.#isPartial;
-		return lines;
+		return this.#headerPainter.paint(lines, this.#headerRow, this.#header, this.#expanded);
+	}
+
+	/**
+	 * Fallback measurement for a card that has only ever rendered expanded: a
+	 * tool call that arrives while a bulk expand is in force never draws its
+	 * collapsed form, so no renderer ever reports what that form would hide and
+	 * the card would stay unclickable. Every collapsed renderer caps the tool's
+	 * text output, so measuring it against that cap answers the same question
+	 * without a second render.
+	 */
+	#outputExceedsCollapsedCap(): boolean {
+		if (this.#header.everOverflowed) return false;
+		const output = this.#getTextOutput();
+		return output.length > 0 && output.split("\n").length > this.#settledPreviewLines(PREVIEW_LIMITS.OUTPUT_EXPANDED);
+	}
+
+	/**
+	 * One zone over the card's header row. The body is deliberately left out so
+	 * output text stays drag-selectable; a click that starts in the body is a
+	 * selection gesture, not a toggle.
+	 */
+	override publishHitZones(sink: HitZoneSink): void {
+		super.publishHitZones(sink);
+		this.#header.publish(sink, this.#headerRow);
 	}
 
 	// Viewport-/settings-dependent image sizing folded into the memo key only when
@@ -1308,6 +1364,21 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	/**
+	 * Output rows a shell-style tool keeps while collapsed.
+	 *
+	 * A finished call is history: its header already carries the outcome, and
+	 * in the fullscreen viewport one click on that header brings the rest back,
+	 * so it collapses to a single line of evidence instead of a paragraph.
+	 * While the call is still running the output IS the interesting part and
+	 * keeps the full streaming window, and append mode keeps it throughout
+	 * because there is nothing to click there.
+	 */
+	#settledPreviewLines(streamingLines: number): number {
+		const settled = this.#result !== undefined && !this.#isPartial;
+		return settled && isFullscreenViewport() ? PREVIEW_LIMITS.OUTPUT_SETTLED : streamingLines;
+	}
+
+	/**
 	 * Build render context for tools that need extra state (bash, python, edit)
 	 */
 	#buildRenderContext(): Record<string, unknown> {
@@ -1326,13 +1397,13 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				context.output = output;
 			}
 			context.expanded = this.#expanded;
-			context.previewLines = BASH_DEFAULT_PREVIEW_LINES;
+			context.previewLines = this.#settledPreviewLines(BASH_DEFAULT_PREVIEW_LINES);
 			context.timeout = normalizeTimeoutSeconds(this.#args?.timeout, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
 			const output = this.#getTextOutput().trimEnd();
 			context.output = output;
 			context.expanded = this.#expanded;
-			context.previewLines = EVAL_DEFAULT_PREVIEW_LINES;
+			context.previewLines = this.#settledPreviewLines(EVAL_DEFAULT_PREVIEW_LINES);
 		} else if (this.#toolName === "task") {
 			// Once a result snapshot exists the task renderer's `renderResult`
 			// draws every dispatched agent as a progress/result line, so tell

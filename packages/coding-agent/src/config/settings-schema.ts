@@ -981,6 +981,18 @@ export const SETTINGS_SCHEMA = {
 				"Erase and replay terminal scrollback when a block's final form replaces its live preview. When off (default), stale preview copies remain in history and the final content is appended below.",
 		},
 	},
+	"tui.viewport": {
+		type: "enum",
+		values: ["append", "fullscreen"] as const,
+		default: "append",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Viewport Mode",
+			description:
+				"Append keeps the transcript in the terminal's own scrollback, where the terminal owns scrolling, selection and copy. Fullscreen takes over the whole window: the transcript scrolls inside omp, tool calls collapse and expand on click, and rows highlight on hover — at the cost of native scrollback and native selection, which omp then provides itself (drag to select, release to copy).",
+		},
+	},
 
 	"display.shimmer": {
 		type: "enum",

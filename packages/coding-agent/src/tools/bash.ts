@@ -45,6 +45,7 @@ import { resolveToCwd } from "./path-utils";
 import {
 	capPreviewLines,
 	DEFAULT_TERMINAL_PREVIEW_LINES,
+	formatExpandHint,
 	formatToolWorkingDirectory,
 	previewWindowRows,
 	replaceTabs,
@@ -1760,11 +1761,9 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 							const previewBudget = Math.min(previewLines, previewWindow);
 							const result = truncateToVisualLines(textContent, previewBudget, outputBlockContentWidth(width));
 							if (result.skippedCount > 0) {
+								const shown = `showing ${result.visualLines.length} of ${result.skippedCount + result.visualLines.length}`;
 								outputLines.push(
-									uiTheme.fg(
-										"dim",
-										`… (${result.skippedCount} earlier lines, showing ${result.visualLines.length} of ${result.skippedCount + result.visualLines.length}) (ctrl+o to expand)`,
-									),
+									`${uiTheme.fg("dim", `… (${result.skippedCount} earlier lines, ${shown})`)} ${formatExpandHint(uiTheme, false, true)}`,
 								);
 							}
 							outputLines.push(...result.visualLines);

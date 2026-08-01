@@ -15,6 +15,8 @@ const testTheme = {
 		inputCursor: "|",
 		hrChar: "─",
 		quoteBorder: "│",
+		disclosureCollapsed: "▸",
+		disclosureExpanded: "▾",
 		boxRound: { topLeft: "╭", topRight: "╮", bottomLeft: "╰", bottomRight: "╯", horizontal: "─", vertical: "│" },
 		boxSharp: {
 			topLeft: "┌",
