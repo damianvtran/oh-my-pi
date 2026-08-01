@@ -1311,7 +1311,14 @@ function stashDraft() {
   if (current === null) return;
   const text = $("msg").value;
   if (text) drafts.set(current, text);
-  else drafts.delete(current);
+  else {
+    // The miss count goes with the draft it was counting for. The prune only walks
+    // `drafts`, so a miss left behind here is unreachable — and worse than unreachable:
+    // the next draft typed under this pid inherits it and is deleted on its first
+    // absence, which is the single-tick loss the two-strike rule exists to prevent.
+    drafts.delete(current);
+    draftMisses.delete(current);
+  }
 }
 
 function open(pid) {
