@@ -1631,7 +1631,7 @@ export class ModelHubComponent implements Component {
 				if (lineWidth < width) line += " ".repeat(width - lineWidth);
 			}
 			if (hovered) {
-				line = theme.bg("selectedBg", line);
+				line = theme.hoverBg(line);
 			}
 			lines.push(line);
 		}
@@ -1696,7 +1696,7 @@ export class ModelHubComponent implements Component {
 		if (hovered) {
 			const w = visibleWidth(out);
 			if (w < width) out += " ".repeat(width - w);
-			return theme.bg("selectedBg", out);
+			return theme.hoverBg(out);
 		}
 		return out;
 	}

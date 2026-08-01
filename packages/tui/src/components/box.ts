@@ -1,3 +1,4 @@
+import { type HitZoneSink, isHitZoneProvider } from "../hit-zones";
 import type { Component } from "../tui";
 import {
 	getPaddingX,
@@ -41,6 +42,13 @@ export class Box implements Component {
 	#paddingY: number;
 	#bgFn?: (text: string) => string;
 	#border?: BoxBorder;
+	// Row geometry of the last render, so hit zones published by children can be
+	// translated into the Box's own rows. A Box is not a Container, so it does
+	// not inherit Container's walk, and a tool card's clickable header sits
+	// inside one: without this the whole chain from the transcript down to a
+	// renderer's rows would silently drop every zone.
+	#lastChildLines: (readonly string[])[] = [];
+	#lastContentRowOffset = 0;
 
 	#ignoreTight = false;
 
@@ -141,6 +149,10 @@ export class Box implements Component {
 			return lines;
 		});
 		const childWidths = childLines.map(lines => getPublishedLineWidths(lines));
+		// Recorded before the memo bail-out below: children re-render every frame
+		// regardless of the cache, so this geometry is always current.
+		this.#lastChildLines = childLines;
+		this.#lastContentRowOffset = contentRows > 0 ? (border ? 1 : 0) + this.#paddingY : 0;
 		const cached = this.#cached;
 		if (
 			cached !== undefined &&
@@ -232,5 +244,30 @@ export class Box implements Component {
 			result,
 		};
 		return result;
+	}
+
+	/**
+	 * Forward children's hit zones, shifted past the top border and vertical
+	 * padding so a child's local row 0 lands on the first row of box CONTENT.
+	 *
+	 * Columns are deliberately NOT translated by `paddingX`. Every zone in the
+	 * transcript is a full-width row target, and shifting its start would make
+	 * a click in the left gutter miss the row it visually belongs to. A child
+	 * needing exact columns computes them against the full terminal width.
+	 */
+	publishHitZones(sink: HitZoneSink): void {
+		const refs = this.#lastChildLines;
+		if (refs.length !== this.children.length) return;
+		let offset = this.#lastContentRowOffset;
+		for (let i = 0; i < this.children.length; i++) {
+			const lines = refs[i];
+			if (lines === undefined) return;
+			const child = this.children[i]!;
+			if (isHitZoneProvider(child)) {
+				const base = offset;
+				sink.withOffset(base, () => child.publishHitZones(sink));
+			}
+			offset += lines.length;
+		}
 	}
 }

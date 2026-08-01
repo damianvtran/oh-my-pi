@@ -5,6 +5,7 @@
 import {
 	Container,
 	Ellipsis,
+	type HitZoneSink,
 	ImageProtocol,
 	type Loader,
 	TERMINAL,
@@ -16,7 +17,9 @@ import {
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 import type { TruncationMeta } from "../../tools/output-meta";
+import { isFullscreenViewport, PREVIEW_LIMITS } from "../../tools/render-utils";
 import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
+import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import {
 	buildExecutionFrame,
 	buildStatusFooter,
@@ -33,6 +36,10 @@ const MAX_DISPLAY_LINE_CHARS = 4000;
 // Chunks arriving faster than this are accumulated and processed in one batch.
 const CHUNK_THROTTLE_MS = 50;
 
+// Stable per-instance counter so a block's hit zone keeps its identity while
+// the transcript above it changes.
+let bashExecutionInstanceSeq = 0;
+
 export class BashExecutionComponent extends Container {
 	#outputLines: string[] = [];
 	#status: ExecutionStatus = "running";
@@ -44,6 +51,14 @@ export class BashExecutionComponent extends Container {
 	#chunkGate = false;
 	#contentContainer: Container;
 	#headerText: Text;
+	#headerRow = 0;
+	#headerRowCount = 1;
+	// The engine repaints after a consumed click, so the toggle only has to
+	// rebuild this block's display.
+	readonly #header = new CollapsibleBlockHeader(`bash:${++bashExecutionInstanceSeq}`, () =>
+		this.setExpanded(!this.#expanded),
+	);
+	readonly #headerPainter = new HeaderRowPainter();
 
 	constructor(
 		private readonly command: string,
@@ -140,15 +155,49 @@ export class BashExecutionComponent extends Container {
 			this.#displayDirty = false;
 			this.#updateDisplay();
 		}
-		return super.render(width);
+		const lines = super.render(width);
+		// The header is the command, which sits immediately below the frame's
+		// top border. Both are children rendered at this same width, so their
+		// memoized line counts give the header's row without re-rendering.
+		this.#headerRow = this.children[0]?.render(width).length ?? 0;
+		this.#headerRowCount = Math.max(1, this.#headerText.render(width).length);
+		return this.#headerPainter.paint(lines, this.#headerRow, this.#header, this.#expanded);
+	}
+
+	/**
+	 * One zone over the command rows only. The output below stays outside it so
+	 * it remains drag-selectable.
+	 */
+	override publishHitZones(sink: HitZoneSink): void {
+		super.publishHitZones(sink);
+		this.#header.publish(sink, this.#headerRow, this.#headerRowCount);
 	}
 
 	#updateDisplay(): void {
 		const availableLines = this.#outputLines;
 
+		// A finished command's output is reference material, not something the
+		// reader is watching, so once it settles the collapsed form shrinks to a
+		// glance. While it is still running the full tail window stays: that IS
+		// the thing being watched, and shrinking it mid-run would be hostile.
+		// Only in fullscreen, where one click brings the rest back; in append
+		// mode expanding costs a full-transcript repaint, so the generous
+		// preview earns its rows.
+		const settled = this.#status !== "running";
+		const compact = settled && isFullscreenViewport();
+		const previewLines = compact ? PREVIEW_LIMITS.OUTPUT_SETTLED : PREVIEW_LINES;
+
+		// Trailing blank lines are an artifact of the command's final newline, not
+		// output worth spending the preview on. At twenty rows one wasted row went
+		// unnoticed; at one it is the whole preview, and the block renders empty
+		// while claiming to hide everything.
+		let lastContent = availableLines.length;
+		while (lastContent > 0 && availableLines[lastContent - 1]!.trim() === "") lastContent--;
+		const previewSource = availableLines.slice(0, lastContent);
+
 		// Full output is shown when expanded or when sixel passthrough renders
 		// the raw payload; the collapsed preview shows only the tail window.
-		const previewLogicalLines = availableLines.slice(-PREVIEW_LINES);
+		const previewLogicalLines = previewSource.slice(-previewLines);
 		const sixelLineMask =
 			TERMINAL.imageProtocol === ImageProtocol.Sixel && isSixelPassthroughEnabled()
 				? getSixelLineMask(availableLines)
@@ -157,7 +206,8 @@ export class BashExecutionComponent extends Container {
 		const showingAllLines = this.#expanded || hasSixelOutput;
 		// Only the collapsed preview hides lines; when the full output is shown
 		// the footer must not keep advertising hidden lines / ctrl+o.
-		const hiddenLineCount = showingAllLines ? 0 : availableLines.length - previewLogicalLines.length;
+		const hiddenLineCount = showingAllLines ? 0 : previewSource.length - previewLogicalLines.length;
+		this.#header.noteOverflow(hiddenLineCount > 0);
 
 		// Rebuild content container
 		this.#contentContainer.clear();
@@ -173,9 +223,11 @@ export class BashExecutionComponent extends Container {
 					.join("\n");
 				this.#contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
 			} else {
-				// Use shared visual truncation utility, recomputed per render width
+				// The blank separator costs a row, which a one-row preview cannot
+				// spare, so the compact form sits directly under the command.
 				const styledOutput = previewLogicalLines.map(line => theme.fg("muted", line)).join("\n");
-				this.#contentContainer.addChild(createCollapsedPreview(`\n${styledOutput}`, PREVIEW_LINES));
+				const body = compact ? styledOutput : `\n${styledOutput}`;
+				this.#contentContainer.addChild(createCollapsedPreview(body, previewLines));
 			}
 		}
 
@@ -189,6 +241,7 @@ export class BashExecutionComponent extends Container {
 				truncation: this.#truncation,
 				hiddenLineCount,
 				suppressHiddenCount: hasSixelOutput,
+				compact,
 			});
 			if (footer) this.#contentContainer.addChild(footer);
 		}

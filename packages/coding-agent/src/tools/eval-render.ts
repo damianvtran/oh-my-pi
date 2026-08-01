@@ -33,6 +33,7 @@ import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta"
 import {
 	formatBadge,
 	formatDuration,
+	formatExpandHint,
 	formatStatusIcon,
 	formatTitle,
 	previewWindowRows,
@@ -618,7 +619,7 @@ export const evalToolRenderer = {
 						const outputLines = [...outputContent.lines];
 						if (!expanded && outputContent.hiddenCount > 0) {
 							outputLines.push(
-								uiTheme.fg("dim", `… ${outputContent.hiddenCount} more lines (ctrl+o to expand)`),
+								`${uiTheme.fg("dim", `… ${outputContent.hiddenCount} more lines`)} ${formatExpandHint(uiTheme, false, true)}`,
 							);
 						}
 						if (statusLines.length > 0) {
@@ -746,10 +747,8 @@ export const evalToolRenderer = {
 				const outputLines: string[] = [];
 				if (cachedSkipped && cachedSkipped > 0) {
 					outputLines.push("");
-					const skippedLine = uiTheme.fg(
-						"dim",
-						`… (${cachedSkipped} earlier lines, showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length}) (ctrl+o to expand)`,
-					);
+					const shown = `showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length}`;
+					const skippedLine = `${uiTheme.fg("dim", `… (${cachedSkipped} earlier lines, ${shown})`)} ${formatExpandHint(uiTheme, false, true)}`;
 					outputLines.push(truncateToWidth(skippedLine, width));
 				}
 				outputLines.push(...cachedLines);

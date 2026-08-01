@@ -333,7 +333,7 @@ export class OAuthSelectorComponent extends Container {
 				line = text + statusIndicator;
 			}
 			if (!isSelected && i === this.#hoveredIndex) {
-				line = theme.bg("selectedBg", line);
+				line = theme.hoverBg(line);
 			}
 			rows.push(line);
 		}

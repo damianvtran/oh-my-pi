@@ -39,8 +39,21 @@ export function isFramedBlockComponent(component: Component): boolean {
 type BlockRow =
 	| { kind: "bar"; leftChar: string; rightChar: string; label?: string; meta?: string }
 	| { kind: "bottom"; leftChar: string; rightChar: string }
-	| { kind: "content"; inner: string }
-	| { kind: "sixel"; raw: string };
+	| { kind: "content"; inner: string; origin: BlockRowOrigin }
+	| { kind: "sixel"; raw: string; origin: BlockRowOrigin };
+
+/**
+ * Which source line produced an emitted row. Only content rows have one; the
+ * header bar, section separators, and the bottom rule map to `undefined`.
+ * Callers that need to hit-test a specific body line (the task block's agent
+ * rows) read this instead of re-deriving the frame's wrapping arithmetic.
+ */
+export interface BlockRowOrigin {
+	/** Index into the `sections` array passed to {@link renderOutputBlock}. */
+	readonly section: number;
+	/** Index into that section's `lines`, before any embedded-newline split. */
+	readonly line: number;
+}
 
 function normalizeContentPaddingLeft(value: number | undefined): number {
 	if (value === undefined || !Number.isFinite(value)) return 1;
@@ -63,7 +76,16 @@ export function outputBlockContentWidth(
 	return Math.max(1, width - 2 - left - right);
 }
 
-export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): string[] {
+/**
+ * Render the bordered block. When `origins` is supplied it is filled with one
+ * entry per emitted row, so a caller can map a body line it authored back to
+ * the frame row it landed on after wrapping.
+ */
+export function renderOutputBlock(
+	options: OutputBlockOptions,
+	theme: Theme,
+	origins?: (BlockRowOrigin | undefined)[],
+): string[] {
 	const { header, headerMeta, state, sections = [], width, applyBg = true } = options;
 	const h = theme.boxRound.horizontal;
 	const v = theme.boxRound.vertical;
@@ -132,18 +154,29 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 				rightChar: theme.boxRound.teeLeft,
 			});
 		}
-		const allLines = section.lines.flatMap(l => l.split("\n"));
+		// Embedded newlines split a caller line into several, so carry the
+		// pre-split index alongside: origins are reported in the caller's own
+		// coordinates (index into `section.lines`), not the split ones.
+		const allLines: string[] = [];
+		const sourceLines: number[] = [];
+		for (let i = 0; i < section.lines.length; i++) {
+			for (const part of section.lines[i]!.split("\n")) {
+				allLines.push(part);
+				sourceLines.push(i);
+			}
+		}
 		const sixelLineMask = TERMINAL.imageProtocol === ImageProtocol.Sixel ? getSixelLineMask(allLines) : undefined;
 		for (let lineIndex = 0; lineIndex < allLines.length; lineIndex++) {
 			const line = allLines[lineIndex]!;
+			const origin: BlockRowOrigin = { section: sectionIndex, line: sourceLines[lineIndex]! };
 			if (sixelLineMask?.[lineIndex]) {
-				rows.push({ kind: "sixel", raw: line });
+				rows.push({ kind: "sixel", raw: line, origin });
 				continue;
 			}
 			const wrappedLines = wrapTextWithAnsi(line.trimEnd(), contentWidth);
 			for (const wrappedLine of wrappedLines) {
 				const innerPadding = padding(Math.max(0, contentWidth - visibleWidth(wrappedLine)));
-				rows.push({ kind: "content", inner: `${wrappedLine}${innerPadding}` });
+				rows.push({ kind: "content", inner: `${wrappedLine}${innerPadding}`, origin });
 			}
 		}
 	}
@@ -185,8 +218,10 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
 		`${border(v)}${contentLeftPadding}${inner}${contentRightPadding}${border(v)}`;
 
 	const lines: string[] = [];
+	if (origins) origins.length = 0;
 	for (let r = 0; r < H; r++) {
 		const row = rows[r]!;
+		origins?.push(row.kind === "bar" || row.kind === "bottom" ? undefined : row.origin);
 		if (row.kind === "sixel") {
 			lines.push(row.raw);
 			continue;
@@ -208,12 +243,26 @@ export function renderOutputBlock(options: OutputBlockOptions, theme: Theme): st
  */
 export class CachedOutputBlock {
 	#cache?: RenderCache;
+	#origins: (BlockRowOrigin | undefined)[] | undefined;
+
+	/**
+	 * `trackRowOrigins` turns on {@link rowOrigins}. Off by default: only blocks
+	 * that hit-test their own body rows pay for the per-row bookkeeping.
+	 */
+	constructor(trackRowOrigins = false) {
+		if (trackRowOrigins) this.#origins = [];
+	}
+
+	/** Source line behind each row of the last render, empty unless tracking is on. */
+	get rowOrigins(): readonly (BlockRowOrigin | undefined)[] {
+		return this.#origins ?? [];
+	}
 
 	/** Render with caching. Returns the cached (shared, caller-immutable) lines if options haven't changed. */
 	render(options: OutputBlockOptions, theme: Theme): readonly string[] {
 		const key = this.#buildKey(options);
 		if (this.#cache?.key === key) return this.#cache.lines;
-		const lines = renderOutputBlock(options, theme);
+		const lines = renderOutputBlock(options, theme, this.#origins);
 		this.#cache = { key, lines };
 		return lines;
 	}

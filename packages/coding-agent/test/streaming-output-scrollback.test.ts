@@ -496,7 +496,14 @@ describe("streaming tool output never sprays duplicate scrollback banners", () =
 		// each capped at previewWindowRows() VISUAL rows. Pre-fix the long output
 		// wrapped into ~2x its line count and blew past this.
 		expect(lines.length).toBeLessThanOrEqual(previewWindowRows() + 10);
-		expect(lines.map(line => Bun.stripANSI(line)).join("\n")).toContain("ctrl+o");
+		// Case-insensitive: the hint is built from the bound key's display label
+		// ("Ctrl+O") rather than a hardcoded lowercase literal.
+		expect(
+			lines
+				.map(line => Bun.stripANSI(line))
+				.join("\n")
+				.toLowerCase(),
+		).toContain("ctrl+o");
 	});
 
 	test("streams live assistant thinking and answer rows into native scrollback before finalize", async () => {
