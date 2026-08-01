@@ -429,7 +429,9 @@ class Portal implements PortalHandle {
 				// password cost the same.
 				const ok = timingSafeEqual(user, this.#username) === true && timingSafeEqual(pass, this.#password) === true;
 				if (!ok) {
-					return new Response(loginPage("Incorrect username or password.", nextOf(url)), {
+					// Lowercase and unpunctuated, like every other failure string in the
+					// product: "could not send that answer — try again", "start failed".
+					return new Response(loginPage("incorrect username or password", nextOf(url)), {
 						status: 401,
 						headers: LOGIN_HTML,
 					});
@@ -644,11 +646,12 @@ function loginPage(error: string | undefined, next: string): string {
 <style>
 :root{color-scheme:dark;--bg:oklch(0.16 0.02 307);--bg-raised:oklch(0.19 0.022 307);--bg-inset:oklch(0.13 0.016 307);
 --fg:oklch(0.92 0.01 307);--fg-muted:oklch(0.71 0.016 307);--fg-faint:oklch(0.53 0.018 307);
---accent:oklch(0.674 0.23 341);--border:oklch(1 0 0 / 9%);--border-strong:oklch(1 0 0 / 13%);
+--accent:oklch(0.674 0.23 341);--accent-halo:oklch(0.674 0.23 341 / 22%);
+--border:oklch(1 0 0 / 9%);--border-strong:oklch(1 0 0 / 13%);
 --err:oklch(0.66 0.19 25);--radius:8px}
 @media(prefers-color-scheme:light){:root:not([data-theme="dark"]){color-scheme:light;--bg:oklch(0.985 0.004 307);--bg-raised:oklch(1 0 0);
 --bg-inset:oklch(0.95 0.006 307);--fg:oklch(0.26 0.03 307);--fg-muted:oklch(0.46 0.03 307);--fg-faint:oklch(0.58 0.025 307);
---accent:oklch(0.52 0.21 341);--err:oklch(0.55 0.19 25);
+--accent:oklch(0.52 0.21 341);--accent-halo:oklch(0.52 0.21 341 / 22%);--err:oklch(0.55 0.19 25);
 --border:oklch(0 0 0 / 10%);--border-strong:oklch(0 0 0 / 15%)}}
 *{box-sizing:border-box}
 body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px;background:var(--bg);color:var(--fg);
@@ -663,7 +666,9 @@ keeps WebKit from zooming the page on focus and never zooming back out. Note for
 anyone editing this block: it is a template literal, so no backticks. */
 input{font:inherit;font-size:16px;color:var(--fg);background:var(--bg-inset);border:1px solid var(--border);
 border-radius:var(--radius);padding:11px 12px;min-height:44px}
-input:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px oklch(0.674 0.23 341 / 22%)}
+/* The halo is a token, not a literal: this page follows the OS palette now, and a
+literal dark-palette pink drew a brighter ring around a darker border on a light OS. */
+input:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-halo)}
 /* 16px like the fields above it, not the body's 13px: at 13px the primary action
 was the smallest type in the form, below the value the user had just typed, and the
 same padding gave a 44px button under two 48px inputs.
