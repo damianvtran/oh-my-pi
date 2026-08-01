@@ -168,6 +168,24 @@ export interface CompactionSettings {
 	strategy?: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent?: number;
 	thresholdTokens?: number;
+	/**
+	 * Absolute ceiling on the resolved compaction threshold, in tokens.
+	 *
+	 * Applied AFTER whichever mode produced the threshold (fixed
+	 * `thresholdTokens`, `thresholdPercent`, or the reserve-based default), so
+	 * it only ever pulls the trigger EARLIER. Values <= 0 disable it.
+	 *
+	 * This exists because the other two knobs cannot express "compact by N
+	 * tokens, but never later than the model's own safe point".
+	 * `thresholdPercent` is proportional, so a percentage tuned for a 1M window
+	 * is far too late on a 200k one; a fixed `thresholdTokens` is absolute but
+	 * clamps up to `contextWindow - 1` on any smaller window, which pushes the
+	 * trigger PAST the reserve-based default and straight into provider
+	 * overflow. A ceiling composes with either: big windows get the flat cap
+	 * (very long sessions are slow and expensive well before they are unsafe),
+	 * small windows keep their reserve-derived threshold untouched.
+	 */
+	maxThresholdTokens?: number;
 	midTurnEnabled?: boolean;
 	/**
 	 * Tokens reserved below the context window for the next prompt + response.
@@ -209,6 +227,7 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	strategy: "context-full",
 	thresholdPercent: -1,
 	thresholdTokens: -1,
+	maxThresholdTokens: -1,
 	midTurnEnabled: true,
 	keepRecentTokens: 20000,
 	autoContinue: true,
@@ -358,7 +377,11 @@ export function compactionContextTokens(providerContextTokens: number, storedCon
 	return Math.max(Math.max(0, providerContextTokens), Math.max(0, storedConversationEstimate));
 }
 
-export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
+/**
+ * Threshold produced by the configured mode, before {@link
+ * CompactionSettings.maxThresholdTokens} is applied.
+ */
+function resolveBaseThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
 	// Fixed token limit takes priority over percentage
 	const thresholdTokens = settings.thresholdTokens;
 	if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
@@ -382,6 +405,23 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 	}
 	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
 	return Math.floor(contextWindow * (clampedThresholdPercent / 100));
+}
+
+export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
+	const baseThresholdTokens = resolveBaseThresholdTokens(contextWindow, settings);
+
+	// The ceiling can only pull the trigger earlier, never later: a window small
+	// enough that its own reserve-based threshold already sits under the cap is
+	// left exactly as it was. That one-directional rule is what makes a flat cap
+	// safe to set globally across a mixed fleet of 200k and 1M models.
+	const maxThresholdTokens = settings.maxThresholdTokens;
+	if (typeof maxThresholdTokens !== "number" || !Number.isFinite(maxThresholdTokens) || maxThresholdTokens <= 0) {
+		return baseThresholdTokens;
+	}
+	// Floor the cap itself at 1 so a fractional cap cannot resolve to a 0-token
+	// threshold (which would make every turn instantly over-threshold); a base of
+	// 0 from an unusable window still passes through untouched.
+	return Math.min(baseThresholdTokens, Math.max(1, Math.floor(maxThresholdTokens)));
 }
 
 // ============================================================================

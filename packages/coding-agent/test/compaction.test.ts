@@ -344,6 +344,59 @@ describe("shouldCompact", () => {
 	});
 });
 
+describe("resolveThresholdTokens ceiling (maxThresholdTokens)", () => {
+	// The motivating fleet: one config shared by a 1M-window model and a
+	// 200k-window model. The 1M window must be clipped to the cap; the 200k
+	// window's reserve-based threshold already sits under it and must survive
+	// untouched — that is precisely what a fixed `thresholdTokens` gets wrong.
+	const capped: CompactionSettings = {
+		enabled: true,
+		thresholdPercent: -1,
+		thresholdTokens: -1,
+		maxThresholdTokens: 600_000,
+		keepRecentTokens: 20_000,
+	};
+
+	it("clips a large window's reserve-based threshold to the ceiling", () => {
+		// 1,000,000 - max(150,000, 16,384) = 850,000, above the 600k cap.
+		expect(resolveThresholdTokens(1_000_000, { ...capped, maxThresholdTokens: -1 })).toBe(850_000);
+		expect(resolveThresholdTokens(1_000_000, capped)).toBe(600_000);
+		expect(shouldCompact(600_000, 1_000_000, capped)).toBe(false);
+		expect(shouldCompact(600_001, 1_000_000, capped)).toBe(true);
+	});
+
+	it("leaves windows whose own threshold is already under the ceiling alone", () => {
+		// 400k: 340,000 and 200k: 170,000 are both below the cap, so the cap is
+		// inert. A fixed thresholdTokens of 600,000 would instead clamp these up
+		// to contextWindow - 1 and disable proactive compaction entirely.
+		expect(resolveThresholdTokens(400_000, capped)).toBe(340_000);
+		expect(resolveThresholdTokens(200_000, capped)).toBe(170_000);
+		expect(resolveThresholdTokens(400_000, { ...capped, maxThresholdTokens: -1, thresholdTokens: 600_000 })).toBe(
+			399_999,
+		);
+	});
+
+	it("also clips the percent mode and an explicit fixed threshold", () => {
+		expect(resolveThresholdTokens(1_000_000, { ...capped, thresholdPercent: 90 })).toBe(600_000);
+		expect(resolveThresholdTokens(1_000_000, { ...capped, thresholdTokens: 800_000 })).toBe(600_000);
+		// A fixed threshold below the cap still wins: the cap only lowers.
+		expect(resolveThresholdTokens(1_000_000, { ...capped, thresholdTokens: 300_000 })).toBe(300_000);
+	});
+
+	it("treats non-positive and non-finite ceilings as disabled", () => {
+		for (const maxThresholdTokens of [-1, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
+			expect(resolveThresholdTokens(1_000_000, { ...capped, maxThresholdTokens })).toBe(850_000);
+		}
+	});
+
+	it("never resolves a fractional ceiling down to a zero-token threshold", () => {
+		// floor(0.5) is 0, which would make every turn instantly over-threshold
+		// and wedge compaction in a loop.
+		expect(resolveThresholdTokens(1_000_000, { ...capped, maxThresholdTokens: 0.5 })).toBe(1);
+		expect(shouldCompact(1, 1_000_000, { ...capped, maxThresholdTokens: 0.5 })).toBe(false);
+	});
+});
+
 describe("compactionContextTokens", () => {
 	it("floors deflated provider usage by the stored-conversation estimate", () => {
 		// A before_provider_request compression extension (e.g. Headroom) shrinks the

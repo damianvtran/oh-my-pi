@@ -2246,6 +2246,32 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Unlike `thresholdTokens`, this never delays the trigger: it is applied on
+	// top of whichever threshold mode resolved, so a 200k model keeps its
+	// reserve-based threshold while a 1M model gets the flat cap. That makes it
+	// the only safe way to say "no session should ever reach N tokens" when the
+	// same config is shared across models with very different windows.
+	"compaction.maxThresholdTokens": {
+		type: "number",
+		default: -1,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Compaction Token Ceiling",
+			description:
+				"Upper bound on the compaction threshold, whichever mode set it; only ever compacts earlier, never later",
+			options: [
+				{ value: "default", label: "Default", description: "No ceiling" },
+				{ value: "200000", label: "200K tokens", description: "Cap every model at a 200K-class trigger" },
+				{ value: "300000", label: "300K tokens", description: "Keep sessions small and cheap" },
+				{ value: "400000", label: "400K tokens", description: "Moderate cap for large windows" },
+				{ value: "500000", label: "500K tokens", description: "Half of a 1M window" },
+				{ value: "600000", label: "600K tokens", description: "Trim the slow tail of a 1M window" },
+				{ value: "800000", label: "800K tokens", description: "Only clip the very largest windows" },
+			],
+		},
+	},
+
 	"compaction.handoffSaveToDisk": {
 		type: "boolean",
 		default: false,
@@ -5684,6 +5710,7 @@ export interface CompactionSettings {
 	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent: number;
 	thresholdTokens: number;
+	maxThresholdTokens: number;
 	reserveTokens: number | undefined;
 	keepRecentTokens: number;
 	midTurnEnabled: boolean;

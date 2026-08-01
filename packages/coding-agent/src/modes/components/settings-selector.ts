@@ -51,6 +51,17 @@ import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "./status-line/presets";
 
 /**
+ * Numeric settings whose `-1` stored value means "unset" rather than a real
+ * quantity, so the submenu shows and writes the synthetic `default` option
+ * instead of the sentinel.
+ */
+const SENTINEL_DEFAULT_NUMERIC_PATHS: Partial<Record<SettingPath, true>> = {
+	"compaction.thresholdPercent": true,
+	"compaction.thresholdTokens": true,
+	"compaction.maxThresholdTokens": true,
+};
+
+/**
  * A submenu component for selecting from a list of options.
  */
 /**
@@ -1012,10 +1023,7 @@ export class SettingsSelectorComponent implements Component {
 
 	#getSubmenuCurrentValue(path: SettingPath, value: unknown): string {
 		const rawValue = String(value ?? "");
-		if (path === "compaction.thresholdPercent" && (rawValue === "-1" || rawValue === "")) {
-			return "default";
-		}
-		if (path === "compaction.thresholdTokens" && (rawValue === "-1" || rawValue === "")) {
+		if (SENTINEL_DEFAULT_NUMERIC_PATHS[path] && (rawValue === "-1" || rawValue === "")) {
 			return "default";
 		}
 		return rawValue;
@@ -1219,9 +1227,7 @@ export class SettingsSelectorComponent implements Component {
 	#setSettingValue(path: SettingPath, value: string): void {
 		const currentValue = settings.get(path);
 		const schemaType = getType(path);
-		if (path === "compaction.thresholdPercent" && value === "default") {
-			settings.set(path, -1 as never);
-		} else if (path === "compaction.thresholdTokens" && value === "default") {
+		if (SENTINEL_DEFAULT_NUMERIC_PATHS[path] && value === "default") {
 			settings.set(path, -1 as never);
 		} else if (schemaType === "record") {
 			let parsed: unknown;
