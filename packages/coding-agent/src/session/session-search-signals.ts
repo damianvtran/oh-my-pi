@@ -60,17 +60,28 @@ const BACKFILL_BATCH = 32;
 const BACKFILL_SUMMARY_MAX_CHARS = 400;
 
 /**
- * Index the listed sessions that have no index row yet.
+ * Index the listed sessions whose stored row is missing or out of date.
  *
  * Live sessions write their own row as they run, which means the index is empty
  * for every session that existed before it did — on first upgrade, the user's
  * entire history. Without this, keyword search is a feature that only starts
  * working tomorrow.
  *
- * The listing's own text is not enough to backfill from: `SessionInfo` is built
+ * Filling is not enough on its own, because a row is written once and the
+ * session file keeps moving. A session already indexed by an earlier picker
+ * open goes on being renamed by its own process, and any rename made where no
+ * index write happens — a session started before this feature existed, the
+ * stock upstream binary, a process killed mid-turn — is never reflected. The
+ * row then holds a name the picker does not display, so search and the list
+ * disagree about what a session is called and the user cannot find it by
+ * either. {@link SessionIndexStorage.outdatedSessionIds} therefore selects on
+ * title drift as well as absence, which costs one extra indexed column in a
+ * query the backfill already ran.
+ *
+ * The listing's own text is not enough to index from: `SessionInfo` is built
  * from the first 4KB of the file, which on a real session is spent before the
  * first message, leaving `allMessagesText` empty and the title as the only
- * evidence. So each unindexed session is re-read through
+ * evidence. So each selected session is re-read through
  * {@link readSessionSearchCorpus}, once, over a window wide enough to reach
  * actual conversation. `upsert` merges rather than replaces, so a later live
  * theme pass refines the row instead of fighting it.
@@ -95,12 +106,12 @@ export function backfillSessionIndex(
 	for (const session of sessions) {
 		if (!byId.has(session.id)) byId.set(session.id, session);
 	}
-	const missing = index.unindexedSessionIds([...byId.keys()]);
-	if (missing.length === 0) return;
+	const outdated = index.outdatedSessionIds([...byId.values()]);
+	if (outdated.length === 0) return;
 
 	let cursor = 0;
 	const step = async (): Promise<void> => {
-		const slice = missing.slice(cursor, cursor + BACKFILL_BATCH);
+		const slice = outdated.slice(cursor, cursor + BACKFILL_BATCH);
 		cursor += slice.length;
 		const records = await Promise.all(
 			slice.map(async (id): Promise<SessionIndexRecord | undefined> => {
@@ -108,21 +119,25 @@ export function backfillSessionIndex(
 				if (!session) return undefined;
 				const body = await readSessionSearchCorpus(session.path, storage);
 				// Title first so its words survive the keyword extractor's cap and
-				// its position bias, and so a session whose file could not be read
-				// still earns a row rather than being retried on every picker open.
+				// its position bias.
 				const corpus = [session.title ?? "", body].filter(Boolean).join(" ").trim();
-				if (!corpus) return undefined;
+				// A session with nothing to harvest — untitled, and empty or briefly
+				// unreadable — still earns its row. Skipping the write would leave it
+				// permanently selected and re-read on every picker open, which is the
+				// retry loop this pass exists to end. An all-null row costs one FTS
+				// mirror entry that matches nothing, and the session's own process
+				// fills it in the moment it has anything to say.
 				return {
 					sessionId: session.id,
 					cwd: session.cwd || undefined,
 					title: session.title,
-					keywords: extractSessionKeywords(corpus).join(" "),
-					summary: corpus.slice(0, BACKFILL_SUMMARY_MAX_CHARS),
+					keywords: corpus ? extractSessionKeywords(corpus).join(" ") : undefined,
+					summary: corpus ? corpus.slice(0, BACKFILL_SUMMARY_MAX_CHARS) : undefined,
 				};
 			}),
 		);
 		index.upsertMany(records.filter(record => record !== undefined));
-		if (cursor < missing.length) setTimeout(run, 0).unref?.();
+		if (cursor < outdated.length) setTimeout(run, 0).unref?.();
 	};
 	const run = (): void => {
 		step().catch(error => logger.warn("Session keyword index backfill failed", { error: String(error) }));
