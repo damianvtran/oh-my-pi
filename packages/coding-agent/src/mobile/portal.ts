@@ -690,11 +690,14 @@ button:active{filter:brightness(.94)}
 	${error ? `<div class="err">${escapeHtml(error)}</div>` : ""}
 	<label>username
 		<!-- Kept across a failure: re-rendering it empty made a mistyped password cost
-		     the username too, which on a phone keyboard is the more annoying half. -->
-		<input name="username" value="${escapeHtml(username)}" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+		     the username too, which on a phone keyboard is the more annoying half.
+		     Autofocus follows the field that still needs input, so a retry opens the
+		     keyboard on the password rather than on a username that is already right
+		     and would take the caret in front of its own text. -->
+		<input name="username" value="${escapeHtml(username)}" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required${username ? "" : " autofocus"}>
 	</label>
 	<label>password
-		<input name="password" type="password" autocomplete="current-password" required>
+		<input name="password" type="password" autocomplete="current-password" required${username ? " autofocus" : ""}>
 	</label>
 	<button type="submit">sign in</button>
 </form>
