@@ -198,6 +198,50 @@ There is deliberately no per-agent transcript view. The host exposes one
 byte-offset protocol and a reader worth the screen; the phone answers "how many,
 and what is each doing", not "what did that one say".
 
+### The composer
+
+Typing on a phone is the part of this app a browser fights hardest, so the
+composer is mostly a list of defences against WebKit.
+
+**Nothing zooms.** WebKit zooms the page whenever a focused control's computed
+font-size is under 16px, and on iOS it never zooms back out: tapping a 12px field
+once left the layout viewport wider than the screen for the rest of the visit.
+Every text-entry control is therefore 16px (`--input-size`) while the rest of the
+chrome stays at 12px. `user-scalable=no` and `maximum-scale=1` are not
+alternatives — WebKit ignores both by design so that pinch-zoom always works,
+which is the right call and the reason the size has to be the fix.
+
+**The width is fixed.** The shell's grid column is `minmax(0,1fr)`; left implicit
+it was sized to its widest item's max-content and the new-session `<select>`
+reports the width of its longest option, so one deep recent directory path
+stretched the whole app past the screen and made the document pannable.
+
+**The keyboard moves the app, not the page.** Chrome on Android resizes the layout
+viewport (`interactive-widget=resizes-content`) and `100dvh` handles it. iOS does
+not: the layout viewport stays, only the visual one shrinks, the composer ends up
+behind the keys, and WebKit scrolls the document to chase the caret with nothing
+scrolling it back. So while a keyboard is up the shell is sized from the visual
+viewport and the document is pinned to the top. A pinch-zoom shrinks the visual
+viewport the same way and is explicitly not treated as a keyboard.
+
+**The field grows.** A steer is regularly a paragraph or a pasted stack trace, so
+it is a textarea: one row up to five, then it scrolls. Past two rows it takes the
+whole composer width and `stop`/`send` wrap underneath, because sharing the row
+with them leaves 16 characters a line. The layout is decided at a fixed reference
+geometry — the compact width, measured with the class off — so it depends on the
+text and never on what the field was doing when the question was asked; deciding
+it at the current width oscillates, since the class sets the width the row count
+is measured at. Enter is a newline on a soft keyboard and send on a hardware one.
+
+**A draft belongs to its session.** The composer is one element shared by every
+session, so unsent text used to follow you across a switch with `send` armed. It
+is now stashed per pid, the card of a session holding one shows a `› draft` chip,
+and the map is pruned against the live session list — after two consecutive
+absences, because a restarting portal answers one empty list with every session
+still alive. A send captures its pid before the request, so a failure that lands
+after you have moved on goes back to its own session's draft rather than into
+whichever composer is on screen.
+
 ### Stop and resume
 
 Stop on the phone is the **Escape key, not a signal**: it aborts the running
