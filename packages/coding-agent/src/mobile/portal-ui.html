@@ -235,8 +235,13 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
 .turn { margin: 10px 0; }
 .turn:first-child { margin-top: 0; }
 
-/* user prompt — the TUI's ❯ badge line */
-.user-line { color: var(--fg); }
+/* user prompt — the TUI's ❯ badge line.
+   `pre-wrap` and `overflow-wrap` for the same reason `.think` and `.tool-body`
+   carry them: a prompt can be several lines. It could not be until the composer
+   became a textarea, so this rendered a pasted stack trace — the input the
+   textarea exists for — as one collapsed paragraph, and an unbroken 200-character
+   token as ~1600px of horizontal scroll inside the transcript. */
+.user-line { color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
 .user-line::before { content: "❯ "; color: var(--accent-text); }
 
 /* assistant prose — no chrome, like the terminal */
@@ -418,9 +423,6 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
    with the label. The gap above does that job instead. */
 #ask .opt::before { content: "›"; color: var(--accent-text); }
 .ask-err { margin-top: 8px; font-size: 11px; color: var(--err); }
-/* A steer the portal could not deliver: the text is put back in the field, and the
-   border is what says so without stealing a row from a phone-sized composer. */
-#msg.err { border-color: var(--err); }
 
 /* ── new-session form ────────────────────────────────────────────────── */
 #newform {
@@ -473,39 +475,74 @@ footer {
    set from the visual viewport, the only place that knows. */
 body.kb footer { padding-bottom: 8px; }
 /* Same 880px column as `.wrap`, so the input lines up with the transcript.
-   `flex-end` rather than `center`: the field grows with its content, and send
-   and stop belong beside its last line instead of floating at its middle. */
+   `flex-end` rather than `center`: the field grows with its content, and send and
+   stop belong beside its last line instead of floating at its middle. */
 footer .wrap { display: flex; gap: 8px; align-items: flex-end; padding: 0; }
-/* Pinned to the field's *first* line: the field's border plus its padding-top,
-   with the field's line box, so the glyph stays with the first row of text
-   however tall the field has grown. */
-.prompt { color: var(--accent-text); flex: none; align-self: flex-start; padding-top: 11px; line-height: var(--input-line); }
+/* Past one row the field takes the whole width and the buttons wrap under it.
+   Sharing the row with them costs the field 161px of a 390px screen — `stop` and
+   `send` hold their slots whether or not a turn is running — which left 17
+   characters per line, so the five-row cap showed about 85 characters in total and
+   an ordinary two-sentence steer already scrolled. Full width doubles that to 33
+   characters a line for 10px of transcript, and `send` does not move: the composer
+   is anchored to the bottom, so it grows upward and the buttons stay where the
+   thumb left them. `syncComposer` owns the class, and only removes it when the
+   field is emptied — see the hysteresis note there. */
+footer .wrap.grown { flex-wrap: wrap; }
+footer .wrap.grown .field { flex: 1 1 calc(100% - 20px); }
+footer .wrap.grown #turn { margin-left: auto; }
+/* Pinned to the field's *first* line, sharing its size and line box so the glyph
+   reads as the prompt leading that line rather than a chevron in the margin: same
+   `--input-size`, same line height, and a padding-top equal to the field's border
+   plus its padding. At 12px against 16px text its baseline sat 1.2px high. */
+.prompt {
+  color: var(--accent-text); flex: none; align-self: flex-start;
+  font-size: var(--input-size); line-height: var(--input-line); padding-top: 11px;
+  cursor: text;
+}
 /* A textarea, not a single-line input: a steer is regularly a paragraph or a
    pasted stack trace, and a one-line field showed a ~30-character window onto it
    with no way to see or fix what had already been typed. It grows from one row to
    five and then scrolls, so the transcript keeps the screen in the common case.
 
-   The vertical metrics are picked so that one row is exactly the 44px the rest of
-   the row's controls use — 21px line + 20px padding + 2px border — and `max-height`
-   is the same sum over five rows. `overflow-wrap` because a pasted URL is one
-   unbreakable token and must not be allowed to widen the viewport.
+   The chrome lives on `.field` and only the text lives in the textarea, which is
+   not tidiness: with the padding on the textarea the content scrolled *under* it,
+   so at the cap a sixth line showed as a slice through its x-height flush against
+   the rounded border — reading as clipping rather than as more below. With the
+   padding outside the scrollport the cap is exactly five line boxes and the sixth
+   line is cleanly outside it. It also makes the height arithmetic honest: the
+   textarea has no padding or border, so its `scrollHeight` *is* the height to set.
 
-   `overflow-y: hidden` is the resting state and `syncComposer` turns it to `auto`
-   only once the content is genuinely past the cap. It cannot simply stay `auto`:
-   WebKit reports 52px of scroll height for an *empty* textarea (the placeholder's
-   box), so on iOS the field was draggable while empty and a stray swipe scrolled
-   the placeholder out of sight, leaving what looks like a broken blank control. */
-#msg {
-  flex: 1; min-width: 0; min-height: 44px; padding: 10px 8px;
-  line-height: var(--input-line); max-height: calc(var(--input-line) * 5 + 22px);
-  resize: none; overflow-y: hidden; overflow-wrap: anywhere;
+   One row is the 44px the rest of the row's controls use: 21px line + 20px padding
+   + 2px border is 43, and `min-height` supplies the last pixel. */
+.field {
+  flex: 1; min-width: 0; display: flex; min-height: 44px; padding: 10px 8px;
   background: var(--bg-inset); border: 1px solid var(--hairline);
-  border-radius: var(--radius-ctl); color: var(--fg);
+  border-radius: var(--radius-ctl);
 }
+/* The field's only focus cue used to be the shared `--ring`, which measures 2.57:1
+   against the light background — under WCAG 1.4.11's 3:1 for a focus indicator.
+   This is the treatment `loginPage()` already uses, and its accent border measures
+   5.87:1. Applying it to the container rather than the textarea is what keeps the
+   ring outside the text. */
+.field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
+/* A steer the portal could not deliver: the text is put back in the field, and the
+   border is what says so without stealing a row from a phone-sized composer. */
+.field.err { border-color: var(--err); }
+#msg {
+  flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--fg);
+  line-height: var(--input-line); max-height: calc(var(--input-line) * 5);
+  resize: none; overflow-y: hidden; overflow-wrap: anywhere;
+}
+/* The container carries focus for both of them. */
+#msg:focus-visible { outline: none; }
 #msg::placeholder { color: var(--fg-faint); }
-/* Stop and resume are two states of one control, so they share one fixed slot:
-   the row's geometry cannot shift under a thumb that is already reaching for it. */
-#turn { flex: none; min-width: 84px; }
+/* Stop and resume are two states of one control, so they share one fixed slot: the
+   row's geometry cannot shift under a thumb that is already reaching for it. `send`
+   shares that width because the pair reads as a pair, and because a 84px `stop`
+   beside a 56px `send` made the secondary control the largest thing in the row —
+   the inversion `.nf-actions .btn-accent` exists to prevent in the other form.
+   76px is `resume`, the longest label either takes, plus 5px. */
+#turn, #send { flex: none; min-width: 76px; }
 
 @media (max-width: 640px) {
   .wrap { padding: 8px 10px 14px; }
@@ -540,10 +577,16 @@ footer .wrap { display: flex; gap: 8px; align-items: flex-end; padding: 0; }
   </div><div id="list"></div><div id="detail" hidden><div id="ask" role="group" aria-live="assertive" hidden></div><div id="log"></div><div id="todos"></div><div id="subagents"></div><div id="working" class="working" hidden></div></div></div></main>
   <footer id="composer" hidden>
     <div class="wrap">
-      <span class="prompt">›</span>
-      <!-- `enterkeyhint` is corrected at runtime: Enter is a newline on a soft
+      <!-- Decorative: the field carries its own name, and unhidden this glyph was
+           announced ahead of it. Tapping it focuses the field, so the 27px strip at
+           the screen's left edge is not dead to a thumb. -->
+      <span class="prompt" aria-hidden="true">›</span>
+      <!-- `aria-label` because the placeholder is the only other name this field has
+           and it both disappears on the first keystroke and changes between the
+           empty-session and ongoing-session states.
+           `enterkeyhint` is corrected at runtime: Enter is a newline on a soft
            keyboard and send on a hardware one. -->
-      <textarea id="msg" rows="1" placeholder="steer the agent" enterkeyhint="enter" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+      <div class="field"><textarea id="msg" rows="1" aria-label="steer this session" placeholder="steer the agent" enterkeyhint="enter" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></div>
       <!-- No `hidden` attribute: this slot is hidden with `visibility` so the row's
            geometry never depends on turn state, and `[hidden]`'s
            `display:none !important` would win over that and blank the control in
@@ -1154,13 +1197,14 @@ function renderTurnControl(isStreaming, isInterrupted) {
 }
 
 /* Composer placeholders, as constants because three paths set them and because they
-   have a hard width budget. The field is the only flexible item in a row of fixed
-   controls, which leaves it 180px on a 375px iPhone — 17 monospace characters at
-   16px. Longer copy does not ellipsise: a textarea wraps it to a second line that
-   the one-row field then clips mid-word, which is exactly what the previous copy
-   ("steer this session", "what should it work on?") did once the fields went to
-   16px. Measured at 375px and 390px. A 320px screen wraps either way — the field is
-   125px there — and is left as it was. */
+   have a hard width budget. A placeholder is only ever seen in the one-row state,
+   where the field shares its row with `stop` and `send` and so gets 180px on a
+   375px iPhone — 16 monospace characters at 16px, 17 at 390px. Longer copy does not
+   ellipsise: a textarea wraps it to a second line that the one-row field then clips
+   mid-word, which is exactly what the previous copy ("steer this session", "what
+   should it work on?") did once the fields went to 16px. Both strings below are 16
+   characters or fewer, measured at 375px and 390px. A 320px screen wraps either way
+   — the field is 125px there — and is left as it was. */
 const PLACEHOLDER_STEER = "steer the agent";
 const PLACEHOLDER_FIRST = "what to work on?";
 
@@ -1171,7 +1215,7 @@ const PLACEHOLDER_FIRST = "what to work on?";
    frame that follows `state` on connect has no cwd to pass and used to overwrite
    the guide with a version missing the one fact it exists to show. */
 function renderEmptyLog() {
-  $("log").innerHTML = `<div class="empty">no messages yet — send the first instruction below${
+  $("log").innerHTML = `<div class="empty">no messages yet — tell it what to work on${
     openCwd ? `<div class="card-cwd" style="display:block;margin-top:6px">${esc(openCwd)}</div>` : ""
   }</div>`;
   $("msg").placeholder = PLACEHOLDER_FIRST;
@@ -1223,7 +1267,7 @@ function open(pid) {
     if (!$("log").querySelector(".turn, .stopped")) renderEmptyLog();
   });
   es.addEventListener("transcript", e => {
-    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 40;
+    const atBottom = isAtBottom();
     const items = JSON.parse(e.data);
     if (items.length === 0) renderEmptyLog();
     else {
@@ -1252,7 +1296,7 @@ function open(pid) {
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
   es.addEventListener("todos", e => {
-    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
+    const atBottom = isAtBottom(60);
     $("todos").innerHTML = renderTodos(JSON.parse(e.data));
     if (atBottom) main.scrollTop = main.scrollHeight;
   });
@@ -1267,7 +1311,7 @@ function open(pid) {
      is already there and only its label, caret, state and the list below it change. */
   let lastSubagents = null;
   const paintSubagents = () => {
-    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
+    const atBottom = isAtBottom(60);
     const host = $("subagents");
     const html = renderSubagents(lastSubagents);
     const toggle = $("agtoggle");
@@ -1307,7 +1351,7 @@ function open(pid) {
     paintSubagents();
   });
   es.addEventListener("activity", e => {
-    const atBottom = main.scrollTop + main.clientHeight >= main.scrollHeight - 60;
+    const atBottom = isAtBottom(60);
     const a = JSON.parse(e.data);
     renderWorking(a);
     // Resume exists only for a cancelled turn. Ordinary idle means the work
@@ -1407,6 +1451,13 @@ $("back").onclick = () => {
   if (location.hash) history.replaceState(history.state, "", location.pathname + location.search);
   closeSession();
 };
+/* A failed send marks the field rather than the textarea now that the chrome lives
+   on the container, and marks it for assistive tech too: the red border is the only
+   signal, and a border is not announced. */
+function markSendFailed(failed) {
+  $("composer").querySelector(".field").classList.toggle("err", failed);
+  $("msg").setAttribute("aria-invalid", failed ? "true" : "false");
+}
 $("send").onclick = async () => {
   const text = $("msg").value.trim();
   if (!text) return;
@@ -1414,75 +1465,116 @@ $("send").onclick = async () => {
   syncComposer();
   const res = await post(`/api/sessions/${current}/prompt`, { text }).catch(() => null);
   if (res?.ok) {
-    $("msg").classList.remove("err");
+    markSendFailed(false);
     return;
   }
   // Never swallow what someone typed. Over a tunnel a dropped steer is ordinary,
   // and the composer looked identical to a successful send while the text was gone.
   $("msg").value = text;
-  $("msg").classList.add("err");
+  markSendFailed(true);
   syncComposer();
 };
-/* The five-row cap, read from the stylesheet rather than repeated here, and read
-   once because it is a constant. `Infinity` if it ever stops being a length, which
-   only turns the scroll toggle below into a no-op. */
+/* One row and the five-row cap, read from the stylesheet rather than repeated here,
+   and read once because both are constants. Falling back to `Infinity` for the cap
+   and `0` for the row only makes the two toggles below inert, never wrong. */
 let composerCap = 0;
-function composerCapOf(msg) {
-  if (!composerCap) composerCap = Number.parseFloat(getComputedStyle(msg).maxHeight) || Infinity;
-  return composerCap;
+let composerRow = 0;
+function measureComposer(msg) {
+  if (composerCap) return;
+  const style = getComputedStyle(msg);
+  composerCap = Number.parseFloat(style.maxHeight) || Infinity;
+  composerRow = Number.parseFloat(style.lineHeight) || 0;
+}
+/* The height the content wants, measured fresh. `auto` first, or `scrollHeight`
+   reports the height the field already has and it could only ever grow. The
+   textarea carries no padding or border of its own — `.field` owns the chrome — so
+   `scrollHeight` is exactly the height to set. */
+function composerHeightOf(msg) {
+  msg.style.height = "auto";
+  return msg.scrollHeight;
 }
 /* Everything that follows the field's value: the send button's enabled state, the
-   field's height and whether it scrolls. All three have to move on every path that
-   writes `value`, not just on input — a draft restored after a failed send is as
-   much a change of content as a keystroke.
+   field's height, whether it scrolls, and whether the composer has given the field
+   the whole width. All of them have to move on every path that writes `value`, not
+   just on input — a draft restored after a failed send is as much a change of
+   content as a keystroke.
    The accent fill is a promise that tapping does something. With an empty field it
    did nothing at all, which reads as an unresponsive app — and in the stopped
    state it advertised a dead primary next to the live `resume`. */
 function syncComposer() {
   const msg = $("msg");
+  measureComposer(msg);
   $("send").disabled = msg.value.trim().length === 0;
-  const pinned = isAtBottom();
+  const atBottom = isAtBottom();
+  const wrap = $("composer").querySelector(".wrap");
   if (msg.value === "") {
     // An empty field is one row by definition, and WebKit will not say so: asked for
-    // the `scrollHeight` of an empty textarea it answers ~1.5 rows (measured 52px
-    // against 42px for a one-character value, on the same element) because the
-    // placeholder's box is in the measurement. Trusting it left the field 10px
-    // taller than the row of 44px controls beside it, on the iPhone specifically.
-    // Dropping the inline height hands the sizing back to `min-height`, which is
-    // that one row exactly.
+    // the `scrollHeight` of an empty textarea it answers about 1.5 rows (measured
+    // 52px against 42px for a one-character value, on the same element) because the
+    // placeholder's box is in the measurement. Trusting it left the field 10px taller
+    // than the row of 44px controls beside it, on the iPhone specifically. Dropping
+    // the inline height hands the sizing back to `min-height`, which is one row.
+    wrap.classList.remove("grown");
     msg.style.height = "";
     msg.style.overflowY = "hidden";
   } else {
-    // Otherwise height comes from content, because a textarea has no intrinsic one.
-    // `auto` first, or `scrollHeight` reports the height the field already has and it
-    // could only ever grow. `scrollHeight` covers content and padding but not the
-    // border, which `box-sizing: border-box` makes the height property's job — the
-    // difference of the two heights is that border, measured rather than hard-coded.
-    msg.style.height = "auto";
-    const wanted = msg.scrollHeight + msg.offsetHeight - msg.clientHeight;
+    let wanted = composerHeightOf(msg);
+    /* The full-width layout latches on at the second row, and off only when the field
+       is emptied. It cannot be re-decided from the width it produces: text needing two
+       rows at 162px needs one at 330px, which would unlatch it, which would need two
+       rows again. Emptying is the one state whose row count does not depend on width.
+
+       Latching also has to happen *before* the height is settled, and that is why the
+       measurement runs a second time here: the first one answered for the narrow field,
+       and using it would leave a field sized for six rows showing three. The second
+       measurement only ever sets the height — never the latch — so there is no loop.
+
+       Rows rather than pixels: the textarea is a flex child of a box whose `min-height`
+       is the 44px tap floor, so at one row it stretches a pixel past its line box and a
+       `wanted > composerRow` test fired on a five-character draft. */
+    if (!wrap.classList.contains("grown") && composerRow && Math.round(wanted / composerRow) > 1) {
+      wrap.classList.add("grown");
+      wanted = composerHeightOf(msg);
+    }
     // Past the cap the assignment is clamped by `max-height`, and that is the only
     // state where the field itself scrolls. Below it the overflow stays off, because
     // WebKit claims a scrollable empty textarea and would let a swipe drag the text
     // out of a field that has room for all of it.
     msg.style.height = `${wanted}px`;
-    msg.style.overflowY = wanted > composerCapOf(msg) ? "auto" : "hidden";
+    msg.style.overflowY = wanted > composerCap ? "auto" : "hidden";
   }
-  if (pinned) main.scrollTop = main.scrollHeight;
+  if (atBottom) main.scrollTop = main.scrollHeight;
 }
 $("msg").oninput = syncComposer;
-/* Enter is a newline on a soft keyboard and send on a hardware one. A phone
-   keyboard's return key is the only way to type a newline at all, and every
-   messaging app on the platform spends it that way; `send` is a 44px accent
-   button one thumb-width to the right. A desktop guest keeps Enter-to-send with
-   Shift+Enter for a newline, which is the same split omp's own editor uses.
-   `isComposing` guards an IME candidate window, where Enter is a commit. */
-const softKeyboard = Boolean(matchMedia("(pointer: coarse)").matches);
-$("msg").enterKeyHint = softKeyboard ? "enter" : "send";
+/* Enter inserts a newline where the pointer is coarse and sends where it is fine.
+   On a phone the return key is the only way to type a newline at all, and every
+   messaging app on the platform spends it that way; `send` is a 44px accent button
+   one thumb-width away. A desktop guest keeps Enter-to-send with Shift+Enter for a
+   newline, the same split omp's own editor uses. `isComposing` guards an IME
+   candidate window, where Enter is a commit rather than a submit.
+
+   The pointer is a proxy and not a perfect one — it describes the pointing device,
+   not the keyboard, so an iPad with a keyboard folio and no trackpad reads as coarse
+   and takes the phone's behaviour. It is the closest signal a browser offers, and
+   the wrong answer there costs one tap on `send`. What it must not do is go stale:
+   the query is live, so plugging in a Magic Keyboard mid-session moves both the
+   policy and the key's own label. */
+const pointerQuery = matchMedia("(pointer: coarse)");
+let softKeyboard = pointerQuery.matches;
+function syncEnterPolicy() {
+  softKeyboard = pointerQuery.matches;
+  $("msg").enterKeyHint = softKeyboard ? "enter" : "send";
+}
+pointerQuery.addEventListener("change", syncEnterPolicy);
+syncEnterPolicy();
 $("msg").onkeydown = e => {
   if (e.key !== "Enter" || e.shiftKey || e.isComposing || softKeyboard) return;
   e.preventDefault();
   $("send").click();
 };
+/* The sigil is 27px of composer at the very edge of the screen, exactly where a
+   thumb reaching for the start of the field lands, and it used to focus nothing. */
+$("composer").querySelector(".prompt").onclick = () => $("msg").focus();
 
 /* The one turn control: stop while a turn runs, resume after one was stopped.
    Both give immediate feedback by disabling — over a phone tunnel the round trip
@@ -1819,15 +1911,24 @@ if (viewport) {
     pending = 0;
     const inset = keyboardInsetOf(innerHeight, viewport);
     // Read before the write: resizing the shell is what changes `scrollHeight`.
-    const pinned = isAtBottom();
-    if (inset > 0) document.documentElement.style.setProperty("--app-h", `${viewport.height}px`);
+    const atBottom = isAtBottom();
+    // The uncovered height, not `viewport.height`. The two differ by `offsetTop`,
+    // which is how far WebKit has already scrolled the *visual* viewport down inside
+    // the layout viewport to chase the caret — a scroll `scrollTo` cannot undo,
+    // because it moves the document and the document here is not the scroller. Using
+    // `viewport.height` while that offset stood left the shell short by exactly it:
+    // a dead strip under the composer and as much of the header pushed off the top.
+    if (inset > 0) document.documentElement.style.setProperty("--app-h", `${innerHeight - inset}px`);
     else document.documentElement.style.removeProperty("--app-h");
     document.body.classList.toggle("kb", inset > 0);
-    // WebKit has usually already scrolled the document chasing the caret. The
-    // resized shell puts the caret on screen without it, and leaving the scroll
-    // is what strands the header off the top of the screen afterwards.
-    if (scrollY !== 0) scrollTo(0, 0);
-    if (pinned) main.scrollTop = main.scrollHeight;
+    // Only while a keyboard is up. WebKit's caret chase can also scroll the document
+    // when it is scrollable, and that scroll is what strands the header off the top
+    // of the screen once the keyboard goes away. Outside that case this must not
+    // fire at all: `visualViewport` emits `scroll` throughout a pinch-pan, and
+    // resetting the page under the gesture is the very thing the scale gate in
+    // `keyboardInsetOf` exists to avoid.
+    if (inset > 0 && scrollY !== 0) scrollTo(0, 0);
+    if (atBottom) main.scrollTop = main.scrollHeight;
   };
   // Both events fire in bursts for the length of the keyboard animation, so this
   // coalesces to one layout write per frame.
