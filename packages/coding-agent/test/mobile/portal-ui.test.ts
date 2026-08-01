@@ -362,24 +362,29 @@ function fieldFontSizes(): { selector: string; px: number }[] {
 	const inputSize = Number.parseFloat(tokens[0]);
 	const fields = /(^|[\s,>])(input|textarea|select|#msg|#newdir|#newsuggest)\b/;
 	const sizes: { selector: string; px: number }[] = [];
-	/* Lengths are converted rather than parsed raw. `rem` and `em` on these selectors
-	   resolve against the 16px root (nothing in the chain sets a font-size in a
-	   relative unit), and `pt` is 4/3 of a px. Without this, `font: 1rem …` — a valid
-	   16px declaration — reported 1 and failed the floor with the message of a real
-	   regression. An unrecognised unit is 0, because the guard must not wave through a
-	   size it cannot read. */
-	const PX_PER_UNIT: Record<string, number> = { px: 1, rem: 16, em: 16, pt: 4 / 3 };
+	/* Lengths are converted rather than parsed raw, or `font: 1rem …` — a valid 16px
+	   declaration — reads as 1 and fails the floor with the message of a real
+	   regression. `rem` is the 16px root; `em` is the *parent's* size, which for every
+	   one of these selectors is the 12px body, so `1em` on a field really is a 12px
+	   field and has to fail; `pt` is 4/3 of a px.
+
+	   Anything this cannot read resolves to 0 rather than being skipped — a keyword
+	   like `smaller`, an unknown unit, a `calc()` around the token. The guard's whole
+	   job is to refuse a size it cannot vouch for, and dropping those rows silently is
+	   how `font-size: calc(var(--input-size) - 4px)` would report a compliant 16. */
+	const PX_PER_UNIT: Record<string, number> = { px: 1, rem: 16, em: 12, pt: 4 / 3 };
 	const sizeOf = (value: string): number => {
-		if (value.includes("var(--input-size)")) return inputSize;
-		const length = /((?:\d*\.)?\d+)([a-z%]*)/.exec(value);
-		if (!length) return Number.NaN;
+		const declared = value.trim();
+		if (declared === "var(--input-size)") return inputSize;
+		if (declared.includes("var(--input-size)")) return 0;
+		const length = /((?:\d*\.)?\d+)([a-z%]*)/.exec(declared);
+		if (!length) return 0;
 		return Number.parseFloat(length[1]) * (PX_PER_UNIT[length[2]] ?? 0);
 	};
 	for (const [, selector, body] of style.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
 		if (!fields.test(selector)) continue;
 		for (const [, value] of body.matchAll(/(?:^|;)\s*font-size:\s*([^;]+)/g)) {
-			const px = sizeOf(value.trim());
-			if (Number.isFinite(px)) sizes.push({ selector: selector.trim(), px });
+			sizes.push({ selector: selector.trim(), px: sizeOf(value) });
 		}
 		// `font:` carries a size in every valid form except `inherit`/`initial`/`unset`,
 		// and it resets `font-size` whether or not the author meant to.
