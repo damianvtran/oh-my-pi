@@ -178,6 +178,9 @@ main { overflow-y: auto; overscroll-behavior: contain; }
    would win on specificity, which silently rendered the chip the same faint grey as
    `pid`. */
 .meta .k.ag-run { color: var(--accent-text); }
+/* Same two-selector reason as `.ag-run` above, and the same accent: an unsent draft
+   is the reader's own business on a card that is otherwise all about the agent. */
+.meta .k.draft { color: var(--accent-text); }
 .empty { padding: 24px 12px; color: var(--fg-faint); text-align: center; }
 
 /* status dot — mirrors the TUI's ● run-state marker */
@@ -482,15 +485,19 @@ body.kb footer { padding-bottom: 8px; }
    stop belong beside its last line instead of floating at its middle. */
 footer .wrap { display: flex; gap: 8px; align-items: flex-end; padding: 0; }
 /* Past `COMPACT_ROWS` rows the field takes the whole width and the buttons wrap
-   under it. Sharing the row with them costs the field 180px on any width — the
-   sigil, two 72px buttons and three 8px gaps, none of which shrink, since `stop`
-   and `send` hold their slots whether or not a turn is running. That leaves 16
-   characters a line at 390px and 15 at 375px, so the five-row cap showed about 80
-   characters in total and an ordinary two-sentence steer already scrolled. Full
-   width doubles it to 33 characters a line at 390px.
+   under it. Sharing the row with them costs the field 160px — two 72px buttons and
+   the two 8px gaps around them, none of which shrink, since `stop` and `send` hold
+   their slots whether or not a turn is running. (The sigil and its own gap are the
+   other 20px of the row, and are paid in both layouts, which is what the basis
+   below reserves.) That leaves the field 16 characters a line at 390px and 15 at
+   375px, so the five-row cap showed about 80 characters in total and an ordinary
+   two-sentence steer already scrolled. Full width doubles it to 33 at 390px.
 
-   It costs 52px of transcript at a given row count, and 32px at the row where it
-   actually engages, because the wide field needs fewer rows for the same text. And
+   It costs 52px of transcript at a given row count — the wrapped button line is a
+   44px control plus the 8px gap — but the wide field needs fewer rows for the same
+   text, so what it actually costs at the moment it engages is 52 minus a 21px row:
+   11px at the first length that engages it, where the wide field needs one row
+   against two, and 31px at every longer one, where it needs two against three.
    `send` does not move: the composer is anchored to the bottom, so it grows upward
    and the buttons stay where the thumb left them. `syncComposer` owns the class and
    re-derives it from the text on every sync — see the reference-geometry note. */
@@ -1096,6 +1103,14 @@ async function refresh() {
   if (!res.ok) return;
   const sessions = await res.json();
   lastSessions = sessions;
+  /* A draft outlives its session otherwise, and the key is a pid: the OS recycles
+     those, so a tab left open long enough would hand a dead session's draft to an
+     unrelated new one with `send` armed — the wrong-agent send this map exists to
+     prevent. Pruning against the authoritative list also bounds the map, which
+     nothing else does. Safe here because `refresh` only runs on the list view, so no
+     draft is being typed at the time. */
+  const live = new Set(sessions.map(s => s.pid));
+  for (const pid of drafts.keys()) if (!live.has(pid)) drafts.delete(pid);
   // The reason to open the portal is a session that needs an answer, then one that is
   // working, then one whose turn ended but whose detached subagents have not — server
   // order is arbitrary and buries all three.
@@ -1131,6 +1146,15 @@ async function refresh() {
             <span>${esc(s.model ?? "?")}</span>
             <span class="k">${work}</span>
             ${s.queued ? `<span class="k">${s.queued} queued</span>` : ""}
+            <!-- The one chip on this card that is about the reader rather than the
+                 agent. A draft is now scoped to its own session, which is right and
+                 which also made it invisible: three sessions and ten minutes later
+                 nothing said that one of them still holds a sentence you meant to
+                 send. Beside the queued chip because both are something waiting to
+                 reach that session, and carrying the composer's own sigil so the
+                 mark and the control it points at share a glyph.
+                 No backticks in this block: it is inside a template literal. -->
+            ${drafts.has(s.pid) ? `<span class="k draft">› draft</span>` : ""}
             ${s.subagents ? `<span class="k ag-run">⟳ ${s.subagents} agent${s.subagents === 1 ? "" : "s"}</span>` : ""}
             <span class="k" style="display:flex;align-items:center;gap:5px">
               <span class="gauge"><i style="width:${Math.min(100, pct).toFixed(0)}%"></i></span>${pct.toFixed(1)}%
@@ -1530,22 +1554,39 @@ function markSendFailed(failed) {
 $("send").onclick = async () => {
   const text = $("msg").value.trim();
   if (!text) return;
+  /* The session this steer belongs to, captured before the await. `current` can move
+     while the POST is in flight — a tunnel makes that window long enough to walk away
+     in — and everything below is about the session the text was written for, not the
+     one being looked at when the answer arrives. Without this the restore put A's
+     steer into B's composer with `send` armed, and painted B's field red for a
+     failure that happened somewhere else. */
+  const pid = current;
   $("msg").value = "";
   syncComposer();
-  const res = await post(`/api/sessions/${current}/prompt`, { text }).catch(() => null);
+  const res = await post(`/api/sessions/${pid}/prompt`, { text }).catch(() => null);
+  const stillOpen = current === pid;
   if (res?.ok) {
-    markSendFailed(false);
+    if (stillOpen) markSendFailed(false);
     return;
   }
   // Never swallow what someone typed. Over a tunnel a dropped steer is ordinary,
   // and the composer looked identical to a successful send while the text was gone.
-  $("msg").value = text;
-  markSendFailed(true);
-  syncComposer();
+  if (stillOpen) {
+    $("msg").value = text;
+    markSendFailed(true);
+    syncComposer();
+    return;
+  }
+  // The user has moved on. The text goes back to its own session's draft, which is
+  // where opening that session again will produce it. It arrives without the red
+  // border — the border marks a field, and this failure has no field to mark until
+  // the session is on screen again — but it arrives, which is the promise that
+  // matters.
+  drafts.set(pid, text);
 };
 /* How many rows the compact field is allowed before the composer hands it the whole
-   width. Two, not one: a two-row draft still reads fine at 17 characters a line, and
-   the wide layout costs 32px of transcript to show the same text — a bad trade for a
+   width. Two, not one: a two-row draft still reads fine at 16 characters a line, and
+   the wide layout costs 31px of transcript to show the same text — a bad trade for a
    steer of 20-odd characters, which is most of them. The third row is where the
    compact field genuinely stops being enough. */
 const COMPACT_ROWS = 2;
