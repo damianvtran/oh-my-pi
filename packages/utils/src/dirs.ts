@@ -758,6 +758,11 @@ export function getHistoryDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "history.db", "data");
 }
 
+/** Get the path to session-index.db (SQLite keyword index for session search). */
+export function getSessionIndexDbPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "session-index.db", "data");
+}
+
 /** Get the path to models.db (model cache database). */
 export function getModelDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "models.db", "data");

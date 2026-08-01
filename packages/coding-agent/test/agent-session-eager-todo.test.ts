@@ -336,13 +336,18 @@ describe("AgentSession eager todo enforcement", () => {
 		await recreateSession({ "title.refreshOnReplan": true });
 		session.setTitleSystemPrompt(customPrompt);
 		await session.setSessionName("Old auto title", "auto");
+		// Four convertible turns: the theme refresh is growth-gated, so a session
+		// this short would otherwise be too new to have earned a re-title.
 		const priorUser: AgentMessage = {
 			role: "user",
 			content: "rework parser diagnostics",
-			timestamp: Date.now() - 1,
+			timestamp: Date.now() - 2,
 		};
 		session.agent.appendMessage(priorUser);
 		session.sessionManager.appendMessage(priorUser);
+		const priorAssistant = createAssistantMessage("Looking at the parser recovery path.");
+		session.agent.appendMessage(priorAssistant);
+		session.sessionManager.appendMessage(priorAssistant);
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "stop",
 			content: [{ type: "text", text: "<title>plan/parser-diagnostics</title>" }],
@@ -363,6 +368,68 @@ describe("AgentSession eager todo enforcement", () => {
 		const request = completeSimpleMock.mock.calls[0]?.[1] as { systemPrompt?: string[] } | undefined;
 		expect(request?.systemPrompt?.[0]).toBe(customPrompt);
 		expect(request?.systemPrompt?.[1]).toContain("<title>");
+	});
+
+	it("does not re-title a session whose transcript has barely grown since the last replan", async () => {
+		// The reported bug: every todo replan renamed the session, so a session
+		// that replans each turn was renamed each turn, to whatever had just been
+		// typed. A two-turn session has not earned a re-title.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("Old auto title", "auto");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		await session.prompt("replan parser diagnostics");
+
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe("Old auto title");
+	});
+
+	it("anchors the theme refresh on the opening turn and the current title", async () => {
+		// The refresh must see what the session was originally about, not just its
+		// tail: a tail-only window is why the name used to track the cursor.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("Rework parser diagnostics", "auto");
+		const opening: AgentMessage = {
+			role: "user",
+			content: "rework parser diagnostics end to end",
+			timestamp: Date.now() - 5,
+		};
+		session.agent.appendMessage(opening);
+		session.sessionManager.appendMessage(opening);
+		// Enough filler that a last-few-turns window would have dropped the opening.
+		for (let i = 0; i < 8; i++) {
+			const filler = createAssistantMessage(`intermediate step ${i} touching unrelated-file-${i}.ts`);
+			session.agent.appendMessage(filler);
+			session.sessionManager.appendMessage(filler);
+		}
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Rework parser diagnostics</title>" }],
+		} as never);
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		await session.prompt("now check unrelated-file-9.ts");
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		const request = completeSimpleMock.mock.calls[0]?.[1] as { messages?: Array<{ content?: string }> } | undefined;
+		const titleInput = request?.messages?.[0]?.content ?? "";
+		expect(titleInput).toContain("rework parser diagnostics end to end");
+		expect(titleInput).toContain("<current-title>\nRework parser diagnostics\n</current-title>");
+		expect(titleInput).toContain("<elided/>");
+		expect(session.sessionManager.getSessionName()).toBe("Rework parser diagnostics");
 	});
 
 	it("does not refresh todo-init titles when the current title is user-authored", async () => {
@@ -419,13 +486,17 @@ describe("AgentSession eager todo enforcement", () => {
 		try {
 			await recreateSession({ "title.refreshOnReplan": true }, { agentKind: "sub" });
 			await session.setSessionName("Old auto title", "auto");
+			// Four convertible turns: see the growth gate note above.
 			const priorUser: AgentMessage = {
 				role: "user",
 				content: "rework parser diagnostics",
-				timestamp: Date.now() - 1,
+				timestamp: Date.now() - 2,
 			};
 			session.agent.appendMessage(priorUser);
 			session.sessionManager.appendMessage(priorUser);
+			const priorAssistant = createAssistantMessage("Looking at the parser recovery path.");
+			session.agent.appendMessage(priorAssistant);
+			session.sessionManager.appendMessage(priorAssistant);
 			const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 				stopReason: "stop",
 				content: [{ type: "text", text: "<title>Parser diagnostics replan</title>" }],

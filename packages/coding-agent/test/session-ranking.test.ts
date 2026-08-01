@@ -3,10 +3,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { gzipSync } from "node:zlib";
 import { runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
-import {
-	mergeSessionRanking,
-	rankSessionSearchMatches,
-} from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
+import { rankSessionSearchMatches } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
 import { listSessions, type SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getHistoryDbPath, getSessionsDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -114,23 +111,26 @@ describe("slotted session headers", () => {
 });
 
 describe("rankSessionSearchMatches", () => {
-	it("keeps literal query matches recency-first instead of overvaluing earlier word position", () => {
+	it("keeps equally-matched sessions in recency order", () => {
 		const oldPrefix = makeSession("old-prefix", {
-			title: "Resize Buffer Issue",
+			title: "Resize buffer issue",
 			firstMessage: "why doesnt resize properly clean the scrollback buffer",
 			modified: new Date("2024-01-01T00:00:00Z"),
 		});
 		const oldControls = makeSession("old-controls", {
-			title: "Resize Controls",
+			title: "Resize controls",
 			firstMessage: "can you make width height resize always clean reset",
 			modified: new Date("2024-01-01T01:00:00Z"),
 		});
 		const recentWindow = makeSession("recent-window", {
-			title: "Window Resize Issues",
+			title: "Window resize issues",
 			firstMessage: "when i resize the window rapidly i end up with this",
 			modified: new Date("2024-01-03T00:00:00Z"),
 		});
 
+		// All three carry "resize" as a title word, so nothing separates them on
+		// relevance and recency decides — the behaviour the old recency-first
+		// ranking got right and this ranker has to preserve.
 		expect(ids(rankSessionSearchMatches([oldPrefix, oldControls, recentWindow], "resize"))).toEqual([
 			"recent-window",
 			"old-controls",
@@ -138,13 +138,52 @@ describe("rankSessionSearchMatches", () => {
 		]);
 	});
 
-	it("keeps literal substring matches ahead of pure fuzzy matches", () => {
+	it("ranks a title match above a newer session that only mentions the query in its transcript", () => {
+		const named = makeSession("named", {
+			title: "Fix session ranking",
+			modified: new Date("2024-01-01T00:00:00Z"),
+		});
+		const mentions = makeSession("mentions", {
+			title: "Unrelated refactor",
+			allMessagesText: "we should probably look at session ranking later on",
+			modified: new Date("2024-06-01T00:00:00Z"),
+		});
+
+		expect(ids(rankSessionSearchMatches([mentions, named], "ranking"))).toEqual(["named", "mentions"]);
+	});
+
+	it("ranks a whole-word title hit above a mid-word substring hit", () => {
+		const word = makeSession("word", { title: "Auth proxy rollout" });
+		const substring = makeSession("substring", { title: "Reauthorize the tenant" });
+
+		expect(ids(rankSessionSearchMatches([substring, word], "auth"))).toEqual(["word", "substring"]);
+	});
+
+	it("ranks the project directory above a body mention", () => {
+		const project = makeSession("project", { cwd: "/repo/user-dashboard", title: "Ship the banner" });
+		const mention = makeSession("mention", {
+			cwd: "/repo/core",
+			title: "Ship the banner",
+			allMessagesText: "the user-dashboard team asked for this",
+		});
+
+		expect(ids(rankSessionSearchMatches([mention, project], "user-dashboard"))).toEqual(["project", "mention"]);
+	});
+
+	it("rewards the full phrase appearing in the title over the same words scattered", () => {
+		const phrase = makeSession("phrase", { title: "Fix login button" });
+		const scattered = makeSession("scattered", { title: "Login flow: fix the submit button" });
+
+		expect(ids(rankSessionSearchMatches([scattered, phrase], "fix login"))).toEqual(["phrase", "scattered"]);
+	});
+
+	it("keeps literal matches ahead of pure fuzzy matches", () => {
 		const fuzzyRecent = makeSession("fuzzy-recent", {
-			title: "Render Buffer",
+			title: "Render buffer",
 			modified: new Date("2024-01-03T00:00:00Z"),
 		});
 		const literalOld = makeSession("literal-old", {
-			title: "RB Notes",
+			title: "RB notes",
 			modified: new Date("2024-01-01T00:00:00Z"),
 		});
 
@@ -152,14 +191,24 @@ describe("rankSessionSearchMatches", () => {
 	});
 
 	it("filters low-quality pure fuzzy matches while keeping exact matches", () => {
-		const exact = makeSession("exact", {
-			title: "MN Discussion",
-		});
-		const lowQuality = makeSession("low-quality", {
-			title: "Random Notes",
-		});
+		const exact = makeSession("exact", { title: "MN discussion" });
+		const lowQuality = makeSession("low-quality", { title: "Random notes" });
 
 		expect(ids(rankSessionSearchMatches([exact, lowQuality], "mn"))).toEqual(["exact"]);
+	});
+
+	it("requires every query token to match", () => {
+		const both = makeSession("both", { title: "Deploy the billing service" });
+		const one = makeSession("one", { title: "Deploy the portal" });
+
+		expect(ids(rankSessionSearchMatches([one, both], "deploy billing"))).toEqual(["both"]);
+	});
+
+	it("matches a session ID by prefix but not by an interior fragment", () => {
+		const prefix = makeSession("abc123def", { title: "Nothing relevant" });
+
+		expect(ids(rankSessionSearchMatches([prefix], "abc12"))).toEqual(["abc123def"]);
+		expect(rankSessionSearchMatches([prefix], "23de")).toEqual([]);
 	});
 
 	it("returns all sessions unchanged for an empty query", () => {
@@ -169,45 +218,63 @@ describe("rankSessionSearchMatches", () => {
 	});
 });
 
-describe("mergeSessionRanking", () => {
-	it("orders prompt-history matches first by history rank, then metadata-only matches", () => {
-		const all = ["a", "b", "c", "d", "e"].map(id => makeSession(id));
-		const byId = new Map(all.map(s => [s.id, s]));
-		const fuzzy = ["a", "b", "c"].map(id => byId.get(id)!); // metadata matches, already ranked
-		const historyIds = ["c", "a", "e"]; // prompt matches, best→worst
+describe("rankSessionSearchMatches signals", () => {
+	it("surfaces a session that only the prompt history matched", () => {
+		const named = makeSession("named", { title: "Buffer resize" });
+		const deep = makeSession("deep", { title: "Unrelated work" });
 
-		// c,a,e matched prompt history → lead in history order; b is metadata-only.
-		expect(ids(mergeSessionRanking(all, fuzzy, historyIds))).toEqual(["c", "a", "e", "b"]);
+		// "deep" has no text match at all: the prompt lives past the 4KB listing
+		// prefix, so history is the only evidence it is relevant.
+		expect(ids(rankSessionSearchMatches([named, deep], "resize", { historyIds: ["deep"] }))).toEqual([
+			"named",
+			"deep",
+		]);
 	});
 
-	it("never drops a metadata match and appends it after prompt-history matches", () => {
-		const all = ["a", "b"].map(id => makeSession(id));
-		const byId = new Map(all.map(s => [s.id, s]));
-		const fuzzy = [byId.get("a")!];
+	it("orders history-only matches by their history rank", () => {
+		const all = ["a", "b", "c"].map(id => makeSession(id, { title: "Unrelated work" }));
 
-		expect(ids(mergeSessionRanking(all, fuzzy, ["b"]))).toEqual(["b", "a"]);
-	});
-
-	it("surfaces purely history-matched sessions ordered by prompt-history rank", () => {
-		const all = ["a", "b", "c"].map(id => makeSession(id));
-
-		// No fuzzy match at all; c is the best prompt-history match, then a. b is excluded.
-		expect(ids(mergeSessionRanking(all, [], ["c", "a"]))).toEqual(["c", "a"]);
+		expect(ids(rankSessionSearchMatches(all, "resize", { historyIds: ["c", "a"] }))).toEqual(["c", "a"]);
 	});
 
 	it("ignores history matches for sessions absent from the list", () => {
-		const all = [makeSession("a")];
-		const byId = new Map(all.map(s => [s.id, s]));
+		const only = makeSession("a", { title: "Unrelated work" });
 
-		// "z" is matched in history but not resumable from this list → dropped.
-		expect(ids(mergeSessionRanking(all, [byId.get("a")!], ["a", "z"]))).toEqual(["a"]);
+		expect(ids(rankSessionSearchMatches([only], "resize", { historyIds: ["a", "z"] }))).toEqual(["a"]);
 	});
 
-	it("returns the fuzzy result unchanged when there are no history matches", () => {
-		const all = ["a", "b"].map(id => makeSession(id));
-		const byId = new Map(all.map(s => [s.id, s]));
-		const fuzzy = ["b", "a"].map(id => byId.get(id)!);
+	it("never lets a history hit displace the session the query actually names", () => {
+		const named = makeSession("named", { title: "Session ranking rewrite" });
+		const historical = makeSession("historical", {
+			title: "Something else",
+			allMessagesText: "ranking",
+		});
 
-		expect(ids(mergeSessionRanking(all, fuzzy, []))).toEqual(["b", "a"]);
+		// The regression this ranker exists to fix: promoting history matches
+		// wholesale put "historical" first even though "named" is the answer.
+		expect(ids(rankSessionSearchMatches([named, historical], "ranking", { historyIds: ["historical"] }))).toEqual([
+			"named",
+			"historical",
+		]);
+	});
+
+	it("admits and orders keyword-index hits that the listing text never contained", () => {
+		const indexed = makeSession("indexed", { title: "Nightly job cleanup" });
+		const weaker = makeSession("weaker", { title: "Another chore" });
+
+		const ranked = rankSessionSearchMatches([weaker, indexed], "cron", {
+			indexScores: new Map([
+				["indexed", 0.9],
+				["weaker", 0.2],
+			]),
+		});
+		expect(ids(ranked)).toEqual(["indexed", "weaker"]);
+	});
+
+	it("returns the text ranking unchanged when no signal fired", () => {
+		const a = makeSession("a", { title: "Resize a", modified: new Date("2024-01-02T00:00:00Z") });
+		const b = makeSession("b", { title: "Resize b", modified: new Date("2024-01-01T00:00:00Z") });
+
+		expect(ids(rankSessionSearchMatches([a, b], "resize", {}))).toEqual(["a", "b"]);
 	});
 });

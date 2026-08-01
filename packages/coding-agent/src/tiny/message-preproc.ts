@@ -105,8 +105,9 @@ export function preprocessTinyMessage(message: string): string {
 /** Envelope produced by {@link formatTitleConversationContext}. Anchored to both
  *  ends so ordinary user text merely containing a chat snippet never matches. */
 const CHAT_CONTEXT_ENVELOPE = /^\s*<chat>[\s\S]*<\/chat>\s*$/;
-/** Structural tags emitted by {@link formatTitleConversationContext}. */
-const CHAT_SCAFFOLD_TAG = /<\/?(?:chat|user|assistant|think)>/g;
+/** Structural tags emitted by {@link formatTitleConversationContext}, including
+ *  the self-closing `<elided/>` gap marker. */
+const CHAT_SCAFFOLD_TAG = /<\/?(?:chat|current-title|user|assistant|think|elided)\/?>/g;
 
 /** True when `message` is a preformatted replan context from
  *  {@link formatTitleConversationContext} — already cleaned per turn and
@@ -116,8 +117,9 @@ export function isPreformattedChatContext(message: string): boolean {
 	return CHAT_CONTEXT_ENVELOPE.test(message);
 }
 
-/** Drop the `<chat>`/`<user>`/`<assistant>`/`<think>` scaffolding, keeping turn
- *  text. Used for token-level signal checks on preformatted contexts. */
+/** Drop the `<chat>`/`<current-title>`/`<user>`/`<assistant>`/`<think>`/`<elided/>`
+ *  scaffolding, keeping turn text. Used for token-level signal checks on
+ *  preformatted contexts. */
 export function stripChatScaffolding(message: string): string {
 	return message.replace(CHAT_SCAFFOLD_TAG, " ");
 }
@@ -129,17 +131,41 @@ export function formatTitleUserMessage(message: string): string {
 	return `<user>\n${preprocessTinyMessage(message)}\n</user>`;
 }
 
-/** One recent conversation turn supplied to title refresh after replanning. */
+/** One sampled conversation turn supplied to session theme titling. */
 export interface TitleConversationTurn {
 	role: "user" | "assistant";
 	text?: string;
 	thinking?: string;
 }
 
-/** Format preprocessed recent context for title generation after a todo replan. */
-export function formatTitleConversationContext(turns: readonly TitleConversationTurn[]): string {
+/** Marks turns the sampler dropped, so the model does not read the head and the
+ *  tail of a long conversation as adjacent. Self-closing: there is no content to
+ *  wrap, and a paired tag would invite the model to invent some. */
+const ELIDED_MARKER = "<elided/>";
+
+/**
+ * Format sampled conversation turns for session theme titling.
+ *
+ * `currentTitle` is emitted as the first child of `<chat>` rather than as a
+ * sibling of it: {@link isPreformattedChatContext} anchors on the envelope
+ * spanning the entire string, so anything outside `</chat>` would make the
+ * context look like ordinary user text and send it through
+ * {@link preprocessTinyMessage}, whose paired-tag stripping eats the envelope.
+ *
+ * `elidedAfter` indexes into `turns`; the marker is emitted once, immediately
+ * before the first turn past that index that survives cleaning. Anchoring it to
+ * the following turn rather than the preceding one keeps it out of the trailing
+ * position, where it would read as "the conversation continues" instead of
+ * "turns were skipped here".
+ */
+export function formatTitleConversationContext(
+	turns: readonly TitleConversationTurn[],
+	options?: { currentTitle?: string; elidedAfter?: number },
+): string {
 	const formattedTurns: string[] = [];
-	for (const turn of turns) {
+	const elidedAfter = options?.elidedAfter;
+	let elisionEmitted = false;
+	for (const [index, turn] of turns.entries()) {
 		const sections: string[] = [];
 		// Clean raw content before adding structural tags so paired-tag stripping
 		// cannot consume the `<user>`/`<assistant>` scaffolding added below.
@@ -148,8 +174,19 @@ export function formatTitleConversationContext(turns: readonly TitleConversation
 		const thinking = turn.role === "assistant" ? cleanTinyMessage(turn.thinking ?? "").trim() : "";
 		if (thinking) sections.push(`<think>\n${thinking}\n</think>`);
 		if (sections.length === 0) continue;
+		if (!elisionEmitted && elidedAfter !== undefined && index > elidedAfter) {
+			formattedTurns.push(ELIDED_MARKER);
+			elisionEmitted = true;
+		}
 		formattedTurns.push(`<${turn.role}>\n${sections.join("\n\n")}\n</${turn.role}>`);
 	}
 	if (formattedTurns.length === 0) return "";
+	const currentTitle = options?.currentTitle?.trim();
+	// The name already in use leads the envelope: the model is asked to keep it
+	// unless the subject changed, and that judgement is cheapest when it reads the
+	// name before the turns. Already a normalized short line, so no cleaning.
+	if (currentTitle) {
+		formattedTurns.unshift(`<current-title>\n${currentTitle}\n</current-title>`);
+	}
 	return truncateTinyMessage(`<chat>\n${formattedTurns.join("\n\n")}\n</chat>`);
 }
