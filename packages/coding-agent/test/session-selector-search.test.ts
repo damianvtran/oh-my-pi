@@ -8,10 +8,10 @@ import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-list
 
 /**
  * Contracts of the session picker's incremental search engine: a keystroke
- * synchronously surfaces literal matches, background fuzzy chunks converge to
- * exactly the synchronous reference ranking, stale scans are orphaned by a
- * query change, and the prompt-history SQLite lookup is debounced off the
- * keystroke path.
+ * synchronously surfaces field-scored matches, background fuzzy chunks
+ * converge to exactly the synchronous reference ranking, stale scans are
+ * orphaned by a query change, and the SQLite-backed signal lookups are
+ * debounced off the keystroke path.
  */
 
 function makeSession(id: string, overrides: Partial<SessionInfo> = {}): SessionInfo {
@@ -62,7 +62,7 @@ function makeHarness(sessions: SessionInfo[], historyMatcher?: (query: string) =
 		() => {},
 		() => {},
 		() => {},
-		historyMatcher ? { historyMatcher } : {},
+		historyMatcher ? { signalMatcher: query => ({ historyIds: historyMatcher(query) }) } : {},
 	);
 	selector.setOnRequestRender(() => renders++);
 	const list = selector.getSessionList();
@@ -141,7 +141,7 @@ describe("session picker incremental search", () => {
 		expect(ids(harness.filtered())).toEqual(ids(rankSessionSearchMatches(sessions, "zzmarker")));
 	});
 
-	it("debounces the prompt-history lookup off the keystroke path and promotes its matches once typing pauses", () => {
+	it("debounces the signal lookup off the keystroke path and promotes its matches once typing pauses", () => {
 		const sessions = makeCorpus();
 		const calls: string[] = [];
 		const harness = makeHarness(sessions, query => {
@@ -164,7 +164,7 @@ describe("session picker incremental search", () => {
 		expect(harness.renders()).toBeGreaterThan(rendersBefore);
 	});
 
-	it("skips the history merge after the user moves the selection", () => {
+	it("skips the signal merge after the user moves the selection", () => {
 		const sessions = makeCorpus();
 		const calls: string[] = [];
 		const harness = makeHarness(sessions, query => {
@@ -181,7 +181,7 @@ describe("session picker incremental search", () => {
 		expect(ids(harness.filtered())).toEqual(before);
 	});
 
-	it("dispose cancels pending fuzzy chunks and the history merge", () => {
+	it("dispose cancels pending fuzzy chunks and the signal merge", () => {
 		const sessions = makeCorpus();
 		const calls: string[] = [];
 		const harness = makeHarness(sessions, query => {
@@ -189,7 +189,7 @@ describe("session picker incremental search", () => {
 			return ["s-105"];
 		});
 
-		harness.type("zzmarkr"); // partial fuzzy scan + scheduled history merge
+		harness.type("zzmarkr"); // partial fuzzy scan + scheduled signal merge
 		const partial = harness.filtered().length;
 		harness.selector.dispose();
 		vi.runAllTimers();
