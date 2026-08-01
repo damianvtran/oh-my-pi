@@ -495,9 +495,11 @@ footer .wrap { display: flex; gap: 8px; align-items: flex-end; padding: 0; }
 
    It costs 52px of transcript at a given row count — the wrapped button line is a
    44px control plus the 8px gap — but the wide field needs fewer rows for the same
-   text, so what it actually costs at the moment it engages is 52 minus a 21px row:
+   text, so what it actually costs is much less than that and varies with length:
    11px at the first length that engages it, where the wide field needs one row
-   against two, and 31px at every longer one, where it needs two against three.
+   against three, and 31px across the band above that, where it needs two against
+   three. Further up the two converge to about 10px, and between 65 and 66
+   characters the wide layout is briefly the cheaper of the two.
    `send` does not move: the composer is anchored to the bottom, so it grows upward
    and the buttons stay where the thumb left them. `syncComposer` owns the class and
    re-derives it from the text on every sync — see the reference-geometry note. */
@@ -1108,9 +1110,20 @@ async function refresh() {
      unrelated new one with `send` armed — the wrong-agent send this map exists to
      prevent. Pruning against the authoritative list also bounds the map, which
      nothing else does. Safe here because `refresh` only runs on the list view, so no
-     draft is being typed at the time. */
+     draft is being typed at the time.
+
+     Two consecutive absences, not one. A failed request returns above this, but a
+     *successful* one can still answer `[]` with every session alive: the portal
+     serves before its first scan has attached anything, so restarting it — which
+     `omp mobile update` does routinely — produces one empty tick that a
+     single-miss rule would spend every draft on. A pid is not recycled into a new
+     session inside the ~4s two misses take. */
   const live = new Set(sessions.map(s => s.pid));
-  for (const pid of drafts.keys()) if (!live.has(pid)) drafts.delete(pid);
+  for (const pid of drafts.keys()) {
+    if (live.has(pid)) draftMisses.delete(pid);
+    else if (draftMisses.has(pid)) { drafts.delete(pid); draftMisses.delete(pid); }
+    else draftMisses.set(pid, true);
+  }
   // The reason to open the portal is a session that needs an answer, then one that is
   // working, then one whose turn ended but whose detached subagents have not — server
   // order is arbitrary and buries all three.
@@ -1290,6 +1303,10 @@ function renderEmptyLog() {
    never to swallow what someone typed while making the wrong-agent send impossible.
    In memory only: a draft is not worth persisting past the tab. */
 const drafts = new Map();
+/* Pids seen absent from one session list, so the prune in `refresh` can require two
+   in a row before it spends someone's text. Keyed the same way, cleared the moment
+   the pid comes back. */
+const draftMisses = new Map();
 function stashDraft() {
   if (current === null) return;
   const text = $("msg").value;
@@ -1582,11 +1599,17 @@ $("send").onclick = async () => {
   // border — the border marks a field, and this failure has no field to mark until
   // the session is on screen again — but it arrives, which is the promise that
   // matters.
-  drafts.set(pid, text);
+  //
+  // Joined rather than assigned, because leaving that session is exactly what may
+  // have stashed something else under this pid: typing on after tapping `send` and
+  // then walking away puts the newer text here first, and overwriting it would be
+  // this file's only path that swallows what someone typed.
+  const stashed = drafts.get(pid);
+  drafts.set(pid, stashed && stashed !== text ? `${text}\n${stashed}` : text);
 };
 /* How many rows the compact field is allowed before the composer hands it the whole
    width. Two, not one: a two-row draft still reads fine at 16 characters a line, and
-   the wide layout costs 31px of transcript to show the same text — a bad trade for a
+   the wide layout costs 32px of transcript to show the same text — a bad trade for a
    steer of 20-odd characters, which is most of them. The third row is where the
    compact field genuinely stops being enough. */
 const COMPACT_ROWS = 2;
