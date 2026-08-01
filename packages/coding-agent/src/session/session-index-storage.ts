@@ -43,6 +43,16 @@ export interface SessionIndexHit {
 	score: number;
 }
 
+/**
+ * A listed session as the backfill sees it: enough to decide whether the stored
+ * row still describes the session on disk. Structurally satisfied by
+ * `SessionInfo`, so the picker passes its listing straight through.
+ */
+export interface SessionIndexEntry {
+	id: string;
+	title?: string;
+}
+
 type FtsRow = { session_id: string; rank: number };
 type LikeRow = { session_id: string };
 
@@ -295,29 +305,54 @@ LIMIT ?
 	}
 
 	/**
-	 * Which of `sessionIds` have no row yet. Drives the picker's backfill: the
-	 * index is written by live sessions as they run, so every session that
-	 * predates the index — the entire existing corpus on first upgrade — is
-	 * unfindable by keyword until something fills it in.
+	 * Which of `sessions` need indexing: those with no row yet, and those whose
+	 * stored title no longer matches the one in the session file.
+	 *
+	 * Filling missing rows is what makes keyword search work on a corpus that
+	 * predates the index. Reconciling drifted ones is what keeps it working.
+	 * A row is written once, by whichever process reaches the session first,
+	 * and the file keeps being renamed long afterwards — by a running session
+	 * whose binary predates this index, by the stock upstream build, by any
+	 * process that dies before its own write lands. Nothing ever re-read the
+	 * row, so search went on matching a name the picker no longer displays:
+	 * the user searches for the title they can see and the session does not
+	 * come back, while the one hit they do get is labelled with a name they
+	 * never chose.
+	 *
+	 * Comparison is on the trimmed title, and a session file with no title
+	 * never counts as drifted — `upsert` preserves absent fields, so
+	 * re-indexing one could not change the row and would re-select it forever.
 	 */
-	unindexedSessionIds(sessionIds: readonly string[]): string[] {
-		if (sessionIds.length === 0) return [];
-		const known = new Set<string>();
+	outdatedSessionIds(sessions: readonly SessionIndexEntry[]): string[] {
+		if (sessions.length === 0) return [];
+		const storedTitles = new Map<string, string>();
 		try {
-			for (let start = 0; start < sessionIds.length; start += SESSION_ID_CHUNK) {
-				const chunk = sessionIds.slice(start, start + SESSION_ID_CHUNK);
+			for (let start = 0; start < sessions.length; start += SESSION_ID_CHUNK) {
+				const ids = sessions.slice(start, start + SESSION_ID_CHUNK).map(session => session.id);
 				const rows = this.#db
-					.prepare(`SELECT session_id FROM session_index WHERE session_id IN (${chunk.map(() => "?").join(",")})`)
-					.all(...(chunk as [string, ...string[]])) as Array<{ session_id: string }>;
-				for (const row of rows) known.add(row.session_id);
+					.prepare(
+						`SELECT session_id, title FROM session_index WHERE session_id IN (${ids.map(() => "?").join(",")})`,
+					)
+					.all(...(ids as [string, ...string[]])) as Array<{ session_id: string; title: string | null }>;
+				for (const row of rows) storedTitles.set(row.session_id, row.title?.trim() ?? "");
 			}
 		} catch (error) {
-			// Treating every session as indexed is the safe failure: it skips the
+			// Treating every session as current is the safe failure: it skips the
 			// backfill rather than rewriting rows that may already be better.
-			logger.warn("SessionIndexStorage unindexedSessionIds failed", { error: String(error) });
+			logger.warn("SessionIndexStorage outdatedSessionIds failed", { error: String(error) });
 			return [];
 		}
-		return sessionIds.filter(id => !known.has(id));
+		const outdated: string[] = [];
+		for (const session of sessions) {
+			const stored = storedTitles.get(session.id);
+			if (stored === undefined) {
+				outdated.push(session.id);
+				continue;
+			}
+			const title = session.title?.trim();
+			if (title && title !== stored) outdated.push(session.id);
+		}
+		return outdated;
 	}
 
 	/** Upsert a batch in one transaction; the backfill's write path. */

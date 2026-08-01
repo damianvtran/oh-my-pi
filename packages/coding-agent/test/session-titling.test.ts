@@ -12,7 +12,12 @@ import {
 	THEME_REFRESH_MIN_TURNS,
 	THEME_TITLE_SYSTEM_PROMPT,
 } from "@oh-my-pi/pi-coding-agent/session/session-titling";
-import { isPreformattedChatContext, stripChatScaffolding } from "@oh-my-pi/pi-coding-agent/tiny/message-preproc";
+import {
+	isPreformattedChatContext,
+	MAX_TINY_MESSAGE_CHARS,
+	stripChatScaffolding,
+} from "@oh-my-pi/pi-coding-agent/tiny/message-preproc";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 /** Distinct, code-block-free turn text so each sampled turn is identifiable in the output. */
 function userTurns(count: number): AgentMessage[] {
@@ -21,6 +26,22 @@ function userTurns(count: number): AgentMessage[] {
 		content: [{ type: "text" as const, text: `request number ${i} about the subject` }],
 		timestamp: i + 1,
 	}));
+}
+
+/** A turn long enough that no per-turn budget can hold it whole. */
+function long(label: string): string {
+	return `${label} ${"lorem ipsum dolor sit amet ".repeat(200)}`;
+}
+
+function userTurn(text: string, timestamp: number): AgentMessage {
+	return { role: "user", content: [{ type: "text", text }], timestamp };
+}
+
+/** Assistant turn with optional reasoning, which the sampler wraps in `<think>`. */
+function assistantTurn(text: string, thinking?: string): AgentMessage {
+	const message = createAssistantMessage(text);
+	if (!thinking) return message;
+	return { ...message, content: [{ type: "thinking", thinking }, ...message.content] };
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -166,5 +187,80 @@ describe("buildSessionThemeContext", () => {
 	it("returns an empty context when no message carries titleable content", () => {
 		expect(buildSessionThemeContext([])).toBe("");
 		expect(buildSessionThemeContext([{ role: "user", content: [], timestamp: 1 }])).toBe("");
+	});
+
+	it("keeps every sampled turn intact when the transcript is far larger than the bound", () => {
+		// The bug this pins: the bound used to be applied to the assembled
+		// envelope, so a real session — one long opening request and verbose
+		// assistant turns — came out as a head slice and a tail slice of the
+		// *envelope*. Middle turns disappeared, `<elided/>` disappeared with them,
+		// and the surviving fragments opened and closed mid-tag.
+		const messages: AgentMessage[] = Array.from({ length: 40 }, (_, i) =>
+			i % 2 === 0
+				? userTurn(long(`turn number ${i} about the subject`), i + 1)
+				: assistantTurn(long(`reply number ${i} about the subject`), long(`reasoning about turn ${i}`)),
+		);
+
+		const context = buildSessionThemeContext(messages, { currentTitle: "Rework session titling" });
+
+		const sampled = THEME_CONTEXT_HEAD_TURNS + THEME_CONTEXT_TAIL_TURNS;
+		expect(countOccurrences(context, "<user>\n") + countOccurrences(context, "<assistant>\n")).toBe(sampled);
+		expect(countOccurrences(context, "</user>")).toBe(countOccurrences(context, "<user>\n"));
+		expect(countOccurrences(context, "</assistant>")).toBe(countOccurrences(context, "<assistant>\n"));
+		// Thinking is budgeted as its own body precisely so its tags survive:
+		// truncating text and thinking as one string cut the opening `<think>`
+		// off every oversized assistant turn and left the closing tag behind.
+		expect(countOccurrences(context, "<think>")).toBe(countOccurrences(context, "</think>"));
+		expect(countOccurrences(context, "<think>")).toBeGreaterThan(0);
+		expect(context).toContain("<elided/>");
+		expect(context).toContain("<current-title>\nRework session titling\n</current-title>");
+		// Each sampled turn is still identifiable, which is the whole point of
+		// sampling the head: turn 0 states the subject.
+		expect(context).toContain("turn number 0 about the subject");
+		expect(context).toContain("reply number 39 about the subject");
+		expect(isPreformattedChatContext(context)).toBe(true);
+	});
+
+	it("holds the tiny-model bound while spending the omission inside oversized turns", () => {
+		const messages: AgentMessage[] = Array.from({ length: 40 }, (_, i) => userTurn(long(`turn number ${i}`), i + 1));
+
+		const context = buildSessionThemeContext(messages, { currentTitle: "Rework session titling" });
+
+		expect(context.length).toBeLessThanOrEqual(MAX_TINY_MESSAGE_CHARS);
+		// Every turn was over its share, so every one carries an omission marker
+		// rather than some turns being deleted outright.
+		expect(countOccurrences(context, "chars omitted")).toBe(THEME_CONTEXT_HEAD_TURNS + THEME_CONTEXT_TAIL_TURNS);
+	});
+
+	it("holds the bound even when the current title is itself enormous", () => {
+		// `currentTitle` is the session name, which nothing bounds — an imported
+		// or model-authored one can be arbitrarily long, and it is subtracted from
+		// the budget the turns share.
+		const messages: AgentMessage[] = Array.from({ length: 40 }, (_, i) => userTurn(long(`turn ${i}`), i + 1));
+
+		const context = buildSessionThemeContext(messages, { currentTitle: "x".repeat(5000) });
+
+		expect(context.length).toBeLessThanOrEqual(MAX_TINY_MESSAGE_CHARS);
+		expect(context).toContain("<current-title>");
+		expect(context).toContain("</current-title>");
+		expect(isPreformattedChatContext(context)).toBe(true);
+	});
+
+	it("gives a long turn the budget its short neighbours cannot use", () => {
+		// Equal shares would truncate the opening request — the turn that states
+		// the subject — while one-line acknowledgements sat on budget they had no
+		// use for.
+		const messages: AgentMessage[] = [
+			userTurn(`opening request ${"describing the subject in detail ".repeat(100)}`, 1),
+			...Array.from({ length: 6 }, (_, i) => assistantTurn(`ok ${i}`)),
+		];
+
+		const context = buildSessionThemeContext(messages);
+
+		// The short turns are whole, and the opening keeps far more than an equal
+		// seventh of the budget would have allowed.
+		for (let i = 0; i < 6; i++) expect(context).toContain(`ok ${i}`);
+		const openingLength = context.length - context.replace(/describing the subject in detail /g, "").length;
+		expect(openingLength).toBeGreaterThan(MAX_TINY_MESSAGE_CHARS / 2);
 	});
 });

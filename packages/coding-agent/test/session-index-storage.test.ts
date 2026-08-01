@@ -153,6 +153,73 @@ describe("SessionIndexStorage.search", () => {
 	});
 });
 
+describe("SessionIndexStorage.outdatedSessionIds", () => {
+	it("selects sessions that have no row yet", () => {
+		const storage = freshStorage();
+		storage.upsert({ sessionId: "indexed", title: "deploy the gateway" });
+
+		expect(
+			storage.outdatedSessionIds([
+				{ id: "indexed", title: "deploy the gateway" },
+				{ id: "fresh", title: "rework the parser" },
+			]),
+		).toEqual(["fresh"]);
+	});
+
+	it("selects a session whose file title no longer matches the stored one", () => {
+		// The reported bug: the row is written once, the session keeps being
+		// renamed by a process that does not write the index, and search then
+		// matches a name the picker no longer shows.
+		const storage = freshStorage();
+		storage.upsert({ sessionId: "drifted", title: "RFC for notifications and work queues" });
+
+		expect(
+			storage.outdatedSessionIds([{ id: "drifted", title: "Bootstrap notification-svc from RFC pillar 1" }]),
+		).toEqual(["drifted"]);
+	});
+
+	it("stops selecting a drifted session once it has been re-indexed", () => {
+		// Without this the picker re-reads the same files on every keystroke-free
+		// open, forever.
+		const storage = freshStorage();
+		storage.upsert({ sessionId: "drifted", title: "old name" });
+		storage.upsert({ sessionId: "drifted", title: "new name" });
+
+		expect(storage.outdatedSessionIds([{ id: "drifted", title: "new name" }])).toEqual([]);
+	});
+
+	it("ignores whitespace-only differences between the file and the row", () => {
+		const storage = freshStorage();
+		storage.upsert({ sessionId: "spaced", title: "deploy the gateway" });
+
+		expect(storage.outdatedSessionIds([{ id: "spaced", title: "  deploy the gateway  " }])).toEqual([]);
+	});
+
+	it("never selects an indexed session whose file carries no title", () => {
+		// `upsert` preserves absent fields, so re-indexing could not change the
+		// row; selecting it would be an unbounded re-read of the same file.
+		const storage = freshStorage();
+		storage.upsert({ sessionId: "untitled", title: "harvested name", keywords: "gateway" });
+
+		expect(storage.outdatedSessionIds([{ id: "untitled" }])).toEqual([]);
+		expect(storage.outdatedSessionIds([{ id: "untitled", title: "   " }])).toEqual([]);
+	});
+
+	it("selects across more sessions than one statement batch holds", () => {
+		const storage = freshStorage();
+		const sessions = Array.from({ length: 950 }, (_, i) => ({ id: `bulk-${i}`, title: `deploy ${i}` }));
+		for (const session of sessions) storage.upsert({ sessionId: session.id, title: session.title });
+		// One row in the last chunk drifts; the chunked IN() lookup must still see it.
+		const drifted = { id: "bulk-949", title: "deploy 949 renamed" };
+
+		expect(storage.outdatedSessionIds([...sessions.slice(0, 949), drifted])).toEqual(["bulk-949"]);
+	});
+
+	it("returns nothing for an empty list", () => {
+		expect(freshStorage().outdatedSessionIds([])).toEqual([]);
+	});
+});
+
 describe("SessionIndexStorage.prune", () => {
 	it("removes the row and its FTS mirror entry", () => {
 		const storage = freshStorage();
