@@ -65,6 +65,9 @@
 :root {
   --hairline: color-mix(in srgb, var(--fg) 10%, transparent);
   --hover-wash: color-mix(in srgb, var(--fg) 5%, transparent);
+  /* The error counterpart of `--accent-muted`, derived rather than declared per
+     palette so it can only ever be the `--err` that is actually in force. */
+  --err-muted: color-mix(in srgb, var(--err) 18%, transparent);
   --radius-card: 8px; --radius-ctl: 6px;
   --line-height: 18px;
   /* Text-entry controls are 16px while everything else stays 12px, and that is
@@ -478,15 +481,19 @@ body.kb footer { padding-bottom: 8px; }
    `flex-end` rather than `center`: the field grows with its content, and send and
    stop belong beside its last line instead of floating at its middle. */
 footer .wrap { display: flex; gap: 8px; align-items: flex-end; padding: 0; }
-/* Past one row the field takes the whole width and the buttons wrap under it.
-   Sharing the row with them costs the field 161px of a 390px screen — `stop` and
-   `send` hold their slots whether or not a turn is running — which left 17
-   characters per line, so the five-row cap showed about 85 characters in total and
-   an ordinary two-sentence steer already scrolled. Full width doubles that to 33
-   characters a line for 10px of transcript, and `send` does not move: the composer
-   is anchored to the bottom, so it grows upward and the buttons stay where the
-   thumb left them. `syncComposer` owns the class, and only removes it when the
-   field is emptied — see the hysteresis note there. */
+/* Past `COMPACT_ROWS` rows the field takes the whole width and the buttons wrap
+   under it. Sharing the row with them costs the field 180px on any width — the
+   sigil, two 72px buttons and three 8px gaps, none of which shrink, since `stop`
+   and `send` hold their slots whether or not a turn is running. That leaves 16
+   characters a line at 390px and 15 at 375px, so the five-row cap showed about 80
+   characters in total and an ordinary two-sentence steer already scrolled. Full
+   width doubles it to 33 characters a line at 390px.
+
+   It costs 52px of transcript at a given row count, and 32px at the row where it
+   actually engages, because the wide field needs fewer rows for the same text. And
+   `send` does not move: the composer is anchored to the bottom, so it grows upward
+   and the buttons stay where the thumb left them. `syncComposer` owns the class and
+   re-derives it from the text on every sync — see the reference-geometry note. */
 footer .wrap.grown { flex-wrap: wrap; }
 /* The 20px this reserves is the sigil's pinned width plus the row gap. Pinned
    because the reserve is arithmetic: the glyph's natural advance is 9.6-9.9px
@@ -530,9 +537,14 @@ footer .wrap.grown #turn { margin-left: auto; }
    5.87:1. Applying it to the container rather than the textarea is what keeps the
    ring outside the text. */
 .field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
-/* A steer the portal could not deliver: the text is put back in the field, and the
-   border is what says so without stealing a row from a phone-sized composer. */
+/* A steer the portal could not deliver: the text is put back in the field, the line
+   at the end of the transcript names the failure, and the border says which control
+   it belongs to. The halo goes with the border, because this is the *normal* look of
+   a failure rather than an edge case — tapping `send` on iOS does not blur the
+   textarea, so the field is still focused when the failure paints, and the accent
+   halo drew a pink wash around a red ring. */
 .field.err { border-color: var(--err); }
+.field.err:focus-within { border-color: var(--err); box-shadow: 0 0 0 3px var(--err-muted); }
 #msg {
   flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--fg);
   line-height: var(--input-line); max-height: calc(var(--input-line) * 5);
@@ -1218,10 +1230,11 @@ function renderTurnControl(isStreaming, isInterrupted) {
 
    A placeholder is only ever seen in the compact state, where the field shares its
    row with `stop` and `send`. That leaves it 153px of content on a 375px iPhone and
-   168px on a 390px one: 15 and 17 monospace characters at 16px. The two rules that
-   set it are `#turn, #send`'s `min-width` and `.prompt`'s `font-size` — both moved in
-   this change, which is how copy that had been measured at 390px ended up wrapping at
-   375px. Change either and re-measure the strings.
+   168px on a 390px one, and the face advances 9.891px: 15 characters at 375px and
+   16 at 390px, the narrower being the one that binds. The two rules that set the
+   budget are `#turn, #send`'s `min-width` and `.prompt`'s `font-size` — both moved in
+   this change, which is how copy measured at 390px ended up wrapping at 375px.
+   Change either and re-measure the strings against the widest that fits.
 
    Longer copy does not ellipsise: a textarea wraps it to a second line that the
    one-row field then hides, so the resting composer read `steer the` and nobody could
@@ -1244,6 +1257,22 @@ function renderEmptyLog() {
   $("msg").placeholder = PLACEHOLDER_FIRST;
 }
 
+/* An unsent draft belongs to the session it was typed in. The composer is one
+   element shared by every session, so without this the text simply stayed in the
+   field across a switch: a steer written for one agent sat in another's composer
+   with `send` armed and nothing to say where it came from — and now that a failed
+   send's red border is cleared on `open()` (correctly, it described the other
+   session), there is no cue left at all. Stashing per pid keeps the file's promise
+   never to swallow what someone typed while making the wrong-agent send impossible.
+   In memory only: a draft is not worth persisting past the tab. */
+const drafts = new Map();
+function stashDraft() {
+  if (current === null) return;
+  const text = $("msg").value;
+  if (text) drafts.set(current, text);
+  else drafts.delete(current);
+}
+
 function open(pid) {
   // Close whatever is streaming first. `back` used to be the only way into this
   // function, so nothing here did; a deep link into an already-open tab (which the
@@ -1254,6 +1283,8 @@ function open(pid) {
   // A collapse choice belongs to the session it was made in; another session's
   // fan-out is a different size and deserves the size-based default again.
   agentsOpen = null;
+  // Before `current` moves: the draft in the field still belongs to the old session.
+  stashDraft();
   current = pid;
   if (location.hash !== `#${pid}`) {
     // `pushState` changes the hash without firing `hashchange`; `open()` is
@@ -1275,6 +1306,8 @@ function open(pid) {
   $("log").textContent = "";
   $("todos").innerHTML = ""; $("subagents").innerHTML = "";
   $("msg").placeholder = PLACEHOLDER_STEER;
+  // This session's own draft, or an empty field. `syncComposer` below sizes it.
+  $("msg").value = drafts.get(pid) ?? "";
   // Every other panel is cleared here for the reason above, and a failure belongs to
   // the session it happened in just as much as a subagent list does: without this the
   // composer opened red, and announced itself invalid, in a session that never saw it.
@@ -1456,6 +1489,9 @@ const post = (url, body) =>
    the entry instead of unwinding it left a duplicate `/` per open/close cycle,
    which made swipe-back a no-op once per session browsed. */
 function closeSession() {
+  // Same reason as in `open()`: the draft survives a trip to the list and back, and
+  // it survives it attached to the session it was written for.
+  stashDraft();
   es?.close(); es = null; current = null;
   $("list").hidden = false; $("detail").hidden = true;
   $("back").hidden = true; $("composer").hidden = true;

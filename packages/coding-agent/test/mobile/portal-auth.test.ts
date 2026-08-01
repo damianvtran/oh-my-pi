@@ -251,6 +251,23 @@ describe("portal login page", () => {
 		expect(await res.text()).toContain("incorrect username or password");
 	});
 
+	/*
+	 * The retry form keeps the username so only the password has to be retyped on a
+	 * phone keyboard — and that means the form now renders a value the *client*
+	 * supplied, into attribute position, on an unauthenticated route. The escaping is
+	 * the reason that is safe, so it is asserted rather than assumed.
+	 */
+	it("keeps the submitted username on the retry form without letting it inject markup", async () => {
+		const hostile = `a"><script>alert(1)</script>`;
+		const res = await fetch(url("/login"), { ...FORM_POST, body: loginBody(hostile, "wrong") });
+		const body = await res.text();
+		expect(res.status).toBe(401);
+		expect(body).toContain(`value="a&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"`);
+		expect(body).not.toContain("<script>alert(1)</script>");
+		// The password is never echoed, whatever happens to the username.
+		expect(body).not.toContain("wrong");
+	});
+
 	it("accepts good credentials with a 303 and a signed cookie", async () => {
 		const res = await fetch(url("/login?next=%2F"), { ...FORM_POST, body: loginBody(USERNAME, PASSWORD) });
 		expect(res.status).toBe(303);

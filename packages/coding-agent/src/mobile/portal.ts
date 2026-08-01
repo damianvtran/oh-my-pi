@@ -431,7 +431,9 @@ class Portal implements PortalHandle {
 				if (!ok) {
 					// Lowercase and unpunctuated, like every other failure string in the
 					// product: "could not send that answer — try again", "start failed".
-					return new Response(loginPage("incorrect username or password", nextOf(url)), {
+					// The username is echoed back (escaped) so only the password has to be
+					// retyped; the password never is.
+					return new Response(loginPage("incorrect username or password", nextOf(url), user), {
 						status: 401,
 						headers: LOGIN_HTML,
 					});
@@ -633,7 +635,7 @@ function nextOf(url: URL): string {
  * `maximum-scale=1` are not alternatives — WebKit ignores both so that pinch-zoom
  * always works.
  */
-function loginPage(error: string | undefined, next: string): string {
+function loginPage(error: string | undefined, next: string, username = ""): string {
 	return `<!doctype html>
 <html lang="en">
 <head>
@@ -687,7 +689,9 @@ button:active{filter:brightness(.94)}
 	<div class="brand"><b>omp</b><span>remote access</span></div>
 	${error ? `<div class="err">${escapeHtml(error)}</div>` : ""}
 	<label>username
-		<input name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+		<!-- Kept across a failure: re-rendering it empty made a mistyped password cost
+		     the username too, which on a phone keyboard is the more annoying half. -->
+		<input name="username" value="${escapeHtml(username)}" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
 	</label>
 	<label>password
 		<input name="password" type="password" autocomplete="current-password" required>
