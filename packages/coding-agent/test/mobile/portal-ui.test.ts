@@ -121,7 +121,11 @@ interface PortalElementStub {
 	value: string;
 	dataset: Record<string, string>;
 	style: Record<string, string>;
-	classList: { add(...names: string[]): void; remove(...names: string[]): void };
+	classList: {
+		add(...names: string[]): void;
+		remove(...names: string[]): void;
+		toggle(name: string, on?: boolean): void;
+	};
 	textContent: string;
 	innerHTML: string;
 	placeholder: string;
@@ -160,14 +164,34 @@ interface PortalNavigationHarness {
 
 function loadPortalNavigation(options: { hash?: string; state?: unknown } = {}): PortalNavigationHarness {
 	const script = portalScript();
+	/*
+	 * `querySelector` answers with a stub rather than `null`, cached per selector so
+	 * two lookups of the same child are the same object. The composer's chrome lives
+	 * on wrapper elements the script reaches for by class (`.wrap`, `.field`,
+	 * `.prompt`), and a `null` there is not a faithful stand-in for the real DOM — it
+	 * is a missing element, which the script is right to fail on.
+	 */
 	const makeElement = (): PortalElementStub => {
 		const attributes = new Map<string, string>();
+		const children = new Map<string, PortalElementStub>();
+		const classes = new Set<string>();
 		const element: PortalElementStub = {
 			hidden: false,
 			value: "",
 			dataset: {},
 			style: {},
-			classList: { add: () => {}, remove: () => {} },
+			classList: {
+				add: (...names) => {
+					for (const name of names) classes.add(name);
+				},
+				remove: (...names) => {
+					for (const name of names) classes.delete(name);
+				},
+				toggle: (name, on) => {
+					if (on ?? !classes.has(name)) classes.add(name);
+					else classes.delete(name);
+				},
+			},
 			textContent: "",
 			innerHTML: "",
 			placeholder: "",
@@ -180,7 +204,14 @@ function loadPortalNavigation(options: { hash?: string; state?: unknown } = {}):
 			setAttribute: (name, value) => attributes.set(name, value),
 			removeAttribute: name => attributes.delete(name),
 			getAttribute: name => attributes.get(name) ?? null,
-			querySelector: () => null,
+			querySelector: selector => {
+				let child = children.get(selector);
+				if (!child) {
+					child = makeElement();
+					children.set(selector, child);
+				}
+				return child;
+			},
 			querySelectorAll: () => [],
 		};
 		return element;
@@ -255,6 +286,10 @@ function loadPortalNavigation(options: { hash?: string; state?: unknown } = {}):
 		EventSource: sink,
 		fetch: () => Promise.withResolvers<Response>().promise,
 		matchMedia: () => sink,
+		// The composer reads its row height and five-row cap off the stylesheet once.
+		// These are the two values `#msg` actually resolves to, so the row arithmetic
+		// under test runs on the numbers it runs on in a browser.
+		getComputedStyle: () => ({ lineHeight: "21px", maxHeight: "105px" }),
 	};
 	const load = new Function(
 		"stubs",
@@ -291,10 +326,21 @@ describe("portal UI script", () => {
 });
 
 /**
- * Every text-entry control's effective font-size, as the browser would resolve it
- * from this file's one stylesheet. Deliberately narrow: it walks the rules whose
- * selector names a field, resolves the single custom property they use, and
- * ignores everything else.
+ * Every font size that lands on a text-entry control, as the browser would resolve
+ * it from this file's one stylesheet.
+ *
+ * There is no cascade model here and there does not need to be, but there does need
+ * to be enough of one that the plausible ways of reintroducing a sub-16px field are
+ * caught rather than stepped over. Three shapes matter and all three were misses in
+ * the first version of this scan:
+ *
+ *  - the `font:` SHORTHAND, which also sets `font-size`. The stylesheet already has
+ *    an adjacent `font: inherit` / `font-size:` pair on these very selectors, so
+ *    merging them into one shorthand is the single most likely future edit.
+ *  - a SECOND `--input-size` declaration, e.g. inside a `@media` block, which would
+ *    lower the token everywhere while the rule that reads it still looks correct.
+ *  - a COMPOUND selector such as `#msg.err`, which a "field name followed by a
+ *    delimiter" test rejects.
  */
 function fieldFontSizes(): { selector: string; px: number }[] {
 	const source = String(portalHtml);
@@ -305,17 +351,31 @@ function fieldFontSizes(): { selector: string; px: number }[] {
 	const style = source
 		.slice(source.indexOf("<style>") + "<style>".length, source.indexOf("</style>"))
 		.replace(/\/\*[\s\S]*?\*\//g, "");
-	const token = /--input-size:\s*(\d+)px/.exec(style);
-	if (!token) throw new Error("portal-ui.html no longer declares --input-size");
-	const inputSize = Number(token[1]);
-	const fields = /(^|[\s,>])(input|textarea|select|#msg|#newdir|#newsuggest)([\s,:{]|$)/;
+	const tokens = [...style.matchAll(/--input-size:\s*([^;}]+)/g)].map(match => match[1].trim());
+	if (tokens.length === 0) throw new Error("portal-ui.html no longer declares --input-size");
+	// More than one and the effective value depends on a cascade this scan does not
+	// model, so the guard would be reporting on the wrong declaration.
+	if (tokens.length > 1) throw new Error(`--input-size is declared ${tokens.length} times; this guard assumes one`);
+	const inputSize = Number.parseFloat(tokens[0]);
+	const fields = /(^|[\s,>])(input|textarea|select|#msg|#newdir|#newsuggest)\b/;
 	const sizes: { selector: string; px: number }[] = [];
+	const sizeOf = (value: string): number =>
+		value.includes("var(--input-size)") ? inputSize : Number.parseFloat(value);
 	for (const [, selector, body] of style.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
 		if (!fields.test(selector)) continue;
 		for (const [, value] of body.matchAll(/(?:^|;)\s*font-size:\s*([^;]+)/g)) {
-			const declared = value.trim();
-			const px = declared.includes("var(--input-size)") ? inputSize : Number.parseFloat(declared);
+			const px = sizeOf(value.trim());
 			if (Number.isFinite(px)) sizes.push({ selector: selector.trim(), px });
+		}
+		// `font:` carries a size in every valid form except `inherit`/`initial`/`unset`,
+		// and it resets `font-size` whether or not the author meant to.
+		for (const [, value] of body.matchAll(/(?:^|;)\s*font:\s*([^;]+)/g)) {
+			const shorthand = value.trim();
+			if (/^(inherit|initial|unset|revert)$/.test(shorthand)) continue;
+			const size = /(?:^|[\s/])((?:\d*\.)?\d+)(px|rem|em|pt)/.exec(shorthand);
+			// A shorthand whose size cannot be read is reported as 0 rather than skipped:
+			// an unreadable size on a field is exactly the state this must not wave through.
+			sizes.push({ selector: selector.trim(), px: size ? sizeOf(size[1] + size[2]) : 0 });
 		}
 	}
 	return sizes;
