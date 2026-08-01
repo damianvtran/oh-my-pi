@@ -178,6 +178,19 @@ describe("portal login page", () => {
 		expect(res.headers.get("cache-control")).toContain("no-store");
 	});
 
+	/*
+	 * WebKit zooms the page when a control whose computed font-size is under 16px
+	 * takes focus, and on iOS it never zooms back out — so a 13px credential field
+	 * hands the phone a session list that has to be panned sideways before it can be
+	 * used. The page's prose stays at 13px; only the fields carry the floor.
+	 */
+	it("keeps the credential fields at WebKit's 16px focus-zoom floor", async () => {
+		const body = await fetch(url("/login")).then(res => res.text());
+		const rule = /(^|\})\s*input\{([^}]*)\}/m.exec(body);
+		expect(rule).not.toBeNull();
+		expect(rule?.[2]).toContain("font-size:16px");
+	});
+
 	it("replaces only a back/forward-cache restoration with a GET navigation", async () => {
 		const harness = await loadLoginScript();
 		harness.pageshow(false);

@@ -55,6 +55,7 @@ interface PortalUi {
 	esc(value: unknown): string;
 	elapsedOf(row: { durationMs?: number; startedAt?: number }): string;
 	setAgentsOpen(open: boolean | null): void;
+	keyboardInsetOf(layoutHeight: number, viewport: { height: number; offsetTop: number; scale: number } | null): number;
 }
 
 function portalScript(): string {
@@ -108,6 +109,7 @@ function loadPortalUi(): PortalUi {
 			renderSubagents,
 			esc,
 			elapsedOf,
+			keyboardInsetOf,
 			setAgentsOpen: value => { agentsOpen = value; },
 		}; }`,
 	) as (env: typeof stubs) => PortalUi;
@@ -285,6 +287,103 @@ describe("portal UI script", () => {
 	it("parses and exposes its render functions", () => {
 		const ui = loadPortalUi();
 		expect(typeof ui.renderSubagents).toBe("function");
+	});
+});
+
+/**
+ * Every text-entry control's effective font-size, as the browser would resolve it
+ * from this file's one stylesheet. Deliberately narrow: it walks the rules whose
+ * selector names a field, resolves the single custom property they use, and
+ * ignores everything else.
+ */
+function fieldFontSizes(): { selector: string; px: number }[] {
+	const source = String(portalHtml);
+	// Comments are stripped first, and not for tidiness: this file's rules carry long
+	// prose comments, and an unstripped one becomes part of the following rule's
+	// selector text — so a comment that merely mentions an input would pull an
+	// unrelated rule's font-size into the result.
+	const style = source
+		.slice(source.indexOf("<style>") + "<style>".length, source.indexOf("</style>"))
+		.replace(/\/\*[\s\S]*?\*\//g, "");
+	const token = /--input-size:\s*(\d+)px/.exec(style);
+	if (!token) throw new Error("portal-ui.html no longer declares --input-size");
+	const inputSize = Number(token[1]);
+	const fields = /(^|[\s,>])(input|textarea|select|#msg|#newdir|#newsuggest)([\s,:{]|$)/;
+	const sizes: { selector: string; px: number }[] = [];
+	for (const [, selector, body] of style.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+		if (!fields.test(selector)) continue;
+		for (const [, value] of body.matchAll(/(?:^|;)\s*font-size:\s*([^;]+)/g)) {
+			const declared = value.trim();
+			const px = declared.includes("var(--input-size)") ? inputSize : Number.parseFloat(declared);
+			if (Number.isFinite(px)) sizes.push({ selector: selector.trim(), px });
+		}
+	}
+	return sizes;
+}
+
+describe("portal UI composer", () => {
+	/*
+	 * The defect this pins is not cosmetic and is invisible to every other check:
+	 * WebKit zooms the page when a control whose computed font-size is under 16px
+	 * takes focus, and on iOS it never zooms back out — the layout viewport stays
+	 * wider than the screen for the rest of the visit. The portal's body type is
+	 * 12px and the fields used to inherit it, so tapping the composer displaced the
+	 * whole app. `user-scalable=no` is not a fix (WebKit ignores it by design), so
+	 * the floor is the fix and a rule that reintroduces 12px on a field is the
+	 * regression.
+	 */
+	it("keeps every text-entry control at or above WebKit's 16px focus-zoom floor", () => {
+		const sizes = fieldFontSizes();
+		expect(sizes.length).toBeGreaterThan(0);
+		expect(sizes.filter(size => size.px < 16)).toEqual([]);
+	});
+
+	it("gives the steer field a growable textarea rather than a one-line input", () => {
+		const source = String(portalHtml);
+		expect(source).toContain('<textarea id="msg"');
+		expect(source).not.toMatch(/<input id="msg"/);
+	});
+});
+
+describe("portal UI keyboard inset", () => {
+	it("measures the covered height when only the visual viewport shrank", () => {
+		const ui = loadPortalUi();
+		// iOS: the layout viewport (and therefore `dvh`) stays at 844 while the
+		// keyboard takes 336 of it. That difference is what the shell resizes by.
+		expect(ui.keyboardInsetOf(844, { height: 508, offsetTop: 0, scale: 1 })).toBe(336);
+	});
+
+	it("counts a document WebKit already scrolled as covered, not as extra room", () => {
+		const ui = loadPortalUi();
+		// WebKit chases the caret by scrolling the visual viewport down inside the
+		// layout viewport. Ignoring `offsetTop` would under-measure by exactly that
+		// scroll and leave the composer behind the keyboard.
+		expect(ui.keyboardInsetOf(844, { height: 508, offsetTop: 120, scale: 1 })).toBe(216);
+	});
+
+	it("reports nothing when the layout viewport resized itself", () => {
+		const ui = loadPortalUi();
+		// Chrome on Android with `interactive-widget=resizes-content`: both viewports
+		// moved together, `100dvh` is already correct, and overriding it would fight
+		// the browser.
+		expect(ui.keyboardInsetOf(508, { height: 508, offsetTop: 0, scale: 1 })).toBe(0);
+	});
+
+	it("reports nothing for a pinch-zoom, which shrinks the visual viewport too", () => {
+		const ui = loadPortalUi();
+		// Binding the shell to a zoomed viewport would re-lay-out the app under the
+		// pan the user is performing.
+		expect(ui.keyboardInsetOf(844, { height: 300, offsetTop: 40, scale: 2.4 })).toBe(0);
+	});
+
+	it("ignores the few pixels a collapsing browser toolbar moves", () => {
+		const ui = loadPortalUi();
+		expect(ui.keyboardInsetOf(844, { height: 800, offsetTop: 0, scale: 1 })).toBe(0);
+	});
+
+	it("reports nothing when the browser has no visual viewport at all", () => {
+		const ui = loadPortalUi();
+		expect(ui.keyboardInsetOf(844, null)).toBe(0);
 	});
 });
 
