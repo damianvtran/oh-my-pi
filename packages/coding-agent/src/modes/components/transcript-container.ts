@@ -1,4 +1,5 @@
 import {
+	type BlockRowSpans,
 	type Component,
 	Container,
 	type HitZoneSink,
@@ -217,7 +218,12 @@ const EMPTY_TAIL: readonly string[] = [];
  */
 export class TranscriptContainer
 	extends Container
-	implements NativeScrollbackLiveRegion, NativeScrollbackCommittedRows, RenderStablePrefix, ViewportTailProvider
+	implements
+		BlockRowSpans,
+		NativeScrollbackLiveRegion,
+		NativeScrollbackCommittedRows,
+		RenderStablePrefix,
+		ViewportTailProvider
 {
 	// Bumped to retire every block segment at once (theme change / clear); a
 	// segment is only reused when its stored generation matches.
