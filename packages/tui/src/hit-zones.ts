@@ -81,6 +81,28 @@ export interface MouseZoneTarget {
 	 * over a tool block still scroll the transcript.
 	 */
 	onZoneWheel?(delta: -1 | 1, event: ZoneMouseEvent): boolean;
+
+	/**
+	 * Own a press-drag-release gesture, for a zone that implements its own
+	 * selection (the composer placing a caret and selecting text).
+	 *
+	 * - `start` fires on press inside the zone. Returning `true` CAPTURES the
+	 *   pointer for the rest of the gesture, which suppresses the engine's own
+	 *   transcript drag-selection and its copy-on-release for the duration.
+	 * - `move` fires on every motion while captured, **including coordinates
+	 *   outside the zone**. `localRow`/`localCol` stay in the zone's frame and
+	 *   may go negative or past the end: a drag that leaves the component must
+	 *   be able to extend a selection to the line ends rather than stop dead,
+	 *   so the engine deliberately does not clamp.
+	 * - `end` fires on release. A gesture that never left the press cell also
+	 *   delivers {@link onZoneClick}, so caret placement and drag-select stay
+	 *   one code path for the owner.
+	 *
+	 * Capture is released on `end`, when focus moves, and if the zone stops
+	 * being published mid-gesture, so a component unmounting under the pointer
+	 * cannot wedge the engine.
+	 */
+	onZoneDrag?(phase: "start" | "move" | "end", event: ZoneMouseEvent): boolean;
 }
 
 /** A published zone in absolute frame coordinates. */
@@ -103,10 +125,25 @@ export interface HitZone {
 export class HitZoneSink {
 	#zones: HitZone[] = [];
 	#offset = 0;
+	#colOffset = 0;
 
 	/** Absolute frame row of the component currently publishing. */
 	get offset(): number {
 		return this.#offset;
+	}
+
+	/**
+	 * Constant gutter added to every published column, set once per collection.
+	 *
+	 * Rows are translated per component as the walk descends, but the horizontal
+	 * inset is the same for the whole frame, so it is applied here rather than
+	 * threaded through every container. Without it a zone with finite columns
+	 * (the composer text area, a footer chip) is hit-tested against raw screen
+	 * columns while its rows are already screen rows, and the two disagree by
+	 * exactly the gutter.
+	 */
+	set columnOffset(value: number) {
+		this.#colOffset = value;
 	}
 
 	/**
@@ -125,9 +162,25 @@ export class HitZoneSink {
 	}
 
 	/**
+	 * Run `fn` with `delta` added to the column offset, for a container that
+	 * indents its children horizontally (the home screen's narrow centred
+	 * composer). Nests and restores like {@link withOffset}, and composes with
+	 * the frame-wide gutter rather than replacing it.
+	 */
+	withColumnOffset(delta: number, fn: () => void): void {
+		const previous = this.#colOffset;
+		this.#colOffset = previous + delta;
+		try {
+			fn();
+		} finally {
+			this.#colOffset = previous;
+		}
+	}
+
+	/**
 	 * Publish a zone. `rowStart` is local to the publishing component; columns
-	 * are absolute (components are full-width in this layout model, so a column
-	 * range is only used for sub-row targets like footer chips).
+	 * are relative to the content area, and the frame's gutter is added here.
+	 * A full-width zone leaves `colEnd` infinite and is unaffected.
 	 */
 	zone(
 		target: MouseZoneTarget,
@@ -141,8 +194,8 @@ export class HitZoneSink {
 			target,
 			row: this.#offset + rowStart,
 			rowCount,
-			colStart,
-			colEnd,
+			colStart: colStart + this.#colOffset,
+			colEnd: Number.isFinite(colEnd) ? colEnd + this.#colOffset : colEnd,
 		});
 	}
 
@@ -154,6 +207,7 @@ export class HitZoneSink {
 	reset(): void {
 		this.#zones = [];
 		this.#offset = 0;
+		this.#colOffset = 0;
 	}
 }
 

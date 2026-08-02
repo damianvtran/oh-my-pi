@@ -75,10 +75,17 @@ describe("lazy status color re-resolves on theme switch", () => {
 		await themeModule.initTheme(false, undefined, undefined, "dark-catppuccin", "light-catppuccin");
 
 		let presented: Component | undefined;
-		const context: Pick<InteractiveModeContext, "present"> = {
+		const context: Pick<InteractiveModeContext, "present" | "presentNotice"> = {
 			present(component) {
 				if (!isSingleComponent(component)) throw new Error("Expected one update notification block");
 				presented = component;
+			},
+			// Startup notices route through `presentNotice`, which takes an array so
+			// the home screen can park a whole run; this one always sends a single
+			// block, and the assertions below are about that block.
+			presentNotice(content) {
+				if (content.length !== 1) throw new Error("Expected one update notification block");
+				presented = content[0];
 			},
 		};
 		new UiHelpers(context as InteractiveModeContext).showNewVersionNotification("1.2.3");

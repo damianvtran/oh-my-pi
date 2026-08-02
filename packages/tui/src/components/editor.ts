@@ -6,6 +6,7 @@ import {
 	midPromptSkillTokenMatches,
 } from "../autocomplete";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
+import type { HitZoneProvider, HitZoneSink, MouseZoneTarget, ZoneMouseEvent } from "../hit-zones";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
@@ -370,6 +371,32 @@ interface LayoutLine {
 	cursorPos?: number;
 }
 
+/**
+ * One rendered row of the text area, carrying the buffer span it came from.
+ *
+ * The single source of truth behind every position mapping the editor makes:
+ * {@link Editor.render} draws the caret from it, vertical motion walks it, and
+ * the pointer mapping inverts it. Three independent walks of the same wrap
+ * would drift apart the first time padding or the wrap rules changed, and a
+ * click would then land somewhere the cursor could never be.
+ */
+interface VisualSegment {
+	logicalLine: number;
+	/** Code-unit offset in the logical line where {@link text} begins. */
+	startIndex: number;
+	/** One past the last buffer offset this row owns. May exceed
+	 *  `startIndex + text.length`: the wrapper maps whitespace it trimmed at a
+	 *  wrap point onto the preceding row so every caret position is addressable. */
+	endIndex: number;
+	/** Lowest buffer offset whose caret belongs to this row. Zero on a logical
+	 *  line's first row, which also owns leading whitespace the wrapper skipped. */
+	ownerStart: number;
+	/** Exactly the user text this row paints, after the wrapper trimmed it. */
+	text: string;
+	/** Exact `visibleWidth(text)`, carried from the wrap pass. */
+	width: number;
+}
+
 /** Per-line measurement carried across renders: exact visible width plus
  *  lazily-built wrap chunks (only populated once the line needs wrapping). */
 interface WrapEntry {
@@ -395,6 +422,31 @@ export interface EditorTopBorder {
 	revision?: number;
 }
 
+/**
+ * Paints the editor as a filled panel instead of a box frame: the surface
+ * boundary is carried by the fill contrast against the canvas behind it, so
+ * there is no rule to draw. Supplied by the host, which owns the palette; the
+ * editor never reaches for a theme it does not have.
+ */
+export interface EditorPanelSurface {
+	/** Paint one row of the panel and pad it to `width` visible columns. */
+	fill(line: string, width: number): string;
+	/** Columns of dead space between the panel edge and the text on every row. */
+	paddingLeft: number;
+	/**
+	 * Columns reserved on the right. Kept separate from `paddingLeft` because
+	 * the status strip in the panel's first row opens with a wide glyph, which
+	 * makes an equal inset read as heavier on the left; the host compensates by
+	 * asking for one more column here.
+	 */
+	paddingRight: number;
+	/**
+	 * Blank rows below the last text row. One is enough to close the surface;
+	 * more gives the caret room to sit off the bottom edge.
+	 */
+	paddingBottom: number;
+}
+
 interface HistoryEntry {
 	prompt: string;
 }
@@ -406,7 +458,12 @@ interface HistoryStorage {
 
 type HistoryCursorAnchor = "start" | "end";
 
-export class Editor implements Component, Focusable {
+/** Distinguishes the zones of concurrently mounted editors (the composer and a
+ *  hook editor can both be on screen), which the engine keys hover and capture
+ *  off and which must be unique within a frame. */
+let nextEditorZoneId = 0;
+
+export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneTarget {
 	#state: EditorState = {
 		lines: [""],
 		cursorLine: 0,
@@ -434,8 +491,8 @@ export class Editor implements Component, Focusable {
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
-	// Line measurement + word-wrap cache shared by #layoutText,
-	// #buildVisualLineMap, and key handlers within a frame. Line text is a
+	// Line measurement + word-wrap cache shared by #visualSegments and key
+	// handlers within a frame. Line text is a
 	// sound key (strings are immutable); cleared on layout-width or
 	// width-config (Hangul jamo setting) change and size-bounded so stale
 	// lines don't accumulate.
@@ -449,6 +506,26 @@ export class Editor implements Component, Focusable {
 	 *  overflows {@link #maxHeight}. Enabled by {@link HookEditorComponent} and
 	 *  other multi-line consumers; single-line consumers are unaffected. */
 	#scrollbarVisible = false;
+
+	/**
+	 * Where the last {@link render} painted the text area: rows local to this
+	 * component, columns local to the content area the engine composes children
+	 * at. Recorded rather than recomputed because the row offset depends on
+	 * chrome the render decided at paint time (a status row that may or may not
+	 * be there), and a pointer mapping that disagreed with the frame on screen
+	 * would place the caret on the wrong line.
+	 */
+	#textArea: { rowStart: number; rowCount: number; colStart: number; colEnd: number; layoutWidth: number } | undefined;
+
+	/**
+	 * Where a pointer selection started, in buffer coordinates; the caret is its
+	 * other end. Buffer coordinates rather than screen cells so the span
+	 * survives a reflow, and anchoring on the caret means selection and cursor
+	 * can never disagree about where the head is.
+	 */
+	#selectionAnchor: { line: number; col: number } | undefined;
+
+	readonly zoneKey = `editor:${nextEditorZoneId++}`;
 
 	// Emacs-style kill ring
 	#killRing = new KillRing();
@@ -511,6 +588,11 @@ export class Editor implements Component, Focusable {
 	 *  default collapse-to-marker behavior. `lineCount` is the sanitized paste's line count. */
 	onLargePaste?: (text: string, lineCount: number) => boolean;
 	onAutocompleteCancel?: () => void;
+	/** Clipboard sink for a pointer selection, called when the drag is released.
+	 *  Owning the gesture suppresses the engine's own drag-copy, so the editor
+	 *  owes the user the copy the transcript would have given them. Hosts wire
+	 *  this to the same clipboard `TUI.onCopy` uses; unset means no copy. */
+	onCopy?: (text: string) => void;
 	disableSubmit: boolean = false;
 
 	// Custom top border (for status line integration). Either an eager `content`
@@ -522,7 +604,36 @@ export class Editor implements Component, Focusable {
 	#topBorderProviderWidth: number | undefined;
 	#topBorderProviderSignature: string | undefined;
 	#topBorderProviderRevision: number | undefined;
-	#borderVisible = true;
+	#borderVisibleSetting = true;
+	#panelSurfaceProvider?: () => EditorPanelSurface | undefined;
+
+	/**
+	 * The panel surface is resolved per access rather than cached because the
+	 * host swaps it in and out at runtime (the viewport mode is a live setting),
+	 * and every width helper below has to agree with `render` within a frame.
+	 */
+	get #panelSurface(): EditorPanelSurface | undefined {
+		return this.#panelSurfaceProvider?.();
+	}
+
+	/**
+	 * Total columns the panel reserves horizontally. Every width helper spends
+	 * this, but `#getTextAreaColStart` spends only `paddingLeft`, which is why
+	 * the two are kept apart rather than folded into one inset.
+	 */
+	get #panelPaddingX(): number {
+		const panel = this.#panelSurface;
+		return panel ? panel.paddingLeft + panel.paddingRight : 0;
+	}
+
+	/**
+	 * A filled panel already marks its own boundary, so the box frame would be
+	 * redundant chrome on top of it. Panel mode therefore reuses the borderless
+	 * layout wholesale instead of introducing a third set of width rules.
+	 */
+	get #borderVisible(): boolean {
+		return this.#borderVisibleSetting && this.#panelSurface === undefined;
+	}
 
 	constructor(theme: EditorTheme) {
 		this.#theme = theme;
@@ -570,12 +681,28 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
-	 * Show or hide the editor border chrome.
+	 * Show or hide the editor border chrome. Ignored while a panel surface is
+	 * installed, which suppresses the frame on its own.
 	 */
 	setBorderVisible(borderVisible: boolean): void {
-		if (this.#borderVisible === borderVisible) return;
-		this.#borderVisible = borderVisible;
+		// Compare the SETTING, not `#borderVisible`: that is now a getter folding in
+		// panel mode, so comparing it would skip the epoch bump whenever a panel is
+		// mounted — and the cached width epoch would then outlive a real change.
+		if (this.#borderVisibleSetting === borderVisible) return;
+		this.#borderVisibleSetting = borderVisible;
 		this.#widthEpochRevision++;
+	}
+
+	/**
+	 * Render the editor as a filled panel: no frame, `paddingLeft` columns of
+	 * inset, a blank fill row above and below the text, and the top-border
+	 * status content carried as an ordinary row on the same fill.
+	 *
+	 * The provider is consulted every frame so the host can follow a viewport
+	 * mode the user flips at runtime; return `undefined` to draw the frame.
+	 */
+	setPanelSurface(provider: (() => EditorPanelSurface | undefined) | undefined): void {
+		this.#panelSurfaceProvider = provider;
 	}
 
 	setPromptGutter(promptGutter: string | undefined): void {
@@ -583,13 +710,14 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
-	 * Get the available width for top border content given a total terminal width.
-	 * Accounts for the border characters and horizontal padding when visible.
+	 * Get the available width for the status content given a total terminal
+	 * width. Accounts for the border characters and horizontal padding when
+	 * visible, or for the panel inset when the status rides on the fill.
 	 */
 	getTopBorderAvailableWidth(terminalWidth: number): number {
 		const paddingX = this.#getEditorPaddingX();
 		const borderWidth = this.#getHorizontalChromeWidth(paddingX);
-		return Math.max(0, terminalWidth - borderWidth * 2);
+		return Math.max(0, terminalWidth - borderWidth * 2 - this.#panelPaddingX);
 	}
 
 	/**
@@ -678,13 +806,13 @@ export class Editor implements Component, Focusable {
 	}
 
 	#isOnFirstVisualLine(): boolean {
-		const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+		const visualLines = this.#visualSegments(this.#lastLayoutWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 		return currentVisualLine === 0;
 	}
 
 	#isOnLastVisualLine(): boolean {
-		const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+		const visualLines = this.#visualSegments(this.#lastLayoutWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 		return currentVisualLine === visualLines.length - 1;
 	}
@@ -735,7 +863,7 @@ export class Editor implements Component, Focusable {
 
 	#getPromptGutterWidth(width: number, paddingX: number): number {
 		if (this.#borderVisible || !this.#promptGutter) return 0;
-		const chromeWidth = 2 * this.#getHorizontalChromeWidth(paddingX);
+		const chromeWidth = 2 * this.#getHorizontalChromeWidth(paddingX) + this.#panelPaddingX;
 		const availableWidth = Math.max(0, width - chromeWidth);
 		return Math.min(visibleWidth(this.#promptGutter), availableWidth);
 	}
@@ -755,8 +883,23 @@ export class Editor implements Component, Focusable {
 	}
 
 	#getContentWidth(width: number, paddingX: number): number {
-		const chromeWidth = 2 * this.#getHorizontalChromeWidth(paddingX);
+		const chromeWidth = 2 * this.#getHorizontalChromeWidth(paddingX) + this.#panelPaddingX;
 		return Math.max(0, width - chromeWidth - this.#getPromptGutterWidth(width, paddingX));
+	}
+
+	/**
+	 * First column of user text on every row, derived from the same three insets
+	 * `#getContentWidth` subtracts: the box frame (or nothing in panel mode), the
+	 * panel's own padding, and the prompt gutter. The gutter is padded to a
+	 * constant width on continuation rows, so this holds for every row of the
+	 * text area, not just the first.
+	 */
+	#getTextAreaColStart(width: number, paddingX: number): number {
+		return (
+			this.#getHorizontalChromeWidth(paddingX) +
+			(this.#panelSurface?.paddingLeft ?? 0) +
+			this.#getPromptGutterWidth(width, paddingX)
+		);
 	}
 
 	#getLayoutWidth(width: number, paddingX: number): number {
@@ -768,7 +911,11 @@ export class Editor implements Component, Focusable {
 
 	#getVisibleContentHeight(contentLines: number): number {
 		if (this.#maxHeight === undefined) return contentLines;
-		const verticalChrome = this.#borderVisible ? 2 : 0;
+		// Panel mode: the status row plus the blank under it, then whatever the
+		// surface reserves at the bottom. Must track `render` or the max-height
+		// clamp and the painted row count disagree.
+		const panelChrome = this.#panelSurface;
+		const verticalChrome = panelChrome ? 2 + panelChrome.paddingBottom : this.#borderVisible ? 2 : 0;
 		return Math.max(1, this.#maxHeight - verticalChrome);
 	}
 
@@ -863,14 +1010,13 @@ export class Editor implements Component, Focusable {
 		return Math.max(1, visibleHeight - 1);
 	}
 
-	#updateScrollOffset(layoutWidth: number, layoutLines: LayoutLine[], visibleHeight: number): void {
+	#updateScrollOffset(segments: readonly VisualSegment[], layoutLines: LayoutLine[], visibleHeight: number): void {
 		if (layoutLines.length <= visibleHeight) {
 			this.#scrollOffset = 0;
 			return;
 		}
 
-		const visualLines = this.#buildVisualLineMap(layoutWidth);
-		const cursorLine = this.#findCurrentVisualLine(visualLines);
+		const cursorLine = this.#findCurrentVisualLine(segments);
 		if (cursorLine < this.#scrollOffset) {
 			this.#scrollOffset = cursorLine;
 		} else if (cursorLine >= this.#scrollOffset + visibleHeight) {
@@ -883,6 +1029,7 @@ export class Editor implements Component, Focusable {
 
 	render(width: number): readonly string[] {
 		const paddingX = this.#getEditorPaddingX();
+		const panel = this.#panelSurface;
 		const borderVisible = this.#borderVisible;
 		const promptGutter = this.#getPromptGutter(width, paddingX);
 		const contentAreaWidth = this.#getContentWidth(width, paddingX);
@@ -897,10 +1044,12 @@ export class Editor implements Component, Focusable {
 		const bottomLeft = this.borderColor(`${box.bottomLeft}${box.horizontal}${padding(Math.max(0, paddingX - 1))}`);
 		const horizontal = this.borderColor(box.horizontal);
 
-		// Layout the text
-		const layoutLines = this.#layoutText(layoutWidth);
+		// Layout the text. One wrap walk feeds the rows, the scroll clamp, and
+		// the pointer mapping below, so none of the three can drift apart.
+		const segments = this.#visualSegments(layoutWidth);
+		const layoutLines = this.#layoutText(segments);
 		const visibleContentHeight = this.#getVisibleContentHeight(layoutLines.length);
-		this.#updateScrollOffset(layoutWidth, layoutLines, visibleContentHeight);
+		this.#updateScrollOffset(segments, layoutLines, visibleContentHeight);
 		const visibleLayoutLines = layoutLines.slice(this.#scrollOffset, this.#scrollOffset + visibleContentHeight);
 
 		const result: string[] = [];
@@ -966,6 +1115,18 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
+		if (panel) {
+			// Same status content the frame used to carry, now an ordinary row on
+			// the fill. The blank row under it is what keeps the status and the
+			// input from reading as one block now that no rule separates them.
+			const statusWidth = Math.max(0, width - this.#panelPaddingX);
+			const status = this.#topBorderProvider ? this.#topBorderProvider(statusWidth) : this.#topBorderContent;
+			if (status) {
+				result.push(status.width <= statusWidth ? status.content : truncateToWidth(status.content, statusWidth));
+			}
+			result.push("");
+		}
+
 		// Render each layout line
 		// Keep the hardware cursor at the text insertion point while autocomplete
 		// rows render below it; terminals use that position to anchor IME candidates.
@@ -975,6 +1136,10 @@ export class Editor implements Component, Focusable {
 		// Compute inline hint text (dim ghost text after cursor)
 		const inlineHint = this.#getInlineHint();
 		const hintStyle = this.#theme.hintStyle ?? ((t: string) => `\x1b[2m${t}\x1b[0m`);
+		const selection = this.#selectionRange();
+		// Rows are pinned before the loop so the pointer mapping reads the same
+		// row origin the frame was painted at.
+		const textRowStart = result.length;
 
 		for (let visibleIndex = 0; visibleIndex < visibleLayoutLines.length; visibleIndex++) {
 			const layoutLine = visibleLayoutLines[visibleIndex]!;
@@ -1035,7 +1200,22 @@ export class Editor implements Component, Focusable {
 				continue;
 			}
 
-			if (hasCursor && this.#useTerminalCursor) {
+			const selected =
+				selection && this.#rowSelectionSpan(segments[this.#scrollOffset + visibleIndex], selection, displayText);
+			if (selected) {
+				// A selected row paints its own caret as the edge of the wash, so
+				// none of the cursor-glyph branches below apply. Working in the
+				// row's plain text keeps every offset a buffer offset: the styling
+				// added here can never land inside an escape sequence.
+				displayText = this.#renderSelectedRow(
+					displayText,
+					selected.start,
+					selected.end,
+					hasCursor && marker ? layoutLine.cursorPos! : -1,
+					marker,
+				);
+				decorated = true;
+			} else if (hasCursor && this.#useTerminalCursor) {
 				if (marker) {
 					const before = displayText.slice(0, layoutLine.cursorPos);
 					const after = displayText.slice(layoutLine.cursorPos);
@@ -1174,13 +1354,27 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
+		this.#textArea = {
+			rowStart: textRowStart,
+			rowCount: visibleLayoutLines.length,
+			colStart: this.#getTextAreaColStart(width, paddingX),
+			colEnd: width,
+			layoutWidth,
+		};
+
 		// Add autocomplete list if active
 		if (this.#autocompleteState && this.#autocompleteList) {
-			const autocompleteResult = this.#autocompleteList.render(width);
-			result.push(...autocompleteResult);
+			const listWidth = panel ? Math.max(0, width - this.#panelPaddingX) : width;
+			result.push(...this.#autocompleteList.render(listWidth));
 		}
 
-		return result;
+		if (!panel) return result;
+		// Closing pad, then inset and paint every row in one pass so the whole
+		// composer reads as a single raised surface. The fill contrast against
+		// the canvas behind it is the only boundary there is now.
+		for (let i = 0; i < panel.paddingBottom; i++) result.push("");
+		const inset = padding(panel.paddingLeft);
+		return result.map(line => panel.fill(inset + line, width));
 	}
 
 	handleInput(data: string): void {
@@ -1191,6 +1385,10 @@ export class Editor implements Component, Focusable {
 		while (next !== undefined && next.length > 0) {
 			next = this.#handleInputChunk(next);
 		}
+		// Every keystroke ends a pointer selection. The edit handlers consumed it
+		// already (replace-on-type, delete); anything else moved the caret out
+		// from under it, and leaving a stale wash behind would be a lie.
+		this.#selectionAnchor = undefined;
 	}
 
 	/** Process one input chunk. Returns the unconsumed tail of a completed paste, if any. */
@@ -1623,95 +1821,234 @@ export class Editor implements Component, Focusable {
 		return entry.chunks;
 	}
 
-	#layoutText(contentWidth: number): LayoutLine[] {
-		const layoutLines: LayoutLine[] = [];
+	/**
+	 * Split the buffer into the rows the text area paints, one wrap walk for
+	 * every consumer that needs to relate a buffer offset to a screen cell.
+	 */
+	#visualSegments(contentWidth: number): VisualSegment[] {
+		const segments: VisualSegment[] = [];
+		const lines = this.#state.lines;
 
-		if (this.#state.lines.length === 0 || (this.#state.lines.length === 1 && this.#state.lines[0] === "")) {
-			// Empty editor
-			layoutLines.push({
-				text: "",
-				width: 0,
-				hasCursor: true,
-				cursorPos: 0,
-			});
-			return layoutLines;
+		if (lines.length === 0 || (lines.length === 1 && lines[0] === "")) {
+			segments.push({ logicalLine: 0, startIndex: 0, endIndex: 0, ownerStart: 0, text: "", width: 0 });
+			return segments;
 		}
 
-		// Process each logical line
-		for (let i = 0; i < this.#state.lines.length; i++) {
-			const line = this.#state.lines[i] || "";
-			const isCurrentLine = i === this.#state.cursorLine;
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i] || "";
 			const lineVisibleWidth = this.#lineEntry(line, contentWidth).width;
 
 			if (lineVisibleWidth <= contentWidth) {
-				// Line fits in one layout line
-				if (isCurrentLine) {
-					layoutLines.push({
-						text: line,
-						width: lineVisibleWidth,
-						hasCursor: true,
-						cursorPos: this.#state.cursorCol,
-					});
-				} else {
-					layoutLines.push({
-						text: line,
-						width: lineVisibleWidth,
-						hasCursor: false,
-					});
-				}
-			} else {
-				// Line needs wrapping - use word-aware wrapping
-				const chunks = this.#wrapLine(line, contentWidth);
+				segments.push({
+					logicalLine: i,
+					startIndex: 0,
+					endIndex: line.length,
+					ownerStart: 0,
+					text: line,
+					width: lineVisibleWidth,
+				});
+				continue;
+			}
 
-				for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-					const chunk = chunks[chunkIndex];
-					if (!chunk) continue;
-
-					const cursorPos = this.#state.cursorCol;
-					const isLastChunk = chunkIndex === chunks.length - 1;
-
-					// Determine if cursor is in this chunk
-					// For word-wrapped chunks, we need to handle the case where
-					// cursor might be in trimmed whitespace at end of chunk
-					let hasCursorInChunk = false;
-					let adjustedCursorPos = 0;
-
-					if (isCurrentLine) {
-						// The first chunk owns any leading whitespace the wrapper skipped,
-						// so a cursor inside it still maps to a layout line.
-						const chunkStart = chunkIndex === 0 ? 0 : chunk.startIndex;
-						if (isLastChunk) {
-							// Last chunk: cursor belongs here if >= startIndex
-							hasCursorInChunk = cursorPos >= chunkStart;
-						} else {
-							// Non-last chunk: cursor belongs here if in range [startIndex, endIndex)
-							hasCursorInChunk = cursorPos >= chunkStart && cursorPos < chunk.endIndex;
-						}
-						if (hasCursorInChunk) {
-							// Clamp into the displayed text (cursor may sit in trimmed/skipped whitespace)
-							adjustedCursorPos = Math.max(0, Math.min(cursorPos - chunk.startIndex, chunk.text.length));
-						}
-					}
-
-					if (hasCursorInChunk) {
-						layoutLines.push({
-							text: chunk.text,
-							width: chunk.width,
-							hasCursor: true,
-							cursorPos: adjustedCursorPos,
-						});
-					} else {
-						layoutLines.push({
-							text: chunk.text,
-							width: chunk.width,
-							hasCursor: false,
-						});
-					}
-				}
+			const chunks = this.#wrapLine(line, contentWidth);
+			for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+				const chunk = chunks[chunkIndex];
+				if (!chunk) continue;
+				segments.push({
+					logicalLine: i,
+					startIndex: chunk.startIndex,
+					endIndex: chunk.endIndex,
+					// The first chunk owns any leading whitespace the wrapper
+					// skipped, so a caret inside it still maps to a row.
+					ownerStart: chunkIndex === 0 ? 0 : chunk.startIndex,
+					text: chunk.text,
+					width: chunk.width,
+				});
 			}
 		}
 
+		return segments;
+	}
+
+	/** True when `segment` is the last row of its logical line, where the caret
+	 *  may also sit one past the end. */
+	#isLastRowOfLine(segments: readonly VisualSegment[], index: number): boolean {
+		const segment = segments[index];
+		return segment === undefined || segments[index + 1]?.logicalLine !== segment.logicalLine;
+	}
+
+	#layoutText(segments: readonly VisualSegment[]): LayoutLine[] {
+		const layoutLines: LayoutLine[] = [];
+		const { cursorLine, cursorCol } = this.#state;
+
+		for (let i = 0; i < segments.length; i++) {
+			const segment = segments[i]!;
+			const ownsCursor =
+				segment.logicalLine === cursorLine &&
+				cursorCol >= segment.ownerStart &&
+				(cursorCol < segment.endIndex || this.#isLastRowOfLine(segments, i));
+
+			layoutLines.push({
+				text: segment.text,
+				width: segment.width,
+				hasCursor: ownsCursor,
+				// Clamp into the painted text: the caret may sit in whitespace the
+				// wrapper trimmed at the wrap point, which this row still owns.
+				cursorPos: ownsCursor
+					? Math.max(0, Math.min(cursorCol - segment.startIndex, segment.text.length))
+					: undefined,
+			});
+		}
+
 		return layoutLines;
+	}
+
+	// ---------------------------------------------------------------------
+	// Pointer input
+	//
+	// The caret is one end of the selection and the anchor is the other, so
+	// there is exactly one cursor position in the editor and a drag can never
+	// disagree with it. Everything here maps screen cells back through
+	// `#visualSegments`, the same rows `render` painted.
+	// ---------------------------------------------------------------------
+
+	publishHitZones(sink: HitZoneSink): void {
+		const area = this.#textArea;
+		if (!area || area.rowCount <= 0) return;
+		// The whole composer width, not just the text columns: a press on the
+		// panel's left padding is still a press on that line, and #placeCaretAt
+		// subtracts the inset itself. Bounded on the right so a composer laid out
+		// narrower than the viewport does not claim the canvas beside it.
+		sink.zone(this, area.rowStart, area.rowCount, 0, area.colEnd);
+	}
+
+	onZoneClick(event: ZoneMouseEvent): boolean {
+		this.#selectionAnchor = undefined;
+		this.#placeCaretAt(event.localRow, event.localCol);
+		return true;
+	}
+
+	onZoneDrag(phase: "start" | "move" | "end", event: ZoneMouseEvent): boolean {
+		if (phase === "start") {
+			this.#placeCaretAt(event.localRow, event.localCol);
+			this.#selectionAnchor = { line: this.#state.cursorLine, col: this.#state.cursorCol };
+			// Capturing suppresses the engine's transcript selection for the whole
+			// gesture, which is what lets a drag off the composer keep extending.
+			return true;
+		}
+		if (phase === "move") {
+			return this.#selectionAnchor !== undefined && this.#placeCaretAt(event.localRow, event.localCol);
+		}
+		const selected = this.getSelectedText();
+		if (selected) this.onCopy?.(selected);
+		else this.#selectionAnchor = undefined;
+		return true;
+	}
+
+	/**
+	 * Move the caret to a cell of the text area, inverting the mapping
+	 * {@link render} uses to draw it: the row picks a wrap segment (offset by the
+	 * editor's own scroll), and the column is walked back through the painted
+	 * text so wide glyphs and grapheme clusters resolve the same way both
+	 * directions. Returns whether the caret actually moved.
+	 *
+	 * Coordinates are deliberately unclamped by the engine: a drag that leaves
+	 * the composer extends to the row ends and past the visible rows to the
+	 * buffer ends, which is what makes selecting a long input possible at all.
+	 */
+	#placeCaretAt(localRow: number, localCol: number): boolean {
+		const area = this.#textArea;
+		if (!area) return false;
+		const segments = this.#visualSegments(area.layoutWidth);
+		if (segments.length === 0) return false;
+
+		const index = Math.max(0, Math.min(segments.length - 1, this.#scrollOffset + localRow));
+		const segment = segments[index]!;
+		const col = localCol - area.colStart;
+		const line = this.#state.lines[segment.logicalLine] ?? "";
+		// Past the right edge lands on the row's last painted offset, which on a
+		// logical line's final row is the end of the line.
+		const offset = col <= 0 ? 0 : offsetAtVisualCol(segment.text, col);
+		const target = Math.min(segment.startIndex + offset, line.length);
+		if (this.#state.cursorLine === segment.logicalLine && this.#state.cursorCol === target) return false;
+
+		this.#resetKillSequence();
+		this.#state.cursorLine = segment.logicalLine;
+		this.#setCursorCol(target);
+		return true;
+	}
+
+	/** The selected span in buffer coordinates, ordered start-before-end, or
+	 *  undefined when nothing is selected. */
+	#selectionRange(): { startLine: number; startCol: number; endLine: number; endCol: number } | undefined {
+		const anchor = this.#selectionAnchor;
+		if (!anchor) return undefined;
+		const { cursorLine, cursorCol } = this.#state;
+		if (anchor.line === cursorLine && anchor.col === cursorCol) return undefined;
+		const anchorFirst = anchor.line < cursorLine || (anchor.line === cursorLine && anchor.col < cursorCol);
+		return anchorFirst
+			? { startLine: anchor.line, startCol: anchor.col, endLine: cursorLine, endCol: cursorCol }
+			: { startLine: cursorLine, startCol: cursorCol, endLine: anchor.line, endCol: anchor.col };
+	}
+
+	/** The text currently selected by the pointer, empty when there is none. */
+	getSelectedText(): string {
+		const range = this.#selectionRange();
+		if (!range) return "";
+		const lines = this.#state.lines;
+		if (range.startLine === range.endLine) {
+			return (lines[range.startLine] ?? "").slice(range.startCol, range.endCol);
+		}
+		const parts = [(lines[range.startLine] ?? "").slice(range.startCol)];
+		for (let i = range.startLine + 1; i < range.endLine; i++) parts.push(lines[i] ?? "");
+		parts.push((lines[range.endLine] ?? "").slice(0, range.endCol));
+		return parts.join("\n");
+	}
+
+	/**
+	 * Which code units of one painted row the selection covers, or undefined
+	 * when it covers none of it. Offsets are into `rowText` (already clipped to
+	 * the content width by the caller) so the highlight cannot outrun the row.
+	 */
+	#rowSelectionSpan(
+		segment: VisualSegment | undefined,
+		range: { startLine: number; startCol: number; endLine: number; endCol: number },
+		rowText: string,
+	): { start: number; end: number } | undefined {
+		if (!segment || segment.logicalLine < range.startLine || segment.logicalLine > range.endLine) return undefined;
+		const clamp = (offset: number): number => Math.max(0, Math.min(offset - segment.startIndex, rowText.length));
+		const start = segment.logicalLine === range.startLine ? clamp(range.startCol) : 0;
+		const end = segment.logicalLine === range.endLine ? clamp(range.endCol) : rowText.length;
+		return end > start ? { start, end } : undefined;
+	}
+
+	/**
+	 * Paint one row that the selection covers. `caret` is a code-unit offset in
+	 * `text` or -1 when the caret is elsewhere; the marker is placed at a cut
+	 * point rather than inserted afterwards so it can never end up inside the
+	 * escape sequences the wash adds.
+	 */
+	#renderSelectedRow(text: string, start: number, end: number, caret: number, marker: string): string {
+		// The list's selected-row wash is the same rung of the surface ladder a
+		// text selection wants, so a user theme needs no new role for this.
+		// Reverse video is the fallback for hosts that supply no wash at all.
+		const wash = this.#theme.selectList.selectedRow ?? ((body: string) => `\x1b[7m${body}\x1b[0m`);
+		// Cut points, deduplicated: the caret usually sits on a selection edge.
+		const ordered: number[] = [];
+		for (const cut of [0, start, end, caret, text.length]) {
+			if (cut >= 0 && !ordered.includes(cut)) ordered.push(cut);
+		}
+		ordered.sort((a, b) => a - b);
+
+		let out = "";
+		for (let i = 0; i < ordered.length - 1; i++) {
+			const from = ordered[i]!;
+			const to = ordered[i + 1]!;
+			if (from === caret) out += marker;
+			const body = this.#decorate(text.slice(from, to));
+			out += from >= start && to <= end ? wash(body) : body;
+		}
+		return caret === text.length ? out + marker : out;
 	}
 
 	getText(): string {
@@ -1954,10 +2291,17 @@ export class Editor implements Component, Focusable {
 	// All the editor methods from before...
 	#insertCharacter(char: string): void {
 		this.#exitHistoryForEditing();
+		// Typing over a pointer selection replaces it, as one undo unit: snapshot
+		// before the removal so a single undo brings the whole selection back.
+		const replacing = this.#selectionRange() !== undefined;
+		if (replacing) {
+			this.#recordUndoState();
+			this.#deleteSelection();
+		}
 		// Undo coalescing: consecutive word typing collapses into one undo unit
 		// (mirrors Input); any other action resets the run via #lastAction.
 		const isWordChunk = [...segmenter.segment(char)].every(seg => getWordNavKind(seg.segment) !== "whitespace");
-		if (!isWordChunk || this.#lastAction !== "type-word") {
+		if (!replacing && (!isWordChunk || this.#lastAction !== "type-word")) {
 			this.#recordUndoState();
 		}
 		this.#lastAction = isWordChunk ? "type-word" : null;
@@ -2264,6 +2608,14 @@ export class Editor implements Component, Focusable {
 		this.#resetKillSequence();
 		this.#recordUndoState();
 
+		// A selection is the unit backspace deletes when there is one, which is
+		// the mouse cut: the removed text lands on the kill ring either way.
+		if (this.#deleteSelection()) {
+			this.onChange?.(this.getText());
+			this.#retriggerAutocompleteAtCursor();
+			return;
+		}
+
 		let removedSlashTrigger = false;
 
 		if (this.#state.cursorCol > 0) {
@@ -2352,32 +2704,26 @@ export class Editor implements Component, Focusable {
 	 * Move cursor to a target visual line, applying sticky column logic.
 	 * Shared by moveCursor() and pageScroll().
 	 */
-	#moveToVisualLine(
-		visualLines: Array<{ logicalLine: number; startCol: number; length: number }>,
-		currentVisualLine: number,
-		targetVisualLine: number,
-	): void {
+	#moveToVisualLine(visualLines: readonly VisualSegment[], currentVisualLine: number, targetVisualLine: number): void {
 		const currentVL = visualLines[currentVisualLine];
 		const targetVL = visualLines[targetVisualLine];
 
 		if (currentVL && targetVL) {
 			// Work in visual cells (grapheme-walked), not UTF-16 code units: code-unit
 			// columns land mid-surrogate on emoji and drift on wide CJK glyphs.
+			// The raw buffer span is used rather than the painted text so a caret
+			// parked in whitespace the wrapper trimmed keeps its column.
 			const sourceLine = this.#state.lines[currentVL.logicalLine] || "";
-			const sourceText = sourceLine.slice(currentVL.startCol, currentVL.startCol + currentVL.length);
-			const currentVisualCol = visualColAtOffset(sourceText, this.#state.cursorCol - currentVL.startCol);
+			const sourceText = sourceLine.slice(currentVL.startIndex, currentVL.endIndex);
+			const currentVisualCol = visualColAtOffset(sourceText, this.#state.cursorCol - currentVL.startIndex);
 
 			// For non-last segments, clamp before the segment end to stay within the segment
-			const isLastSourceSegment =
-				currentVisualLine === visualLines.length - 1 ||
-				visualLines[currentVisualLine + 1]?.logicalLine !== currentVL.logicalLine;
+			const isLastSourceSegment = this.#isLastRowOfLine(visualLines, currentVisualLine);
 			const sourceMaxVisualCol = maxSegmentVisualCol(sourceText, isLastSourceSegment);
 
-			const isLastTargetSegment =
-				targetVisualLine === visualLines.length - 1 ||
-				visualLines[targetVisualLine + 1]?.logicalLine !== targetVL.logicalLine;
+			const isLastTargetSegment = this.#isLastRowOfLine(visualLines, targetVisualLine);
 			const targetLine = this.#state.lines[targetVL.logicalLine] || "";
-			const targetText = targetLine.slice(targetVL.startCol, targetVL.startCol + targetVL.length);
+			const targetText = targetLine.slice(targetVL.startIndex, targetVL.endIndex);
 			const targetMaxVisualCol = maxSegmentVisualCol(targetText, isLastTargetSegment);
 
 			const moveToVisualCol = this.#computeVerticalMoveColumn(
@@ -2388,7 +2734,7 @@ export class Editor implements Component, Focusable {
 
 			// Set cursor position, snapping to a grapheme boundary in the target text
 			this.#state.cursorLine = targetVL.logicalLine;
-			const targetCol = targetVL.startCol + offsetAtVisualCol(targetText, moveToVisualCol);
+			const targetCol = targetVL.startIndex + offsetAtVisualCol(targetText, moveToVisualCol);
 			this.#state.cursorCol = Math.min(targetCol, targetLine.length);
 		}
 	}
@@ -2531,10 +2877,37 @@ export class Editor implements Component, Focusable {
 		this.#lastAction = "kill";
 	}
 
+	/**
+	 * Remove the pointer selection and leave the caret where it started.
+	 *
+	 * The removed text goes on the kill ring, which is the editor's existing
+	 * cut buffer: `ctrl+y` yanks a mouse cut back exactly like a `ctrl+k` one,
+	 * so there is still only one cut path. Records no undo state of its own,
+	 * because every caller already snapshots before it edits and a replacement
+	 * should undo in a single step.
+	 */
+	#deleteSelection(): boolean {
+		const range = this.#selectionRange();
+		if (!range) return false;
+		const removed = this.getSelectedText();
+		this.#selectionAnchor = undefined;
+
+		const lines = this.#state.lines;
+		const head = (lines[range.startLine] ?? "").slice(0, range.startCol);
+		const tail = (lines[range.endLine] ?? "").slice(range.endCol);
+		this.#recordKill(removed, "forward", false);
+		lines.splice(range.startLine, range.endLine - range.startLine + 1, head + tail);
+		this.#state.cursorLine = range.startLine;
+		this.#setCursorCol(range.startCol);
+		return true;
+	}
+
 	#insertTextAtCursor(text: string): void {
 		this.#historyIndex = -1;
 		this.#resetKillSequence();
 		this.#recordUndoState();
+		// A yank or completion applied over a pointer selection replaces it.
+		this.#deleteSelection();
 
 		const normalized = text.replace(/\r\n?/g, "\n");
 		const lines = normalized.split("\n");
@@ -2787,33 +3160,36 @@ export class Editor implements Component, Focusable {
 		this.#resetKillSequence();
 		this.#recordUndoState();
 
-		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+		// Delete over a pointer selection cuts it, the same path backspace takes.
+		if (!this.#deleteSelection()) {
+			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 
-		if (this.#state.cursorCol < currentLine.length) {
-			// An atomic placeholder token (image/paste marker) deletes as a unit.
-			const token = this.#atomicTokenAt(currentLine, this.#state.cursorCol);
-			if (token !== undefined) {
-				this.#state.lines[this.#state.cursorLine] =
-					currentLine.slice(0, token.start) + currentLine.slice(token.end);
-				this.#setCursorCol(token.start);
-			} else {
-				// Delete grapheme at cursor position (handles emojis, combining characters, etc.)
-				const afterCursor = currentLine.slice(this.#state.cursorCol);
+			if (this.#state.cursorCol < currentLine.length) {
+				// An atomic placeholder token (image/paste marker) deletes as a unit.
+				const token = this.#atomicTokenAt(currentLine, this.#state.cursorCol);
+				if (token !== undefined) {
+					this.#state.lines[this.#state.cursorLine] =
+						currentLine.slice(0, token.start) + currentLine.slice(token.end);
+					this.#setCursorCol(token.start);
+				} else {
+					// Delete grapheme at cursor position (handles emojis, combining characters, etc.)
+					const afterCursor = currentLine.slice(this.#state.cursorCol);
 
-				// Find the first grapheme at cursor
-				const graphemes = [...segmenter.segment(afterCursor)];
-				const firstGrapheme = graphemes[0];
-				const graphemeLength = firstGrapheme ? firstGrapheme.segment.length : 1;
+					// Find the first grapheme at cursor
+					const graphemes = [...segmenter.segment(afterCursor)];
+					const firstGrapheme = graphemes[0];
+					const graphemeLength = firstGrapheme ? firstGrapheme.segment.length : 1;
 
-				const before = currentLine.slice(0, this.#state.cursorCol);
-				const after = currentLine.slice(this.#state.cursorCol + graphemeLength);
-				this.#state.lines[this.#state.cursorLine] = before + after;
+					const before = currentLine.slice(0, this.#state.cursorCol);
+					const after = currentLine.slice(this.#state.cursorCol + graphemeLength);
+					this.#state.lines[this.#state.cursorLine] = before + after;
+				}
+			} else if (this.#state.cursorLine < this.#state.lines.length - 1) {
+				// At end of line - merge with next line
+				const nextLine = this.#state.lines[this.#state.cursorLine + 1] || "";
+				this.#state.lines[this.#state.cursorLine] = currentLine + nextLine;
+				this.#state.lines.splice(this.#state.cursorLine + 1, 1);
 			}
-		} else if (this.#state.cursorLine < this.#state.lines.length - 1) {
-			// At end of line - merge with next line
-			const nextLine = this.#state.lines[this.#state.cursorLine + 1] || "";
-			this.#state.lines[this.#state.cursorLine] = currentLine + nextLine;
-			this.#state.lines.splice(this.#state.cursorLine + 1, 1);
 		}
 
 		if (this.onChange) {
@@ -2846,70 +3222,36 @@ export class Editor implements Component, Focusable {
 	}
 
 	/**
-	 * Build a mapping from visual lines to logical positions.
-	 * Returns an array where each element represents a visual line with:
-	 * - logicalLine: index into this.#state.lines
-	 * - startCol: starting column in the logical line
-	 * - length: length of this visual line segment
+	 * Find the visual row index owning the current cursor position.
 	 */
-	#buildVisualLineMap(width: number): Array<{ logicalLine: number; startCol: number; length: number }> {
-		const visualLines: Array<{ logicalLine: number; startCol: number; length: number }> = [];
-
-		for (let i = 0; i < this.#state.lines.length; i++) {
-			const line = this.#state.lines[i] || "";
-			const lineVisWidth = this.#lineEntry(line, width).width;
-			if (line.length === 0) {
-				// Empty line still takes one visual line
-				visualLines.push({ logicalLine: i, startCol: 0, length: 0 });
-			} else if (lineVisWidth <= width) {
-				visualLines.push({ logicalLine: i, startCol: 0, length: line.length });
-			} else {
-				// Line needs wrapping - use word-aware wrapping
-				const chunks = this.#wrapLine(line, width);
-				for (const chunk of chunks) {
-					visualLines.push({
-						logicalLine: i,
-						startCol: chunk.startIndex,
-						length: chunk.endIndex - chunk.startIndex,
-					});
-				}
-			}
-		}
-
-		return visualLines;
-	}
-
-	/**
-	 * Find the visual line index for the current cursor position.
-	 */
-	#findCurrentVisualLine(visualLines: Array<{ logicalLine: number; startCol: number; length: number }>): number {
-		for (let i = 0; i < visualLines.length; i++) {
-			const vl = visualLines[i];
-			if (!vl) continue;
-			if (vl.logicalLine === this.#state.cursorLine) {
-				const colInSegment = this.#state.cursorCol - vl.startCol;
-				// Cursor is in this segment if it's within range
-				// For the last segment of a logical line, cursor can be at length (end position)
+	#findCurrentVisualLine(segments: readonly VisualSegment[]): number {
+		for (let i = 0; i < segments.length; i++) {
+			const segment = segments[i];
+			if (!segment) continue;
+			if (segment.logicalLine === this.#state.cursorLine) {
+				const colInSegment = this.#state.cursorCol - segment.startIndex;
+				// Cursor is in this segment if it's within range.
+				// For the last segment of a logical line, cursor can be at length (end position).
 				// The first segment also owns any leading whitespace the wrapper skipped
-				// (its startCol can be > 0), so a negative colInSegment maps there.
-				const isLastSegmentOfLine =
-					i === visualLines.length - 1 || visualLines[i + 1]?.logicalLine !== vl.logicalLine;
-				const isFirstSegmentOfLine = i === 0 || visualLines[i - 1]?.logicalLine !== vl.logicalLine;
+				// (its startIndex can be > 0), so a negative colInSegment maps there.
+				const length = segment.endIndex - segment.startIndex;
+				const isLastSegmentOfLine = this.#isLastRowOfLine(segments, i);
+				const isFirstSegmentOfLine = i === 0 || segments[i - 1]?.logicalLine !== segment.logicalLine;
 				if (
 					(colInSegment >= 0 || isFirstSegmentOfLine) &&
-					(colInSegment < vl.length || (isLastSegmentOfLine && colInSegment <= vl.length))
+					(colInSegment < length || (isLastSegmentOfLine && colInSegment <= length))
 				) {
 					return i;
 				}
 			}
 		}
 		// Fallback: return last visual line
-		return visualLines.length - 1;
+		return segments.length - 1;
 	}
 
 	#moveCursor(deltaLine: number, deltaCol: number): void {
 		this.#resetKillSequence();
-		const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+		const visualLines = this.#visualSegments(this.#lastLayoutWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 
 		if (deltaLine !== 0) {
@@ -2938,8 +3280,11 @@ export class Editor implements Component, Focusable {
 					// At end of last line - can't move, but set preferredVisualCol for up/down navigation
 					const currentVL = visualLines[currentVisualLine];
 					if (currentVL) {
-						const segmentText = currentLine.slice(currentVL.startCol, currentVL.startCol + currentVL.length);
-						this.#preferredVisualCol = visualColAtOffset(segmentText, this.#state.cursorCol - currentVL.startCol);
+						const segmentText = currentLine.slice(currentVL.startIndex, currentVL.endIndex);
+						this.#preferredVisualCol = visualColAtOffset(
+							segmentText,
+							this.#state.cursorCol - currentVL.startIndex,
+						);
 					}
 				}
 			} else {
@@ -2961,7 +3306,7 @@ export class Editor implements Component, Focusable {
 
 	#pageScroll(direction: -1 | 1): void {
 		this.#resetKillSequence();
-		const visualLines = this.#buildVisualLineMap(this.#lastLayoutWidth);
+		const visualLines = this.#visualSegments(this.#lastLayoutWidth);
 		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
 		const step = this.#getPageScrollStep(visualLines.length);
 		const targetVisualLine = Math.max(0, Math.min(visualLines.length - 1, currentVisualLine + direction * step));

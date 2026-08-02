@@ -27,6 +27,8 @@ import {
 	matchesSelectDown,
 	matchesSelectUp,
 } from "../../modes/utils/keybinding-matchers";
+import { isFullscreenViewport } from "../../tools/render-utils";
+import { CARD_PADDING_X } from "./collapsible-block";
 import { CountdownTimer } from "./countdown-timer";
 import { DynamicBorder } from "./dynamic-border";
 import { renderSegmentTrack } from "./segment-track";
@@ -136,9 +138,14 @@ class OutlinedList extends Container {
 	}
 
 	override render(width: number): readonly string[] {
+		// The rules only exist because append mode has no surface to contrast
+		// against. On the panel the list is bounded by its own fill, and the
+		// selected row's band still marks the cursor.
+		const flat = isFullscreenViewport();
 		const borderColor = (text: string) => theme.fg("border", text);
-		const horizontal = borderColor(theme.boxRound.horizontal.repeat(Math.max(1, width)));
-		const innerWidth = Math.max(1, width - 2);
+		const rail = flat ? "" : borderColor(theme.boxRound.vertical);
+		const inset = flat ? padding(CARD_PADDING_X) : "";
+		const innerWidth = Math.max(1, width - 2 * (flat ? CARD_PADDING_X : 1));
 		const content: string[] = [];
 		for (const row of this.#rows) {
 			const normalized = replaceTabs(row.text);
@@ -149,9 +156,11 @@ class OutlinedList extends Container {
 				const pad = Math.max(0, innerWidth - visibleWidth(wrappedLine));
 				const filled = `${wrappedLine}${padding(pad)}`;
 				const painted = row.highlight ? paintSelectedRow(filled) : filled;
-				content.push(`${borderColor(theme.boxRound.vertical)}${painted}${borderColor(theme.boxRound.vertical)}`);
+				content.push(`${rail}${inset}${painted}${inset}${rail}`);
 			}
 		}
+		if (flat) return content.map(row => theme.panelBg(row, width));
+		const horizontal = borderColor(theme.boxRound.horizontal.repeat(Math.max(1, width)));
 		return [horizontal, ...content, horizontal];
 	}
 }

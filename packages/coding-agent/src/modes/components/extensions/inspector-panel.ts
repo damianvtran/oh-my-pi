@@ -7,8 +7,16 @@ import * as os from "node:os";
 import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { type Component, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../../modes/theme/theme";
-import { shortenPath } from "../../../tools/render-utils";
+import { isFullscreenViewport, shortenPath } from "../../../tools/render-utils";
 import type { Extension, ExtensionState } from "./types";
+
+/**
+ * Underline beneath a section label. Fullscreen marks boundaries with fills, so
+ * there the label is set off by the blank row the rule leaves behind instead.
+ */
+function sectionRule(width: number): string {
+	return isFullscreenViewport() ? "" : theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40)));
+}
 
 export class InspectorPanel implements Component {
 	#extension: Extension | null = null;
@@ -107,7 +115,7 @@ export class InspectorPanel implements Component {
 	#renderFilePreview(raw: unknown, width: number): string[] {
 		const lines: string[] = [];
 		lines.push(theme.fg("muted", "Preview:"));
-		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
+		lines.push(sectionRule(width));
 
 		const content = this.#getContextFileContent(raw);
 		if (!content) {
@@ -165,7 +173,7 @@ export class InspectorPanel implements Component {
 	#renderToolArgs(raw: unknown, width: number): string[] {
 		const lines: string[] = [];
 		lines.push(theme.fg("muted", "Arguments:"));
-		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
+		lines.push(sectionRule(width));
 
 		try {
 			const tool = raw as { parameters?: unknown; inputSchema?: unknown };
@@ -212,7 +220,7 @@ export class InspectorPanel implements Component {
 	#renderSkillContent(raw: unknown, width: number): string[] {
 		const lines: string[] = [];
 		lines.push(theme.fg("muted", "Instruction:"));
-		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
+		lines.push(sectionRule(width));
 
 		try {
 			const skill = raw as any;
@@ -241,7 +249,7 @@ export class InspectorPanel implements Component {
 	#renderMcpDetails(raw: unknown, width: number): string[] {
 		const lines: string[] = [];
 		lines.push(theme.fg("muted", "Connection:"));
-		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
+		lines.push(sectionRule(width));
 
 		try {
 			const mcp = raw as any;
@@ -280,7 +288,7 @@ export class InspectorPanel implements Component {
 		// Show trigger pattern if present
 		if (ext.trigger) {
 			lines.push(theme.fg("muted", "Trigger:"));
-			lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
+			lines.push(sectionRule(width));
 			lines.push(`  ${theme.fg("accent", ext.trigger)}`);
 			lines.push("");
 		}

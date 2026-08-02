@@ -12,6 +12,8 @@ import type { TextContent } from "@oh-my-pi/pi-ai";
 import type { Box, Component } from "@oh-my-pi/pi-tui";
 import { Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMarkdownTheme, type Theme, type ThemeColor, theme } from "../../modes/theme/theme";
+import { isFullscreenViewport } from "../../tools/render-utils";
+import { CARD_PADDING_X } from "./collapsible-block";
 
 /** Message shape consumed by the shared frame. */
 export interface FramedMessage {
@@ -62,8 +64,14 @@ export function renderFramedMessage<M extends FramedMessage>(opts: RebuildFrameO
 	}
 
 	opts.box.clear();
-	// Match the skill card: a subtle rounded outline so injected messages read as cards.
-	opts.box.setBorder({ chars: theme.boxRound, color: t => theme.fg(opts.borderColor ?? "borderMuted", t) });
+	// Match the skill card: a subtle rounded outline so injected messages read as
+	// cards. Fullscreen marks the card with its fill instead, and takes back the
+	// columns the frame held so the text lands on the same column either way.
+	const flat = isFullscreenViewport();
+	opts.box.setPaddingX(flat ? CARD_PADDING_X : 1);
+	opts.box.setBorder(
+		flat ? undefined : { chars: theme.boxRound, color: t => theme.fg(opts.borderColor ?? "borderMuted", t) },
+	);
 
 	if (!opts.hideHeader) {
 		const tag = opts.icon ? `${opts.icon} ${opts.message.customType}` : opts.message.customType;

@@ -16,7 +16,6 @@ import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import type { Theme } from "../modes/theme/theme";
-import { getSymbolTheme } from "../modes/theme/theme";
 import { Hasher } from "../tui/utils";
 import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
 
@@ -120,36 +119,55 @@ export function isFullscreenViewport(): boolean {
 }
 
 /**
- * Ambient record of "this render hid something".
+ * Ambient record of what the current render hid and what identifies it.
  *
- * A transcript block only becomes clickable when its collapsed form actually
- * omits content, but that fact is discovered deep inside whichever of the ~30
- * tool renderers drew the block — none of which can see the enclosing
- * component. Rather than widen every renderer signature to thread a flag back
- * out, the two helpers that emit an expand affordance report into a probe the
- * block installs around its own render.
+ * Two facts a transcript block needs are only discoverable deep inside
+ * whichever of the ~30 tool renderers drew it, none of which can see the
+ * enclosing component: whether the collapsed form omitted anything (which is
+ * what makes the block worth clicking), and the one line that identifies the
+ * call (which is all a collapsed card shows in the fullscreen viewport).
+ * Rather than widen every renderer signature, or grow a second per-tool
+ * summary system beside the titles renderers already build, the few shared
+ * helpers every renderer funnels those through report into a probe the block
+ * installs around its own render.
  */
-let overflowProbe: { overflow: boolean } | undefined;
+interface RenderProbe {
+	overflow: boolean;
+	/** First reported identity line. A renderer draws its title before any
+	 *  detail row that reuses the same helper, so first wins. */
+	summary: string | undefined;
+}
+
+let renderProbe: RenderProbe | undefined;
 
 /** Report that the current render omitted content the expanded form would show. */
 export function recordCollapsedOverflow(): void {
-	if (overflowProbe) overflowProbe.overflow = true;
+	if (renderProbe) renderProbe.overflow = true;
+}
+
+/** Report the one line that identifies the block being rendered. */
+export function recordBlockSummary(summary: string): void {
+	if (renderProbe === undefined || renderProbe.summary !== undefined) return;
+	if (summary.trim().length === 0) return;
+	renderProbe.summary = summary;
 }
 
 /**
- * Run `render` with an overflow probe installed and report whether anything
- * inside it hid content. Nested probes propagate outward: a block containing a
- * collapsed child also has something left to reveal.
+ * Run `render` with a probe installed and report what it hid and what it calls
+ * itself. Nested probes propagate outward: a block containing a collapsed
+ * child also has something left to reveal, and an inner block's identity
+ * stands in for an outer one that reported none.
  */
-export function measureCollapsedOverflow<T>(render: () => T): { value: T; overflow: boolean } {
-	const outer = overflowProbe;
-	const probe = { overflow: false };
-	overflowProbe = probe;
+export function measureBlockRender<T>(render: () => T): { value: T; overflow: boolean; summary: string | undefined } {
+	const outer = renderProbe;
+	const probe: RenderProbe = { overflow: false, summary: undefined };
+	renderProbe = probe;
 	try {
-		return { value: render(), overflow: probe.overflow };
+		return { value: render(), overflow: probe.overflow, summary: probe.summary };
 	} finally {
-		overflowProbe = outer;
-		if (probe.overflow && outer) outer.overflow = true;
+		renderProbe = outer;
+		if (probe.overflow) recordCollapsedOverflow();
+		if (probe.summary !== undefined) recordBlockSummary(probe.summary);
 	}
 }
 
@@ -265,13 +283,6 @@ function skipEscape(row: string, i: number): number {
 	return end + 1;
 }
 
-/** Index of the first character in `row` that a terminal actually draws. */
-function firstVisibleCharIndex(row: string): number {
-	let i = 0;
-	while (i < row.length && row[i] === "\x1b") i = skipEscape(row, i);
-	return i;
-}
-
 /**
  * Row on which a rendered block first draws something.
  *
@@ -298,25 +309,47 @@ export function firstContentRow(lines: readonly string[]): number {
 }
 
 /**
- * Draw a collapsible block's header row: a disclosure triangle in the row's
- * left gutter, plus the hover wash while the pointer is over it.
+ * Repaint the first drawn column of an already-composed row.
  *
- * The marker overwrites the card's existing left padding column instead of
- * being prepended, so the header keeps its width and its tail is never pushed
- * off the row. A flush (padding-free) card has no column to borrow and gets
- * the extra one.
+ * A card's accent rail belongs in the card's own first padding column: drawn
+ * outside it, every other block on the surface would have to give up a column
+ * to keep the same left edge. `replacement` has to be exactly one column wide,
+ * and has to restore whatever it changed, because the row's background was
+ * opened before this cell and must carry through to the end of the row.
+ */
+export function paintFirstColumn(row: string, replacement: string): string {
+	let i = 0;
+	while (i < row.length) {
+		if (row[i] === "\x1b") {
+			i = skipEscape(row, i);
+			continue;
+		}
+		const cell = (row.codePointAt(i) ?? 0) > 0xffff ? 2 : 1;
+		return row.slice(0, i) + replacement + row.slice(i + cell);
+	}
+	return row;
+}
+
+/**
+ * Draw a collapsible block's header row: the hover wash while the pointer is
+ * over it, and nothing else.
+ *
+ * There is deliberately NO disclosure triangle. A glyph in the gutter competes
+ * with the tool's own status icon two columns away and reads as clutter at this
+ * size; opencode does not draw one either. What signals that a block is
+ * interactive is the hover fill plus the explicit "click to expand" hint, both
+ * of which appear only on blocks that actually hide something.
+ *
+ * `wash` is off for a block that fills its own card on hover: the fill already
+ * carries the pointer feedback across the block's whole height, and a second
+ * background around this one row would end at the inner reset.
  */
 export function decorateBlockHeader(
 	row: string,
-	options: { expanded: boolean; hovered: boolean },
+	options: { expanded: boolean; hovered: boolean; wash?: boolean },
 	theme: Theme,
 ): string {
-	const symbols = getSymbolTheme();
-	const glyph = options.expanded ? symbols.disclosureExpanded : symbols.disclosureCollapsed;
-	const marker = theme.fg(options.hovered ? "accent" : "dim", glyph);
-	const start = firstVisibleCharIndex(row);
-	const marked = row[start] === " " ? row.slice(0, start) + marker + row.slice(start + 1) : marker + row;
-	return options.hovered ? theme.hoverBg(marked) : marked;
+	return options.hovered && options.wash !== false ? theme.hoverBg(row) : row;
 }
 
 /**
@@ -399,7 +432,12 @@ function sanitizeErrorText(message: string | undefined): string {
 }
 
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {
-	return `${theme.styledSymbol("status.error", "error")} ${theme.fg("error", `Error: ${sanitizeErrorText(message)}`)}`;
+	const line = `${theme.styledSymbol("status.error", "error")} ${theme.fg("error", `Error: ${sanitizeErrorText(message)}`)}`;
+	// A renderer that fails hard prints this instead of its usual title row, so
+	// it is the only thing left that identifies the block. A collapsed card must
+	// still show that the call failed without being expanded.
+	recordBlockSummary(line);
+	return line;
 }
 
 /**

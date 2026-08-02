@@ -9,7 +9,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { bottomBorder, divider, row, topBorder } from "../modes/components/overlay-box";
+import { bottomBorder, divider, row, topBorder, topChromeRows } from "../modes/components/overlay-box";
 import { theme } from "../modes/theme/theme";
 import { copyToClipboard } from "../utils/clipboard";
 import {
@@ -26,7 +26,8 @@ export const LOAD_OLDER_LABEL = "### MOVE UP TO LOAD MORE...";
 const INITIAL_LOG_CHUNK = 50;
 const LOAD_OLDER_CHUNK = 50;
 const MIN_LOG_VIEWER_WIDTH = 48;
-const LOG_VIEWER_CHROME_LINES = 8;
+/** Chrome rows besides the top: summary, filter, two dividers, status, controls, bottom. */
+const LOG_VIEWER_CHROME_LINES_BELOW_TOP = 7;
 
 type LogEntry = {
 	rawLine: string;
@@ -682,12 +683,13 @@ export class DebugLogViewerComponent implements Component {
 		const bodyHeight = this.#bodyHeight();
 
 		const rows = this.#renderRows(contentWidth);
-		this.#bodyRowStart = 4;
+		// Top chrome, then the summary row, the filter row and the divider.
+		this.#bodyRowStart = topChromeRows() + 3;
 		this.#bodyRowCount = bodyHeight;
 		const visibleBodyLines = this.#renderVisibleBodyLines(rows, bodyHeight);
 
 		return [
-			topBorder(this.#lastRenderWidth, "Recent Logs"),
+			...topBorder(this.#lastRenderWidth, "Recent Logs"),
 			row(this.#summaryText(), this.#lastRenderWidth),
 			row(this.#filterText(), this.#lastRenderWidth),
 			divider(this.#lastRenderWidth),
@@ -726,7 +728,10 @@ export class DebugLogViewerComponent implements Component {
 	}
 
 	#bodyHeight(): number {
-		return Math.max(3, (process.stdout.rows || this.#terminalRows || 24) - LOG_VIEWER_CHROME_LINES);
+		return Math.max(
+			3,
+			(process.stdout.rows || this.#terminalRows || 24) - LOG_VIEWER_CHROME_LINES_BELOW_TOP - topChromeRows(),
+		);
 	}
 
 	async #handleLoadOlder(additionalCount: number = LOAD_OLDER_CHUNK): Promise<void> {

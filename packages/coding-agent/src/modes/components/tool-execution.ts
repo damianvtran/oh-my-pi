@@ -11,10 +11,12 @@ import {
 	imageFallback,
 	isHitZoneProvider,
 	type NativeScrollbackLiveRegion,
+	padding,
 	Spacer,
 	TERMINAL,
 	Text,
 	type TUI,
+	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
@@ -26,12 +28,14 @@ import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
 import { isWaitingPollDetails } from "../../tools/hub";
 import {
 	firstContentRow,
+	formatExpandHint,
 	formatStatusIcon,
 	isFullscreenViewport,
-	measureCollapsedOverflow,
+	measureBlockRender,
 	PREVIEW_LIMITS,
 	replaceTabs,
 	resolveImageOptions,
+	truncateToWidth,
 } from "../../tools/render-utils";
 import { type FirstResultViewportRepaint, type ToolRenderer, toolRenderers } from "../../tools/renderers";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../../tools/todo";
@@ -39,7 +43,7 @@ import type { XdevState } from "../../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
-import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
+import { BlockCard, CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import { renderDiff } from "./diff";
 
 /**
@@ -413,8 +417,15 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 */
 	readonly #header = new CollapsibleBlockHeader(`tool:${this.#instanceId}`, () => this.setExpanded(!this.#expanded));
 	readonly #headerPainter = new HeaderRowPainter();
+	readonly #card = new BlockCard();
 	/** Local row the header landed on in the last render; -1 when nothing drew. */
 	#headerRow = -1;
+	/** Rows the last render produced, which the card's click target spans. */
+	#cardRows = 0;
+	/** Whether the last render replaced the block's rows with a summary row. */
+	#rowsCollapsed = false;
+	/** Identity line reported while the renderer's component tree was built. */
+	#builtSummary: string | undefined;
 
 	constructor(
 		toolName: string,
@@ -944,6 +955,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 	override invalidate(): void {
 		super.invalidate();
+		this.#card.invalidate();
 		this.#updateDisplay();
 	}
 
@@ -952,11 +964,15 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${this.#backgroundTaskFrozenStyled}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${this.#backgroundTaskFrozenStyled}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${isFullscreenViewport()}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
-		this.#rebuildDisplay();
+		// Many renderers compose their title row here, when the component tree is
+		// built, rather than inside the component's own `render`. Probe both, so
+		// the collapsed card gets the renderer's own identity line either way.
+		const { summary } = measureBlockRender(() => this.#rebuildDisplay());
+		this.#builtSummary = summary;
 		this.#displayBuilt = true;
 	}
 
@@ -996,19 +1012,88 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return [];
-		// The probe catches whichever renderer drew this card reporting that its
-		// collapsed form left something out; that is the only signal the block
-		// has, since renderers are pure formatters that cannot see it.
-		const { value: lines, overflow } = measureCollapsedOverflow(() => super.render(width));
-		this.#header.noteOverflow(overflow || (this.#expanded && this.#outputExceedsCollapsedCap()));
-		this.#headerRow = firstContentRow(lines);
+		const innerWidth = this.#card.contentWidth(width);
+		// The probe catches whichever renderer drew this card reporting what its
+		// collapsed form left out and what the call calls itself; that is the only
+		// signal the block has, since renderers are pure formatters that cannot
+		// see it.
+		const { value: lines, overflow, summary } = measureBlockRender(() => super.render(innerWidth));
+		const collapsed = this.#collapseToSummary(lines, summary, innerWidth);
+		this.#rowsCollapsed = collapsed !== lines;
+		this.#header.noteOverflow(
+			overflow || this.#rowsCollapsed || (this.#expanded && this.#outputExceedsCollapsedCap()),
+		);
+		const rows = this.#card.paint(collapsed, width, this.#header.hovered);
+		this.#cardRows = rows.length;
+		this.#headerRow = firstContentRow(rows);
 		// Update the paint-tracking flags after `super.render(width)` — the
 		// override runs on every compose the parent Container performs, so a
 		// frame that never gets composed leaves the flags false and prevents a
 		// spurious `resetDisplay()`.
 		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
 		this.#partialResultShapePainted = this.#result !== undefined && this.#isPartial;
-		return this.#headerPainter.paint(lines, this.#headerRow, this.#header, this.#expanded);
+		return this.#headerPainter.paint(rows, this.#headerRow, this.#header, this.#expanded, this.#card.active);
+	}
+
+	/**
+	 * Reduce a settled, collapsed card to the single row that identifies the
+	 * call, whatever its renderer produced.
+	 *
+	 * Only a handful of the ~30 tool renderers have any notion of a preview;
+	 * the rest print their whole result, so a web search used to render at full
+	 * height with no marker and no hit zone, and capping it to a few rows only
+	 * turned that into a cut-off box. A finished call is history: its identity
+	 * row already carries the outcome, and one click brings the rest back.
+	 *
+	 * Live and streaming calls keep their full shape, because their output is
+	 * the thing being watched. So do displaceable snapshots (`todo` lists,
+	 * `hub` polls), which are not history at all: they are current state the
+	 * next call replaces in place.
+	 */
+	#collapseToSummary(lines: readonly string[], summary: string | undefined, width: number): readonly string[] {
+		if (this.#expanded || !this.#card.active) return lines;
+		if (this.#result === undefined || this.#isPartial) return lines;
+		if (this.#displaceableByToolName !== undefined) return lines;
+		// Already a one-liner: leave the renderer's own row alone rather than
+		// swapping it for a reconstruction that says the same thing.
+		if (lines.length <= 1) return lines;
+		return [this.#summaryRow(summary, width)];
+	}
+
+	/**
+	 * The collapsed card's single row: the renderer's own identity line, then
+	 * the expand affordance flushed right.
+	 *
+	 * The hint is never dropped. Nothing else on a collapsed card says it opens
+	 * (there is no disclosure glyph, and the hover fill only appears under the
+	 * pointer), so a card that hides content without it is undiscoverable. When
+	 * the row is too narrow for both, the identity gives up columns first.
+	 */
+	#summaryRow(summary: string | undefined, width: number): string {
+		const identity = summary ?? this.#builtSummary ?? this.#fallbackSummary();
+		const hint = formatExpandHint(theme, false, true);
+		const hintWidth = visibleWidth(hint);
+		if (hintWidth >= width) return truncateToWidth(hint, width);
+		const gap = width - hintWidth - 1;
+		const fitted = truncateToWidth(identity, gap);
+		return `${fitted}${padding(gap - visibleWidth(fitted) + 1)}${hint}`;
+	}
+
+	/**
+	 * Identity row for a renderer that reported none: one that draws neither a
+	 * status line nor a framed header. Built from the same pieces every other
+	 * tool's title row uses so the collapsed transcript stays one shape.
+	 */
+	#fallbackSummary(): string {
+		const firstOutputLine = this.#getTextOutput().split("\n", 1)[0]?.trim();
+		return renderStatusLine(
+			{
+				icon: this.#result?.isError ? "error" : "done",
+				title: this.#toolLabel,
+				description: firstOutputLine || undefined,
+			},
+			theme,
+		);
 	}
 
 	/**
@@ -1026,13 +1111,18 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	}
 
 	/**
-	 * One zone over the card's header row. The body is deliberately left out so
-	 * output text stays drag-selectable; a click that starts in the body is a
-	 * selection gesture, not a toggle.
+	 * One zone over the whole card, in both states. Anything smaller is fussy
+	 * to hit: the fill is what the pointer sees, so the fill is the target. A
+	 * press that moves never reaches `onZoneClick` (the engine turns it into a
+	 * selection), so body text stays selectable underneath.
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
-		super.publishHitZones(sink);
-		this.#header.publish(sink, this.#headerRow);
+		// A collapsed card dropped rows the children's memoized geometry still
+		// counts, so their zones would land on rows that are no longer drawn.
+		// Children publish rows local to the container; the card's top pad sits
+		// above all of them.
+		if (!this.#rowsCollapsed) sink.withOffset(this.#card.topRows, () => super.publishHitZones(sink));
+		this.#header.publish(sink, 0, this.#cardRows);
 	}
 
 	// Viewport-/settings-dependent image sizing folded into the memo key only when
@@ -1059,14 +1149,24 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		const benignSkip = this.#isBenignSkip();
 		const stateBgKey =
 			this.#isPartial || benignSkip ? "toolPendingBg" : this.#result?.isError ? "toolErrorBg" : "toolSuccessBg";
-		const stateBgFn = (t: string) => theme.bg(stateBgKey, t);
+		// Under a card the surrounding fill already separates the block, and a
+		// state tint inside it reads as a second box nested in the first. The
+		// state is carried by the status icon and text colour instead.
+		const stateBgFn = this.#card.active ? undefined : (t: string) => theme.bg(stateBgKey, t);
+		// The card supplies the whole block's inset, so its content sits flush
+		// and every card in the transcript aligns on the same column and starts
+		// on the card's own blank fill row.
+		const contentPaddingX = this.#card.active ? 0 : 1;
+		const contentPaddingY = this.#card.active ? 0 : 1;
+		this.#contentText.setPadding(contentPaddingX, contentPaddingY);
+		this.#contentBox.setPaddingY(contentPaddingY);
 
 		// A benign skip is a synthetic placeholder for a call that never executed,
 		// so bypass any bespoke error frame and draw the neutral generic card —
 		// the per-tool ✘/red-border would misread normal mid-turn steering as a
 		// failure (#7199).
 		if (benignSkip) {
-			this.#renderBenignSkipCard(stateBgFn);
+			this.#renderBenignSkipCard(stateBgFn, contentPaddingX);
 		} else if (this.#tool && (this.#tool.renderCall || this.#tool.renderResult)) {
 			const tool = this.#tool;
 			const mergeCallAndResult = Boolean((tool as { mergeCallAndResult?: boolean }).mergeCallAndResult);
@@ -1156,7 +1256,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			// Custom tools that draw their own frame (task) render flush; plain
 			// extension renderers get the padded, state-tinted block back.
 			const customFramed = this.#contentBox.children.some(isFramedBlockComponent);
-			this.#contentBox.setPaddingX(customFramed ? 0 : 1);
+			this.#contentBox.setPaddingX(customFramed ? 0 : contentPaddingX);
 			this.#contentBox.setBgFn(customFramed ? undefined : stateBgFn);
 		} else if (this.#renderer) {
 			// The active registry entry is a built-in tool with a rich renderer.
@@ -1520,7 +1620,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * only need the neutral tint. Bespoke-renderer tools get their content box
 	 * swapped for the same neutral card.
 	 */
-	#renderBenignSkipCard(stateBgFn: (text: string) => string): void {
+	#renderBenignSkipCard(stateBgFn: ((text: string) => string) | undefined, paddingX: number): void {
 		if (!this.#usesContentBox) {
 			this.#contentText.setCustomBgFn(stateBgFn);
 			this.#contentText.invalidate();
@@ -1532,7 +1632,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#multiFileBoxes = [];
 		this.#contentBox.setBgFn(undefined);
 		this.#contentBox.clear();
-		this.#contentBox.setPaddingX(1);
+		this.#contentBox.setPaddingX(paddingX);
 		this.#contentBox.setBgFn(stateBgFn);
 		this.#contentBox.addChild(new WidthAwareText(contentWidth => this.#renderDefaultCard(contentWidth), 0, 0));
 	}

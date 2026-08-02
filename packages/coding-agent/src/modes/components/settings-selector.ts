@@ -44,7 +44,7 @@ import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
 import { getTabBarTheme } from "../shared";
-import { bottomBorder, divider, row, topBorder } from "./overlay-box";
+import { bottomBorder, divider, row, topBorder, topChromeRows } from "./overlay-box";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
@@ -649,8 +649,8 @@ export class SettingsSelectorComponent implements Component {
 		const showPreview = !searching && this.#currentTabId === "appearance";
 		const previewLines = showPreview ? ["", theme.fg("muted", "Preview:"), this.#getStatusPreviewString()] : [];
 
-		// Fixed chrome: top border, tabs, divider, [search row], divider, hint, bottom border.
-		const fixedRows = 1 + tabLines.length + 1 + (searching ? 1 : 0) + 1 + 1 + 1;
+		// Fixed chrome: top chrome, tabs, divider, [search row], divider, hint, bottom border.
+		const fixedRows = topChromeRows() + tabLines.length + 1 + (searching ? 1 : 0) + 1 + 1 + 1;
 		const contentRows = Math.max(7, height - fixedRows - previewLines.length);
 
 		const list = this.#searchList ?? this.#currentList;
@@ -666,7 +666,7 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Settings"));
+		out.push(...topBorder(width, "Settings"));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) {

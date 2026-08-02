@@ -7,13 +7,14 @@ import { Container, type HitZoneSink, type Loader, Text, type TUI } from "@oh-my
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { highlightCode, theme } from "../../modes/theme/theme";
 import type { TruncationMeta } from "../../tools/output-meta";
-import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
+import { BlockCard, CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import {
 	buildExecutionFrame,
 	buildStatusFooter,
 	createCollapsedPreview,
 	type ExecutionColorKey,
 	type ExecutionStatus,
+	executionContentPaddingX,
 	resolveExecutionStatus,
 } from "./execution-shared";
 
@@ -36,13 +37,15 @@ export class EvalExecutionComponent extends Container {
 	#contentContainer: Container;
 	#headerText: Text;
 	#headerRow = 0;
-	#headerRowCount = 1;
+	/** Rows the last render produced, which the card's click target spans. */
+	#cardRows = 0;
 	// The engine repaints after a consumed click, so the toggle only has to
 	// rebuild this block's display.
 	readonly #header = new CollapsibleBlockHeader(`eval:${++evalExecutionInstanceSeq}`, () =>
 		this.setExpanded(!this.#expanded),
 	);
 	readonly #headerPainter = new HeaderRowPainter();
+	readonly #card = new BlockCard();
 
 	#highlightLang(): "python" | "javascript" {
 		return this.language === "js" ? "javascript" : "python";
@@ -55,7 +58,7 @@ export class EvalExecutionComponent extends Container {
 		const headerLines = codeLines.map((line, index) =>
 			index === 0 ? `${prompt} ${line}` : `${continuation}${line}`,
 		);
-		return new Text(headerLines.join("\n"), 1, 0);
+		return new Text(headerLines.join("\n"), executionContentPaddingX(), 0);
 	}
 
 	constructor(
@@ -92,26 +95,34 @@ export class EvalExecutionComponent extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.#card.invalidate();
 		this.#updateDisplay();
 	}
 
 	override render(width: number): readonly string[] {
-		const lines = super.render(width);
+		const innerWidth = this.#card.contentWidth(width);
+		const lines = super.render(innerWidth);
 		// The header is the code, which sits immediately below the frame's top
-		// border. Both are children rendered at this same width, so their
+		// rule (nothing at all in fullscreen, where the card's own top pad takes
+		// its place). Both are children rendered at this same width, so their
 		// memoized line counts give the header's row without re-rendering.
-		this.#headerRow = this.children[0]?.render(width).length ?? 0;
-		this.#headerRowCount = Math.max(1, this.#headerText.render(width).length);
-		return this.#headerPainter.paint(lines, this.#headerRow, this.#header, this.#expanded);
+		this.#headerRow = this.#card.topRows + (this.children[0]?.render(innerWidth).length ?? 0);
+		const rows = this.#card.paint(lines, width, this.#header.hovered);
+		this.#cardRows = rows.length;
+		return this.#headerPainter.paint(rows, this.#headerRow, this.#header, this.#expanded, this.#card.active);
 	}
 
 	/**
-	 * One zone over the code rows only. The output below stays outside it so it
-	 * remains drag-selectable.
+	 * One zone over the whole card, in both states. Anything smaller is fussy
+	 * to hit: the fill is what the pointer sees, so the fill is the target. A
+	 * press that moves never reaches `onZoneClick` (the engine turns it into a
+	 * selection), so the output stays drag-selectable underneath.
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
-		super.publishHitZones(sink);
-		this.#header.publish(sink, this.#headerRow, this.#headerRowCount);
+		// Children publish rows local to the container; the card's top pad sits
+		// above all of them.
+		sink.withOffset(this.#card.topRows, () => super.publishHitZones(sink));
+		this.#header.publish(sink, 0, this.#cardRows);
 	}
 
 	appendOutput(chunk: string): void {
@@ -147,6 +158,8 @@ export class EvalExecutionComponent extends Container {
 
 	#updateDisplay(): void {
 		const availableLines = this.#outputLines;
+		const paddingX = executionContentPaddingX();
+		this.#loader.setPadding(paddingX, 0);
 		const previewLogicalLines = availableLines.slice(-PREVIEW_LINES);
 		// Only the collapsed preview hides lines; when expanded the footer must
 		// not keep advertising hidden lines / ctrl+o.
@@ -162,10 +175,10 @@ export class EvalExecutionComponent extends Container {
 		if (availableLines.length > 0) {
 			if (this.#expanded) {
 				const displayText = availableLines.map(line => theme.fg("muted", line)).join("\n");
-				this.#contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
+				this.#contentContainer.addChild(new Text(`\n${displayText}`, paddingX, 0));
 			} else {
 				const styledOutput = previewLogicalLines.map(line => theme.fg("muted", line)).join("\n");
-				this.#contentContainer.addChild(createCollapsedPreview(`\n${styledOutput}`, PREVIEW_LINES));
+				this.#contentContainer.addChild(createCollapsedPreview(`\n${styledOutput}`, PREVIEW_LINES, paddingX));
 			}
 		}
 
@@ -177,6 +190,7 @@ export class EvalExecutionComponent extends Container {
 				exitCode: this.#exitCode,
 				truncation: this.#truncation,
 				hiddenLineCount,
+				paddingX,
 			});
 			if (footer) this.#contentContainer.addChild(footer);
 		}

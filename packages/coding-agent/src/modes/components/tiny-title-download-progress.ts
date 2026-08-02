@@ -3,6 +3,7 @@ import { formatBytes } from "@oh-my-pi/pi-utils";
 import { getTinyTitleModelSpec, type TinyTitleLocalModelKey } from "../../tiny/models";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { theme } from "../theme/theme";
+import { BlockCard } from "./collapsible-block";
 
 const DEFAULT_BAR_WIDTH = 24;
 
@@ -54,6 +55,7 @@ function byteLabel(event: TinyTitleProgressEvent | undefined): string | undefine
 export class TinyTitleDownloadProgressComponent implements Component {
 	#modelKey: TinyTitleLocalModelKey;
 	#event: TinyTitleProgressEvent | undefined;
+	readonly #card = new BlockCard();
 
 	constructor(modelKey: TinyTitleLocalModelKey) {
 		this.#modelKey = modelKey;
@@ -68,23 +70,29 @@ export class TinyTitleDownloadProgressComponent implements Component {
 	}
 
 	invalidate(): void {
-		// No cached state.
+		this.#card.invalidate();
 	}
 
 	render(width: number): readonly string[] {
 		width = Math.max(1, width);
+		const inner = this.#card.contentWidth(width);
 		const spec = getTinyTitleModelSpec(this.#modelKey);
-		const border = theme.fg("border", theme.boxRound.horizontal.repeat(width));
 		const status = statusLabel(this.#event);
 		const file = currentFile(this.#event);
 		const pct =
 			this.#event?.progress === undefined ? "" : `${Math.floor(this.#event.progress).toString().padStart(3, " ")}%`;
 		const bytes = byteLabel(this.#event);
 		const title = `${theme.fg("accent", "Tiny model")} ${theme.fg("muted", status)} ${spec.label}`;
-		const details = [progressBar(this.#event?.progress, Math.max(8, width - 36)), pct, bytes, file]
+		const details = [progressBar(this.#event?.progress, Math.max(8, inner - 36)), pct, bytes, file]
 			.filter((part): part is string => Boolean(part))
 			.join(" ");
 
-		return [border, padLine(` ${title}`, width), padLine(` ${details}`, width), border];
+		// A card's fill and blank rows are its boundary in fullscreen; the rules
+		// only exist because append mode has no surface to contrast against.
+		if (!this.#card.active) {
+			const border = theme.fg("border", theme.boxRound.horizontal.repeat(width));
+			return [border, padLine(` ${title}`, width), padLine(` ${details}`, width), border];
+		}
+		return this.#card.paint([padLine(title, inner), padLine(details, inner)], width, false);
 	}
 }

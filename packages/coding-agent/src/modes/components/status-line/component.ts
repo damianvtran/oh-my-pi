@@ -1,12 +1,13 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
-import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { type Component, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
+import { isFullscreenViewport } from "../../../tools/render-utils";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
 import * as git from "../../../utils/git";
 import * as jj from "../../../utils/jj";
@@ -1707,10 +1708,15 @@ export class StatusLineComponent implements Component {
 		// set `statusLineBg: ""`. Powerline end caps need a contrasting fill to
 		// bridge the bar into the surrounding terminal; without one they read as
 		// stray glyphs, so the cap renderer drops them when the fill is empty.
+		//
+		// Fullscreen rides on the composer panel instead: the bar is one row of
+		// that surface, so it takes the panel fill and drops the caps, which
+		// would only bridge the panel into itself.
 		const TRANSPARENT_BG_ANSI = "\x1b[49m";
+		const onPanel = isFullscreenViewport();
 		const themeBgAnsi = theme.getBgAnsi("statusLineBg");
-		const bgAnsi = effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi;
-		const transparentBg = bgAnsi === TRANSPARENT_BG_ANSI;
+		const bgAnsi = onPanel ? theme.panelBgAnsi : effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi;
+		const dropEndCaps = onPanel || bgAnsi === TRANSPARENT_BG_ANSI;
 		const fgAnsi = theme.getFgAnsi("text");
 		const sepAnsi = theme.getFgAnsi("statusLineSep");
 		const subagentBadge = this.#subagentBadgeText();
@@ -1749,10 +1755,9 @@ export class StatusLineComponent implements Component {
 
 		const leftSepWidth = visibleWidth(separatorDef.left);
 		const rightSepWidth = visibleWidth(separatorDef.right);
-		// Transparent mode drops powerline caps (they need a bg fill to bridge),
-		// so the width budget excludes them too.
-		const leftCapWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.right) : 0;
-		const rightCapWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.left) : 0;
+		// Capless modes exclude the caps from the width budget too.
+		const leftCapWidth = separatorDef.endCaps && !dropEndCaps ? visibleWidth(separatorDef.endCaps.right) : 0;
+		const rightCapWidth = separatorDef.endCaps && !dropEndCaps ? visibleWidth(separatorDef.endCaps.left) : 0;
 
 		const groupWidth = (parts: string[], capWidth: number, sepWidth: number): number => {
 			if (parts.length === 0) return 0;
@@ -1826,7 +1831,7 @@ export class StatusLineComponent implements Component {
 			if (parts.length === 0) return "";
 			const sep = direction === "left" ? separatorDef.left : separatorDef.right;
 			const cap =
-				separatorDef.endCaps && !transparentBg
+				separatorDef.endCaps && !dropEndCaps
 					? direction === "left"
 						? separatorDef.endCaps.right
 						: separatorDef.endCaps.left
@@ -1853,6 +1858,12 @@ export class StatusLineComponent implements Component {
 		}
 
 		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
+		if (onPanel) {
+			// The session-accent rule is the one piece of the bar that is a rule.
+			// On the panel the gap is just more of the surface; the accent still
+			// reaches the eye through the session_name segment on the right.
+			return leftGroup + bgAnsi + padding(gapWidth) + rightGroup;
+		}
 		const sessionName =
 			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
 		const accentHex = sessionName
@@ -1884,8 +1895,13 @@ export class StatusLineComponent implements Component {
 			return [];
 		}
 
-		return Array.from(this.#hookStatuses.entries())
+		// Hook rows sit directly above the composer, so in fullscreen they take
+		// the same panel fill and inset and read as the top of that surface.
+		const onPanel = isFullscreenViewport();
+		const inset = onPanel ? 2 : 0;
+		const rows = Array.from(this.#hookStatuses.entries())
 			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([, text]) => truncateToWidth(sanitizeStatusText(text), width));
+			.map(([, text]) => truncateToWidth(sanitizeStatusText(text), Math.max(0, width - inset)));
+		return onPanel ? rows.map(row => theme.panelBg(padding(inset) + row, width)) : rows;
 	}
 }

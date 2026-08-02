@@ -907,17 +907,19 @@ describe("PlanReviewOverlay", () => {
 			{ promptTitle: "next", options: APPROVAL_OPTIONS },
 			{ onPick, onCancel: vi.fn() },
 		);
-		const selectedBg = theme.getBgAnsi("selectedBg");
+		// The hover band is the raised rung of the surface ladder, the same surface
+		// a hovered card lifts to.
+		const hoverBand = theme.elementBgAnsi;
 		render(overlay); // populate the click maps before hit-testing
 
 		// Hover a non-selected option (selection rests on index 0).
-		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
+		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(hoverBand);
 		expect(hoverRow(overlay, "Approve and keep context")).toBe(true);
-		expect(optionLineRaw(overlay, "Approve and keep context")).toContain(selectedBg);
+		expect(optionLineRaw(overlay, "Approve and keep context")).toContain(hoverBand);
 
 		// Pointer onto the top border (a non-option row) drops the highlight.
 		overlay.handleInput("\x1b[<35;6;1M");
-		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
+		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(hoverBand);
 
 		// Hover is visual only: the keyboard cursor stays on index 0, so Enter still
 		// confirms the first option rather than the hovered one.
@@ -931,9 +933,9 @@ describe("PlanReviewOverlay", () => {
 			{ promptTitle: "next", options: APPROVAL_OPTIONS, disabledIndices: [2] },
 			{ onPick: vi.fn(), onCancel: vi.fn() },
 		);
-		const selectedBg = theme.getBgAnsi("selectedBg");
+		const hoverBand = theme.elementBgAnsi;
 		render(overlay);
 		expect(hoverRow(overlay, "Approve and keep context")).toBe(true);
-		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
+		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(hoverBand);
 	});
 });

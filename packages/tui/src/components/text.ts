@@ -81,6 +81,21 @@ export class Text implements Component {
 	}
 
 	/**
+	 * Change the inset after construction. The fullscreen transcript moves both
+	 * insets from the text to the enclosing card, and the viewport mode can be
+	 * switched at runtime, so the same instance has to re-inset in place.
+	 */
+	setPadding(paddingX: number, paddingY: number): void {
+		if (paddingX === this.#paddingX && paddingY === this.#paddingY) return;
+		this.#paddingX = paddingX;
+		this.#paddingY = paddingY;
+		this.#cachedText = undefined;
+		this.#cachedWidth = undefined;
+		this.#cachedWidthEpoch = undefined;
+		this.#cachedLines = undefined;
+	}
+
+	/**
 	 * Supply a foreground styler applied to the text at render time (e.g. a
 	 * theme color resolver). Unlike baking the color into `text`, the styler
 	 * re-runs on every render, so invalidating the component after a theme

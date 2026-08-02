@@ -369,6 +369,60 @@ describe("resource_metadata chain", () => {
 		});
 	});
 
+	it("prefers resource-scoped scopes over the auth server's scope universe and reads an array `resource`", async () => {
+		// Shape taken verbatim from gitlab.com: the protected resource needs only
+		// `mcp`, while the authorization server advertises every scope it knows
+		// (including `sudo`/`admin_mode`), and `resource` arrives as an array
+		// rather than RFC 9728's single string. Reading the AS list first made
+		// OMP request admin scopes; the string-only `resource` read dropped the
+		// audience indicator from the stored credential.
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+
+			if (url === "https://gitlab.com/.well-known/oauth-protected-resource/api/v4/mcp") {
+				return new Response(
+					JSON.stringify({
+						resource: ["https://gitlab.com/api/v4/mcp"],
+						authorization_servers: ["https://gitlab.com"],
+						scopes_supported: ["mcp"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === "https://gitlab.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://gitlab.com",
+						authorization_endpoint: "https://gitlab.com/oauth/authorize",
+						token_endpoint: "https://gitlab.com/oauth/token",
+						registration_endpoint: "https://gitlab.com/oauth/register",
+						scopes_supported: ["api", "read_api", "sudo", "admin_mode", "mcp"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(
+			"https://gitlab.com/api/v4/mcp",
+			undefined,
+			"https://gitlab.com/.well-known/oauth-protected-resource/api/v4/mcp",
+			{ fetch: fetchImpl },
+		);
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://gitlab.com/oauth/authorize",
+			tokenUrl: "https://gitlab.com/oauth/token",
+			registrationUrl: "https://gitlab.com/oauth/register",
+			clientId: undefined,
+			scopes: "mcp",
+			resource: "https://gitlab.com/api/v4/mcp",
+		});
+	});
+
 	it("follows resource_metadata URL to discover authorization servers", async () => {
 		const calls: string[] = [];
 		const fetchImpl = mockFetch((input: FetchInput) => {

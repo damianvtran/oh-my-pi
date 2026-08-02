@@ -4,6 +4,7 @@
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, padding, TERMINAL, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import type { Theme, ThemeColor } from "../modes/theme/theme";
+import { isFullscreenViewport, recordBlockSummary } from "../tools/render-utils";
 import { getSixelLineMask } from "../utils/sixel";
 import type { State } from "./types";
 import type { RenderCache } from "./utils";
@@ -39,6 +40,7 @@ export function isFramedBlockComponent(component: Component): boolean {
 type BlockRow =
 	| { kind: "bar"; leftChar: string; rightChar: string; label?: string; meta?: string }
 	| { kind: "bottom"; leftChar: string; rightChar: string }
+	| { kind: "blank" }
 	| { kind: "content"; inner: string; origin: BlockRowOrigin }
 	| { kind: "sixel"; raw: string; origin: BlockRowOrigin };
 
@@ -65,6 +67,9 @@ function normalizeContentPaddingLeft(value: number | undefined): number {
  * given outer `width`: both vertical borders plus symmetric content padding.
  * An explicit left padding of zero keeps legacy flush blocks flush on both
  * sides unless a right padding is provided separately.
+ *
+ * The fullscreen viewport draws no borders, so there the two rule columns are
+ * content. Callers pre-wrap against this, so it must agree with the frame.
  */
 export function outputBlockContentWidth(
 	width: number,
@@ -73,7 +78,7 @@ export function outputBlockContentWidth(
 ): number {
 	const left = normalizeContentPaddingLeft(contentPaddingLeft);
 	const right = normalizeContentPaddingLeft(contentPaddingRight ?? left);
-	return Math.max(1, width - 2 - left - right);
+	return Math.max(1, width - (isFullscreenViewport() ? 0 : 2) - left - right);
 }
 
 /**
@@ -87,8 +92,15 @@ export function renderOutputBlock(
 	origins?: (BlockRowOrigin | undefined)[],
 ): string[] {
 	const { header, headerMeta, state, sections = [], width, applyBg = true } = options;
+	// A self-framing block's title bar is its identity row. Reported for the
+	// collapsed one-line card; a header built by `renderStatusLine` has already
+	// reported itself and wins, so this only covers plain-string headers.
+	if (header !== undefined) recordBlockSummary(headerMeta ? `${header} ${headerMeta}` : header);
+	// Fullscreen marks boundaries with fills, and the card this block sits in
+	// already draws them, so the frame collapses to its label rows.
+	const flat = isFullscreenViewport();
 	const h = theme.boxRound.horizontal;
-	const v = theme.boxRound.vertical;
+	const v = flat ? "" : theme.boxRound.vertical;
 	const cap = h.repeat(3);
 	const lineWidth = Math.max(0, width);
 	// Border colors: running/pending use accent, success uses dim (gray), error/warning keep their colors
@@ -126,13 +138,17 @@ export function renderOutputBlock(
 
 	// ── Layout pass: collect row descriptors before emitting the bordered lines. ──
 	const rows: BlockRow[] = [];
-	rows.push({
-		kind: "bar",
-		leftChar: theme.boxRound.topLeft,
-		rightChar: theme.boxRound.topRight,
-		label: header,
-		meta: headerMeta,
-	});
+	// A headerless top rule is pure decoration, so it goes away entirely without
+	// a frame to anchor it; a titled one survives as its label.
+	if (!flat || header !== undefined || headerMeta !== undefined) {
+		rows.push({
+			kind: "bar",
+			leftChar: theme.boxRound.topLeft,
+			rightChar: theme.boxRound.topRight,
+			label: header,
+			meta: headerMeta,
+		});
+	}
 
 	const normalizedSections = sections.length > 0 ? sections : [{ lines: [] as string[] }];
 	for (let sectionIndex = 0; sectionIndex < normalizedSections.length; sectionIndex++) {
@@ -140,7 +156,9 @@ export function renderOutputBlock(
 		// A labeled section always draws its titled separator bar. A label-less
 		// section can still request a plain divider via `separator`, but only
 		// between sections — leading with one would just double the header bar.
+		// Without rules the break is carried by a blank row instead.
 		if (section.label) {
+			if (flat && rows.length > 0) rows.push({ kind: "blank" });
 			rows.push({
 				kind: "bar",
 				leftChar: theme.boxRound.teeRight,
@@ -148,11 +166,15 @@ export function renderOutputBlock(
 				label: section.label,
 			});
 		} else if (section.separator && sectionIndex > 0) {
-			rows.push({
-				kind: "bar",
-				leftChar: theme.boxRound.teeRight,
-				rightChar: theme.boxRound.teeLeft,
-			});
+			rows.push(
+				flat
+					? { kind: "blank" }
+					: {
+							kind: "bar",
+							leftChar: theme.boxRound.teeRight,
+							rightChar: theme.boxRound.teeLeft,
+						},
+			);
 		}
 		// Embedded newlines split a caller line into several, so carry the
 		// pre-split index alongside: origins are reported in the caller's own
@@ -181,29 +203,31 @@ export function renderOutputBlock(
 		}
 	}
 
-	rows.push({ kind: "bottom", leftChar: theme.boxRound.bottomLeft, rightChar: theme.boxRound.bottomRight });
+	// The card's own trailing fill row terminates the block when there is no rule.
+	if (!flat) rows.push({ kind: "bottom", leftChar: theme.boxRound.bottomLeft, rightChar: theme.boxRound.bottomRight });
 
 	const H = rows.length;
 
 	const renderBar = (row: { leftChar: string; rightChar: string; label?: string; meta?: string }): string => {
-		const leftGlyphs = `${row.leftChar}${cap}`;
-		const rightGlyph = row.rightChar;
-		if (lineWidth <= 0) return border(leftGlyphs) + border(rightGlyph);
+		const leftGlyphs = flat ? contentLeftPadding : `${row.leftChar}${cap}`;
+		const rightGlyph = flat ? "" : row.rightChar;
+		if (lineWidth <= 0) return flat ? "" : border(leftGlyphs) + border(rightGlyph);
 		const labelText = [row.label, row.meta].filter(Boolean).join(theme.sep.dot);
 		if (!labelText) {
+			if (flat) return "";
 			// No header: draw a clean, continuous top/separator bar (no 1-col gap).
 			const fillCount = Math.max(0, lineWidth - visibleWidth(leftGlyphs) - visibleWidth(rightGlyph));
 			return `${border(leftGlyphs)}${border(h.repeat(fillCount))}${border(rightGlyph)}`;
 		}
-		const rawLabel = ` ${labelText} `;
+		const rawLabel = flat ? labelText : ` ${labelText} `;
 		const leftWidth = visibleWidth(leftGlyphs);
 		const rightWidth = visibleWidth(rightGlyph);
 		const maxLabelWidth = Math.max(0, lineWidth - leftWidth - rightWidth);
 		const trimmedLabel = truncateToWidth(rawLabel, maxLabelWidth);
 		const labelWidth = visibleWidth(trimmedLabel);
 		const fillCount = Math.max(0, lineWidth - leftWidth - labelWidth - rightWidth);
-		const fillGlyphs = h.repeat(fillCount);
-		return `${border(leftGlyphs)}${trimmedLabel}${border(fillGlyphs)}${border(rightGlyph)}`;
+		if (flat) return `${leftGlyphs}${trimmedLabel}`;
+		return `${border(leftGlyphs)}${trimmedLabel}${border(h.repeat(fillCount))}${border(rightGlyph)}`;
 	};
 
 	const renderBottom = (row: { leftChar: string; rightChar: string }): string => {
@@ -214,20 +238,26 @@ export function renderOutputBlock(
 		return `${border(leftGlyphs)}${border(fillGlyphs)}${border(rightGlyph)}`;
 	};
 
-	const renderContent = (inner: string): string =>
-		`${border(v)}${contentLeftPadding}${inner}${contentRightPadding}${border(v)}`;
+	const rail = flat ? "" : border(v);
+	const renderContent = (inner: string): string => `${rail}${contentLeftPadding}${inner}${contentRightPadding}${rail}`;
 
 	const lines: string[] = [];
 	if (origins) origins.length = 0;
 	for (let r = 0; r < H; r++) {
 		const row = rows[r]!;
-		origins?.push(row.kind === "bar" || row.kind === "bottom" ? undefined : row.origin);
+		origins?.push(row.kind === "content" || row.kind === "sixel" ? row.origin : undefined);
 		if (row.kind === "sixel") {
 			lines.push(row.raw);
 			continue;
 		}
 		const line =
-			row.kind === "bar" ? renderBar(row) : row.kind === "bottom" ? renderBottom(row) : renderContent(row.inner);
+			row.kind === "blank"
+				? ""
+				: row.kind === "bar"
+					? renderBar(row)
+					: row.kind === "bottom"
+						? renderBottom(row)
+						: renderContent(row.inner);
 		lines.push(padToWidth(line, lineWidth, bgFn));
 	}
 

@@ -234,6 +234,37 @@ export interface FullscreenPinned {
 }
 
 /**
+ * Window chrome for `fullscreen` mode: the gutter around the content and the
+ * base surface painted behind every row.
+ *
+ * The engine owns this rather than leaving it to components because a surface
+ * has to cover rows no component rendered — the padding rows, the gap under a
+ * short transcript, the blanks beside a narrow block. A fill applied only where
+ * components drew leaves the terminal's own background showing through exactly
+ * the gaps that make a filled UI look broken.
+ */
+export interface ViewportChrome {
+	/** Columns of empty gutter on each side. */
+	padX: number;
+	/** Blank rows above the content. */
+	padTop: number;
+	/** Blank rows below the pinned chrome. */
+	padBottom: number;
+	/**
+	 * Paints one full-width row onto the app surface. Receives the row already
+	 * inset by `padX` and must return it padded to `width`. Undefined leaves the
+	 * terminal background untouched.
+	 */
+	fill: ((line: string, width: number) => string) | undefined;
+	/**
+	 * Paints one row of a composited overlay, so a modal reads as a raised panel
+	 * against the canvas. Applied per row because an overlay's interior is
+	 * arbitrary child components that no shared wrapper intercepts.
+	 */
+	overlayFill?: ((line: string, width: number) => string) | undefined;
+}
+
+/**
  * Zero-height marker that starts the pinned run in `fullscreen` mode.
  *
  * Inserting a sentinel beats tagging the chrome containers themselves: the
@@ -601,6 +632,16 @@ export interface OverlayHandle {
 /**
  * Container - a component that contains other components
  */
+interface CapturedZone {
+	target: MouseZoneTarget;
+	zoneKey: string;
+	row: number;
+	colStart: number;
+	pressRow: number;
+	pressCol: number;
+	moved: boolean;
+}
+
 export class Container
 	implements Component, NativeScrollbackCommittedRows, NativeScrollbackReplay, NativeScrollbackWidthEpoch
 {
@@ -1275,6 +1316,8 @@ export class TUI extends Container {
 	 */
 	#lastFrameCostMs = 0;
 	static readonly #MIN_RENDER_INTERVAL_MS = 1000 / 30;
+	/** Fullscreen cadence. See the note in {@link TUI.#scheduleRender}. */
+	static readonly #MIN_FULLSCREEN_RENDER_INTERVAL_MS = 1000 / 60;
 	static readonly #INPUT_RENDER_GRACE_MS = TUI.#MIN_RENDER_INTERVAL_MS;
 	/**
 	 * Cap on the adaptive floor derived from `#lastFrameCostMs`. Bounds the UI
@@ -1524,6 +1567,17 @@ export class TUI extends Container {
 	// selection extraction both address frame rows, not screen rows.
 	#fullscreenScrollFrame: string[] = [];
 	#fullscreenScrollViewportRows = 0;
+	// Gutter and top inset actually applied this frame, after clamping to the
+	// terminal size. Pointer coordinates are screen-absolute, so hit testing and
+	// selection both have to subtract these to reach content coordinates.
+	#fullscreenPadX = 0;
+	#fullscreenPadTop = 0;
+	#viewportChrome: ViewportChrome = { padX: 0, padTop: 0, padBottom: 0, fill: undefined };
+	// Home state: the pinned run is centred in the viewport instead of welded to
+	// its base. The empty session floats a wordmark and a narrow composer
+	// mid-screen, and the composer only drops to the bottom once there is a
+	// transcript for it to sit under.
+	#centerPinned = false;
 	// Hit zones of the last frame, in frame coordinates, tree order.
 	#zones: readonly HitZone[] = [];
 	#zoneSink = new HitZoneSink();
@@ -1532,6 +1586,10 @@ export class TUI extends Container {
 	// The zone a press landed in. A click only fires when the release lands in
 	// the same zone, so dragging off a control cancels it like every other UI.
 	#pressedZoneKey: string | null = null;
+	// Pointer capture for a zone that owns its own drag gesture (the composer's
+	// caret and text selection). While set, the engine's transcript selection and
+	// copy-on-release stay out of the way entirely.
+	#capturedZone: CapturedZone | null = null;
 	#selection = new Selection();
 	// Set while the pointer is down inside the scroll region, so motion reports
 	// extend a selection instead of being treated as hover.
@@ -2091,6 +2149,19 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Install the window gutter and surface fill used in `fullscreen` mode.
+	 *
+	 * Separate from `setViewportMode` because the app resolves it from the
+	 * active theme and must be able to re-apply it when the theme changes
+	 * without cycling the alternate screen.
+	 */
+	setViewportChrome(chrome: Partial<ViewportChrome>): void {
+		this.#viewportChrome = { ...this.#viewportChrome, ...chrome };
+		this.#altPreviousLines = [];
+		if (this.#viewportMode === "fullscreen") this.requestRender(true);
+	}
+
+	/**
 	 * Switch between native-scrollback and full-screen rendering at runtime.
 	 *
 	 * Entering forces a repaint so the alt buffer gets a complete frame rather
@@ -2116,6 +2187,19 @@ export class TUI extends Container {
 		} else {
 			this.requestRender(true);
 		}
+	}
+
+	/**
+	 * Float the pinned chrome mid-viewport instead of welding it to the base.
+	 *
+	 * Only takes effect while the scrolling region is empty, so it cannot strand
+	 * the composer in the middle of a live transcript: the app can set it once at
+	 * startup and the first message relocates the composer on its own.
+	 */
+	setCenterPinned(centered: boolean): void {
+		if (centered === this.#centerPinned) return;
+		this.#centerPinned = centered;
+		if (this.#viewportMode === "fullscreen") this.requestRender(true);
 	}
 
 	/** Rows of the scrolling region that do not fit the viewport. */
@@ -3132,7 +3216,15 @@ export class TUI extends Container {
 		}
 		const now = this.#renderScheduler.now();
 		const elapsed = now - this.#lastRenderAt;
-		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		// The 30 Hz ceiling is a native-scrollback compromise: on the normal screen
+		// every frame risks committing rows to history, so cheap frames are not
+		// actually cheap. The fullscreen path commits nothing and diffs per row, and
+		// measured frame cost stays ~3 ms even at 18k transcript rows, so it runs at
+		// 60 Hz. Pointer hover and scroll are the visible beneficiaries: at 30 Hz a
+		// hover band lags the cursor enough to feel unattached to it.
+		const minInterval =
+			this.#viewportMode === "fullscreen" ? TUI.#MIN_FULLSCREEN_RENDER_INTERVAL_MS : TUI.#MIN_RENDER_INTERVAL_MS;
+		const cadenceDelay = Math.max(0, minInterval - elapsed);
 		// Adaptive backpressure — target ~50% render duty cycle: the next frame
 		// starts no sooner than `last_frame_end + last_frame_cost`, i.e.
 		// `last_frame_start + 2 × last_frame_cost`. So `elapsed` (which counts
@@ -3282,6 +3374,15 @@ export class TUI extends Container {
 		}
 
 		if (event.motion) {
+			// A captured zone owns the gesture. Coordinates are reported in its
+			// frame and deliberately NOT clamped: a drag that leaves the composer
+			// has to keep extending the selection, which is what every editor does.
+			const captured = this.#capturedZone;
+			if (captured) {
+				if (row !== captured.pressRow || col !== captured.pressCol) captured.moved = true;
+				if (captured.target.onZoneDrag?.("move", this.#capturedZoneEvent(event, captured))) this.requestRender();
+				return true;
+			}
 			if (this.#selecting) {
 				const point = this.#viewportPointAt(row, col);
 				if (point && this.#selection.extend(point)) this.requestRender();
@@ -3297,6 +3398,25 @@ export class TUI extends Container {
 			// A fresh press always drops the previous selection, matching every
 			// text surface: click-to-dismiss is how a user cancels a selection.
 			const cleared = this.#selection.clear();
+			if (zone?.target.onZoneDrag) {
+				const capture = {
+					target: zone.target,
+					zoneKey: zone.target.zoneKey,
+					row: zone.row,
+					colStart: Number.isFinite(zone.colStart) ? zone.colStart : 0,
+					pressRow: row,
+					pressCol: col,
+					moved: false,
+				};
+				if (zone.target.onZoneDrag("start", this.#capturedZoneEvent(event, capture))) {
+					// Capture suppresses transcript selection and copy-on-release
+					// for the whole gesture, so the two selection models can never
+					// both claim the same drag.
+					this.#capturedZone = capture;
+					this.requestRender();
+					return true;
+				}
+			}
 			const point = this.#viewportPointAt(row, col);
 			if (point) {
 				this.#selection.begin(point);
@@ -3306,6 +3426,17 @@ export class TUI extends Container {
 			return true;
 		}
 		if (event.release) {
+			const captured = this.#capturedZone;
+			if (captured) {
+				this.#capturedZone = null;
+				captured.target.onZoneDrag?.("end", this.#capturedZoneEvent(event, captured));
+				// A gesture that never left the press cell is a click, so caret
+				// placement and drag-select stay one code path for the owner.
+				if (!captured.moved) captured.target.onZoneClick?.(this.#capturedZoneEvent(event, captured));
+				this.#pressedZoneKey = null;
+				this.requestRender();
+				return true;
+			}
 			const wasSelecting = this.#selecting;
 			this.#selecting = false;
 			this.#selection.end();
@@ -3332,6 +3463,31 @@ export class TUI extends Container {
 		return true;
 	}
 
+	/**
+	 * Coordinates for a captured gesture, relative to the zone's origin as it
+	 * was when the press landed. Unclamped by contract: negative and past-end
+	 * values are how the owner knows the drag left its bounds.
+	 */
+	#capturedZoneEvent(raw: SgrMouseEvent, capture: CapturedZone): ZoneMouseEvent {
+		return { raw, localRow: raw.row - capture.row, localCol: raw.col - capture.colStart };
+	}
+
+	/**
+	 * Drop pointer capture when the owning zone stops being published.
+	 *
+	 * Without this a component that unmounts under a held button (an overlay
+	 * closing mid-drag) would keep receiving `move` forever and the engine would
+	 * never resume its own selection handling.
+	 */
+	#releaseStaleCapture(): void {
+		const captured = this.#capturedZone;
+		if (!captured) return;
+		for (const zone of this.#zones) {
+			if (zone.target.zoneKey === captured.zoneKey) return;
+		}
+		this.#capturedZone = null;
+	}
+
 	#zoneEvent(raw: SgrMouseEvent, zone: HitZone): ZoneMouseEvent {
 		return {
 			raw,
@@ -3341,13 +3497,18 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Frame coordinates for a screen cell, or null when the cell is not inside
+	 * Content coordinates for a screen cell, or null when the cell is not inside
 	 * the scrolling region. Selection is deliberately confined to the transcript:
 	 * dragging across the composer should move the caret, not select chrome.
+	 *
+	 * Both insets come off here. Columns are content-relative because the frame
+	 * rows the selection indexes and copies from were composed at content width,
+	 * before the gutter was prepended.
 	 */
 	#viewportPointAt(screenRow: number, col: number): SelectionPoint | null {
-		if (screenRow < 0 || screenRow >= this.#fullscreenScrollViewportRows) return null;
-		return { row: this.#scrollTop + screenRow, col: Math.max(0, col) };
+		const row = screenRow - this.#fullscreenPadTop;
+		if (row < 0 || row >= this.#fullscreenScrollViewportRows) return null;
+		return { row: this.#scrollTop + row, col: Math.max(0, col - this.#fullscreenPadX) };
 	}
 
 	/** Move hover to the zone under the pointer, repainting only on a change. */
@@ -3528,12 +3689,22 @@ export class TUI extends Container {
 	 */
 	#compositeOverlaysIntoWindow(window: string[], termWidth: number, termHeight: number): string[] {
 		const result = [...window];
+		// In fullscreen an overlay is a panel inside the same window as everything
+		// else, so it is laid out against the INSET bounds. Resolving it against
+		// the raw terminal instead let a `width: "100%"` overlay run to both edges
+		// while the transcript and composer under it kept their gutter, which read
+		// as the right-hand padding being missing.
+		const inset = this.#viewportMode === "fullscreen";
+		const padX = inset ? this.#fullscreenPadX : 0;
+		const padTop = inset ? this.#fullscreenPadTop : 0;
+		const boundsWidth = Math.max(1, termWidth - padX * 2);
+		const boundsHeight = Math.max(1, termHeight - padTop - (inset ? this.#viewportChrome.padBottom : 0));
 		for (const entry of this.overlayStack) {
 			if (!this.#isOverlayVisible(entry)) continue;
 			const { component, options } = entry;
 			// Get layout with height=0 first to determine width and maxHeight
 			// (width and maxHeight don't depend on overlay height).
-			const { width, maxHeight } = this.#resolveOverlayLayout(options, 0, termWidth, termHeight);
+			const { width, maxHeight } = this.#resolveOverlayLayout(options, 0, boundsWidth, boundsHeight);
 			let overlayLines = component.render(width);
 			if (overlayLines.length > maxHeight) {
 				const anchor = options?.anchor ?? "center";
@@ -3542,13 +3713,22 @@ export class TUI extends Container {
 						? overlayLines.slice(overlayLines.length - maxHeight)
 						: overlayLines.slice(0, maxHeight);
 			}
-			const { row, col } = this.#resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
+			const placed = this.#resolveOverlayLayout(options, overlayLines.length, boundsWidth, boundsHeight);
+			const row = placed.row + padTop;
+			const col = placed.col + padX;
+			// In fullscreen the overlay is a raised panel, and its own surface has
+			// to be painted here: the canvas fill runs before compositing, and the
+			// overlay's inner rows are plain Text/SelectList children that no
+			// shared overlay wrapper ever sees. Filling per composited row covers
+			// every overlay at once instead of migrating 18 callsites.
+			const overlayFill = this.#viewportMode === "fullscreen" ? this.#viewportChrome.overlayFill : undefined;
 			for (let i = 0; i < overlayLines.length; i++) {
 				const idx = row + i;
 				if (idx < 0 || idx >= result.length) continue;
-				const truncatedOverlayLine =
+				let overlayLine =
 					visibleWidth(overlayLines[i]) > width ? sliceByColumn(overlayLines[i], 0, width, true) : overlayLines[i];
-				result[idx] = this.#compositeLineAt(result[idx], truncatedOverlayLine, col, width, termWidth);
+				if (overlayFill) overlayLine = overlayFill(overlayLine, width);
+				result[idx] = this.#compositeLineAt(result[idx], overlayLine, col, width, termWidth);
 			}
 		}
 		return result;
@@ -5407,6 +5587,15 @@ export class TUI extends Container {
 	 * protect, so there is nothing to commit, audit or re-anchor.
 	 */
 	#renderFullscreenFrame(width: number, height: number): void {
+		const chrome = this.#viewportChrome;
+		// Content is composed narrower than the terminal and inset when painted.
+		// The gutter is what stops text colliding with the window edge, and it is
+		// most of why a filled surface reads as a panel rather than as a wall.
+		const padX = Math.max(0, Math.min(chrome.padX, Math.floor((width - 8) / 2)));
+		const contentWidth = Math.max(1, width - padX * 2);
+		const padTop = height > chrome.padTop + chrome.padBottom + 4 ? chrome.padTop : 0;
+		const padBottom = padTop > 0 ? chrome.padBottom : 0;
+
 		const children = this.children;
 		let pinnedFrom = children.length;
 		for (let i = 0; i < children.length; i++) {
@@ -5421,13 +5610,13 @@ export class TUI extends Container {
 		const rowCounts: number[] = new Array(children.length);
 		const scrollLines: string[] = [];
 		for (let i = 0; i < pinnedFrom; i++) {
-			const rows = children[i]!.render(width);
+			const rows = children[i]!.render(contentWidth);
 			rowCounts[i] = rows.length;
 			for (let j = 0; j < rows.length; j++) scrollLines.push(rows[j]!);
 		}
 		const pinnedLines: string[] = [];
 		for (let i = pinnedFrom; i < children.length; i++) {
-			const rows = children[i]!.render(width);
+			const rows = children[i]!.render(contentWidth);
 			rowCounts[i] = rows.length;
 			for (let j = 0; j < rows.length; j++) pinnedLines.push(rows[j]!);
 		}
@@ -5436,12 +5625,23 @@ export class TUI extends Container {
 		// a composer expanded to twenty lines must not squeeze the transcript to
 		// nothing. When it does not fit we keep its TAIL, because the editor and
 		// its caret live at the bottom of that run.
-		const pinnedRows = Math.min(pinnedLines.length, Math.max(0, height - TUI.#MIN_FULLSCREEN_SCROLL_ROWS));
+		const bodyRows = Math.max(0, height - padTop - padBottom);
+		const pinnedRows = Math.min(pinnedLines.length, Math.max(0, bodyRows - TUI.#MIN_FULLSCREEN_SCROLL_ROWS));
 		const pinnedWindow = pinnedLines.slice(pinnedLines.length - pinnedRows);
-		const viewportRows = Math.max(0, height - pinnedRows);
+		const viewportRows = Math.max(0, bodyRows - pinnedRows);
+		// Home state floats the pinned block in the middle of an empty viewport.
+		// The scroll region still exists and still measures zero-or-more rows, so
+		// the transition to the normal layout is just this offset going to zero:
+		// nothing about scrolling, zones or selection changes shape.
+		const centered = this.#centerPinned && scrollLines.length === 0;
+		const pinnedTop = centered
+			? padTop + Math.max(0, Math.floor((bodyRows - pinnedRows) / 2))
+			: padTop + viewportRows;
 
 		this.#fullscreenScrollFrame = scrollLines;
 		this.#fullscreenScrollViewportRows = viewportRows;
+		this.#fullscreenPadX = padX;
+		this.#fullscreenPadTop = padTop;
 
 		// Re-pin before windowing so content that arrived this frame is visible
 		// in this frame rather than one frame later.
@@ -5450,24 +5650,34 @@ export class TUI extends Container {
 		else if (this.#scrollTop > maxScroll) this.#scrollTop = maxScroll;
 
 		const screen: string[] = new Array(height);
+		for (let r = 0; r < height; r++) screen[r] = "";
 		for (let r = 0; r < viewportRows; r++) {
 			const frameRow = this.#scrollTop + r;
 			let line = scrollLines[frameRow] ?? "";
-			const span = this.#selection.spanForRow(frameRow, width);
-			if (span) line = highlightLineSpan(line, span.start, span.end, width);
-			screen[r] = line;
+			const span = this.#selection.spanForRow(frameRow, contentWidth);
+			if (span) line = highlightLineSpan(line, span.start, span.end, contentWidth);
+			screen[padTop + r] = line;
 		}
-		for (let r = 0; r < pinnedRows; r++) screen[viewportRows + r] = pinnedWindow[r] ?? "";
-		for (let r = viewportRows + pinnedRows; r < height; r++) screen[r] = "";
+		for (let r = 0; r < pinnedRows; r++) screen[pinnedTop + r] = pinnedWindow[r] ?? "";
 
-		// Markers are stripped from the composed screen, so the caret is placed
-		// in viewport coordinates directly — no window/commit translation, which
-		// is the whole reason the fullscreen cursor path is three lines and the
-		// append one is not.
+		// Markers are stripped BEFORE insetting so their recorded column is the
+		// content column; the gutter is added back to the caret below.
 		const markers = this.#extractCursorMarkers(screen);
-		const cursor = markers.length > 0 ? markers[0]! : null;
+		const cursor = markers.length > 0 ? { row: markers[0]!.row, col: markers[0]!.col + padX } : null;
 
-		this.#collectFullscreenZones(children, rowCounts, pinnedFrom, viewportRows, pinnedLines.length - pinnedRows);
+		// Inset and fill last, so every row above (including the blank padding
+		// rows and any short row) lands on one continuous surface. Skipping the
+		// blanks would leave the terminal's own background showing through in
+		// exactly the gaps that make a filled UI look broken.
+		if (padX > 0 || chrome.fill) {
+			const gutter = " ".repeat(padX);
+			for (let r = 0; r < height; r++) {
+				const inset = padX > 0 ? gutter + screen[r]! : screen[r]!;
+				screen[r] = chrome.fill ? chrome.fill(inset, width) : inset;
+			}
+		}
+
+		this.#collectFullscreenZones(children, rowCounts, pinnedFrom, pinnedTop, pinnedLines.length - pinnedRows);
 
 		let lines = this.#compositeOverlaysIntoWindow(screen, width, height);
 		lines = this.#prepareLinesArray(lines, width);
@@ -5487,17 +5697,22 @@ export class TUI extends Container {
 		children: readonly Component[],
 		rowCounts: readonly number[],
 		pinnedFrom: number,
-		viewportRows: number,
+		pinnedTop: number,
 		pinnedClipped: number,
 	): void {
 		const sink = this.#zoneSink;
 		sink.reset();
-		// Scroll-region children start above the viewport by the scroll offset;
-		// pinned children restart at the top of the pinned run, minus whatever
-		// was clipped off its head when it did not fit.
-		let offset = -this.#scrollTop;
+		// Columns published by components are content-relative; the gutter is the
+		// same for every zone in the frame, so it is applied once here rather than
+		// threaded through the container walk.
+		sink.columnOffset = this.#fullscreenPadX;
+		// Scroll-region children start above the viewport by the scroll offset and
+		// below the window top by the padding; pinned children restart at wherever
+		// the pinned run was actually placed, which is not the bottom in the
+		// centred home state, minus whatever was clipped off its head.
+		let offset = this.#fullscreenPadTop - this.#scrollTop;
 		for (let i = 0; i < children.length; i++) {
-			if (i === pinnedFrom) offset = viewportRows - pinnedClipped;
+			if (i === pinnedFrom) offset = pinnedTop - pinnedClipped;
 			const child = children[i]!;
 			if (isHitZoneProvider(child)) {
 				const base = offset;
@@ -5506,6 +5721,7 @@ export class TUI extends Container {
 			offset += rowCounts[i] ?? 0;
 		}
 		this.#zones = sink.zones;
+		this.#releaseStaleCapture();
 	}
 
 	/**
@@ -5519,7 +5735,7 @@ export class TUI extends Container {
 	 *
 	 * This matters for the full-screen app in a way it never did for a modal:
 	 * a streaming assistant reply changes two or three rows per frame, and
-	 * rewriting the whole viewport for each of them at 60 Hz is the difference
+	 * rewriting the whole viewport for each of them is the difference
 	 * between smooth and visibly chugging.
 	 */
 	#emitAltFrame(lines: string[], width: number, height: number, cursor?: { row: number; col: number } | null): void {

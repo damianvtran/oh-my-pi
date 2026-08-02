@@ -9,7 +9,25 @@ import {
 	type RenderStablePrefix,
 	type ViewportTailProvider,
 } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import { isToolActivityComponent } from "./tool-activity";
+
+/**
+ * `PI_TUI_TRANSCRIPT_AUDIT=1` turns on the duplicate-row audit in {@link
+ * TranscriptContainer.render}.
+ *
+ * A user reported a resumed fullscreen session drawing the first visual row of
+ * a user message twice, the copy sitting directly above the real row. It has
+ * never been reproduced from a settled state: not through the replay path, not
+ * through the live engine against a VT, not after scrolling or resizing. The
+ * audit exists so the next sighting arrives with a block index and the two
+ * rows instead of a screenshot, and so a future change that makes assembly
+ * capable of emitting it is caught here rather than by eye.
+ *
+ * Read once: it gates a per-block string compare on the render hot path, and
+ * the flag cannot change without a restart.
+ */
+const AUDIT_DUPLICATE_ROWS = Bun.env.PI_TUI_TRANSCRIPT_AUDIT === "1" || Bun.env.PI_TUI_TRANSCRIPT_AUDIT === "true";
 
 /**
  * A transcript block that is still mutating (a foreground tool awaiting its
@@ -118,6 +136,34 @@ function leadingTrimmedRows(rawRef: readonly string[]): number {
 }
 
 /**
+ * Report a block that opens by repeating a row: either the row already sitting
+ * above it, or its own second row. Both shapes are the reported bug and
+ * neither is ever legitimate, because a block's contribution has had its blank
+ * edges stripped and the separator makes a boundary repeat unrepresentable.
+ *
+ * `above` is the previous frame row only when no separator will be inserted;
+ * with one, the row above is the separator and cannot collide.
+ *
+ * Only ever called behind {@link AUDIT_DUPLICATE_ROWS}.
+ */
+function auditDuplicateRows(
+	index: number,
+	child: Component,
+	contribution: readonly string[],
+	above: string | undefined,
+): void {
+	const first = contribution[0]!;
+	const against = above === first ? "the row above it" : contribution[1] === first ? "its own second row" : undefined;
+	if (against === undefined) return;
+	logger.warn("transcript assembly: block repeats a row", {
+		block: index,
+		component: child.constructor.name,
+		against,
+		row: first,
+	});
+}
+
+/**
  * One block's recorded contribution to the assembled transcript: the raw array
  * reference its render() returned, the stripped contribution derived from it,
  * and where those rows landed. Reference-compared on the next render — per the
@@ -214,7 +260,18 @@ export class TranscriptContainer
 	// consumes the report and re-bases the baseline). Out-of-band renders
 	// between engine frames lower it; they can never inflate it.
 	#stableRowsFloor = 0;
+
+	/**
+	 * Fired when the transcript is about to stop being empty, before the block
+	 * is added. The fullscreen home screen comes down here: "there is a
+	 * transcript now" is the one condition every path into it shares, and going
+	 * first lets the handler file its own rows ahead of the arriving block.
+	 * Handlers clear it themselves; it is not re-entrant.
+	 */
+	onFirstBlock: (() => void) | undefined;
+
 	override addChild(component: Component): void {
+		if (this.children.length === 0) this.onFirstBlock?.();
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
 	}
@@ -631,6 +688,8 @@ export class TranscriptContainer
 			// `lines[row - 1]` is valid in both modes: reused rows are still present
 			// in the persistent array, re-pushed rows were just written.
 			const sep = row > 0 && !isPlainBlank(lines[row - 1]!) ? 1 : 0;
+
+			if (AUDIT_DUPLICATE_ROWS) auditDuplicateRows(i, child, contribution, sep === 0 ? lines[row - 1] : undefined);
 
 			// The separator before the first live block stays in the committed
 			// prefix (it is deterministic once the prior block's body is

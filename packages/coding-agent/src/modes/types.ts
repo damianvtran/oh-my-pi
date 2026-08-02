@@ -255,6 +255,19 @@ export interface InteractiveModeContext {
 	 */
 	present(content: Component | readonly Component[]): void;
 	/**
+	 * Mount a startup notice: an MCP summary, an update banner, a status line.
+	 *
+	 * While the fullscreen home screen is up these are chrome rather than
+	 * history — putting them in the transcript would push the home screen aside
+	 * for a line about an MCP server — so they collect in the home screen's own
+	 * pinned run and move into the transcript, in order, when it comes down.
+	 * With no home screen this is {@link present}. Notices are static rows;
+	 * anything carrying a block lifecycle belongs in the transcript.
+	 */
+	presentNotice(content: readonly Component[]): void;
+	/** Container {@link presentNotice} is mounting into right now. */
+	readonly noticeContainer: Container;
+	/**
 	 * Mount command output immediately while idle, or defer it until the active
 	 * agent turn ends so a growing live block cannot push duplicate rows into
 	 * native scrollback.
@@ -269,6 +282,13 @@ export interface InteractiveModeContext {
 	 */
 	resetTranscript(): void;
 	showStatus(message: string, options?: { dim?: boolean }): void;
+	/**
+	 * Paint one toast into the fullscreen pinned row above the composer,
+	 * replacing whatever was there and restarting its expiry. Only reached from
+	 * `showStatus` in the fullscreen viewport; append mode keeps its statuses in
+	 * the transcript.
+	 */
+	showTransientStatus(message: string, styleFn: ((text: string) => string) | undefined): void;
 	showModelCycleTrack(track: string): void;
 	showError(message: string): void;
 	showPinnedError(message: string): void;

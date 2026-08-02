@@ -59,6 +59,20 @@ export function pickWeightedTip(tips: readonly string[], r: number): string {
 	return tips[tips.length - 1] ?? "";
 }
 
+/**
+ * Draw one tip for this session from the embedded set. Both startup surfaces
+ * call this so a session shows one tip regardless of which of them is on
+ * screen: the welcome box in `append`, the home screen in `fullscreen`.
+ *
+ * Users on a plain unicode preset occasionally get nagged about nerdfonts
+ * instead, which is worth more to them than another affordance they cannot
+ * see the glyphs for.
+ */
+export function pickSessionTip(): string {
+	if (theme.getSymbolPreset() === "unicode" && Math.random() < 0.1) return "Please use nerdfont 😭.";
+	return pickWeightedTip(TIPS, Math.random());
+}
+
 type ColorEncoding = "ansi-16m" | "ansi-256";
 
 /** Paint each glyph of {@link NEW_TAG_TEXT} on a moving HSL rainbow. `phase`
@@ -139,8 +153,7 @@ export interface LspServerInfo {
  * Premium welcome screen with block-based OMP logo and two-column layout.
  */
 export class WelcomeComponent implements Component {
-	#animStart: number | null = null;
-	#animTimer: Timer | null = null;
+	#intro = new LogoIntro(() => this.invalidate());
 	#selectedTip: string | undefined;
 	// Render cache: the welcome box is the first transcript-area component, so
 	// returning a stable array reference keeps the whole frame prefix stable.
@@ -156,13 +169,7 @@ export class WelcomeComponent implements Component {
 		private lspServers: LspServerInfo[] = [],
 	) {}
 	get tip(): string | undefined {
-		if (this.#selectedTip === undefined) {
-			if (theme.getSymbolPreset() === "unicode" && Math.random() < 0.1) {
-				this.#selectedTip = "Please use nerdfont 😭.";
-			} else {
-				this.#selectedTip = pickWeightedTip(TIPS, Math.random());
-			}
-		}
+		this.#selectedTip ??= pickSessionTip();
 		return this.#selectedTip || undefined;
 	}
 
@@ -177,26 +184,11 @@ export class WelcomeComponent implements Component {
 	 * subsequent calls reset and replay.
 	 */
 	playIntro(requestRender: () => void): void {
-		this.#stopAnimation();
-		this.#animStart = performance.now();
-		requestRender();
-		this.#animTimer = setInterval(() => {
-			const elapsed = performance.now() - (this.#animStart ?? 0);
-			if (elapsed >= INTRO_MS) {
-				this.#stopAnimation();
-			}
-			requestRender();
-		}, INTRO_TICK_MS);
+		this.#intro.play(requestRender);
 	}
 
-	#stopAnimation(): void {
-		if (this.#animTimer != null) {
-			clearInterval(this.#animTimer);
-			this.#animTimer = null;
-		}
-		this.#animStart = null;
-		// The settled (resting) frame differs from the last intro frame.
-		this.invalidate();
+	dispose(): void {
+		this.#intro.stop();
 	}
 
 	setModel(modelName: string, providerName: string): void {
@@ -216,7 +208,7 @@ export class WelcomeComponent implements Component {
 	}
 
 	render(termWidth: number): readonly string[] {
-		const animating = this.#animStart != null;
+		const animating = this.#intro.running;
 		if (!animating && this.#cachedLines && this.#cachedWidth === termWidth) {
 			return this.#cachedLines;
 		}
@@ -261,8 +253,8 @@ export class WelcomeComponent implements Component {
 		const leftCol = showRightColumn ? dualLeftCol : boxWidth - 2;
 		const rightCol = showRightColumn ? dualRightCol : 0;
 
-		// Logo: pick a frame from the intro animation if active, else the resting frame.
-		const logoColored = this.#currentLogoFrame();
+		// Logo: a frame of the intro sweep while it runs, else the resting frame.
+		const logoColored = this.#intro.frame();
 
 		// Left column - centered content
 		const leftLines = [
@@ -443,14 +435,6 @@ export class WelcomeComponent implements Component {
 		}
 		return str + padding(width - visLen);
 	}
-
-	/** Pick the logo frame for the current intro phase, or the resting frame. */
-	#currentLogoFrame(): readonly string[] {
-		if (this.#animStart == null) return REST_FRAME;
-		const elapsed = performance.now() - this.#animStart;
-		if (elapsed >= INTRO_MS) return REST_FRAME;
-		return introLogoFrame(elapsed / INTRO_MS);
-	}
 }
 
 export const PI_LOGO = ["▀██████████▀", " ╘██    ██  ", "  ██    ██  ", "  ██    ██  ", " ▄██▄  ▄██▄ "];
@@ -579,3 +563,51 @@ function introLogoFrame(progress: number): string[] {
 
 /** Resting gradient frame, cached for re-renders outside of the intro. */
 const REST_FRAME = gradientLogo(PI_LOGO, 0);
+
+/**
+ * One-shot gradient sweep over the pi glyph, shared by the two surfaces that
+ * paint it at startup. It owns the timer, so a surface only has to say when to
+ * play and what to repaint; both would otherwise carry the same replay,
+ * settle-once and teardown bookkeeping.
+ */
+export class LogoIntro {
+	#start: number | null = null;
+	#timer: Timer | null = null;
+
+	/** Called when the sweep settles, so the owner can drop a cached frame. */
+	constructor(private readonly onSettle: () => void) {}
+
+	/** True while the sweep is running, which is also "do not cache my rows". */
+	get running(): boolean {
+		return this.#start != null;
+	}
+
+	/** Start (or restart) the sweep, repainting through `requestRender`. */
+	play(requestRender: () => void): void {
+		this.stop();
+		this.#start = performance.now();
+		requestRender();
+		this.#timer = setInterval(() => {
+			if (performance.now() - (this.#start ?? 0) >= INTRO_MS) this.stop();
+			requestRender();
+		}, INTRO_TICK_MS);
+	}
+
+	/** The frame to paint right now: a sweep frame, or the resting gradient. */
+	frame(): readonly string[] {
+		if (this.#start == null) return REST_FRAME;
+		const elapsed = performance.now() - this.#start;
+		if (elapsed >= INTRO_MS) return REST_FRAME;
+		return introLogoFrame(elapsed / INTRO_MS);
+	}
+
+	stop(): void {
+		if (this.#timer != null) {
+			clearInterval(this.#timer);
+			this.#timer = null;
+		}
+		this.#start = null;
+		// The settled frame differs from the last frame of the sweep.
+		this.onSettle();
+	}
+}

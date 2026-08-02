@@ -18,7 +18,7 @@ import {
 	sortModelItems,
 } from "./model-browser";
 import type { ScopedModelItem } from "./model-hub";
-import { bottomBorder, row, topBorder } from "./overlay-box";
+import { bottomBorder, row, topBorder, topChromeRows } from "./overlay-box";
 import { resolveSegmentPalette } from "./segment-track";
 
 export interface ModelPickerCallbacks {
@@ -47,8 +47,8 @@ export interface ModelPickerOptions {
 	currentQuickRole?: string;
 }
 
-/** Fixed chrome rows: top border, status row, footer, bottom border. */
-const CHROME_ROWS = 4;
+/** Fixed chrome rows besides the top: status row, footer, bottom border. */
+const CHROME_ROWS_BELOW_TOP = 3;
 /** Rows the browser renders around its list window (search + blank, blank + two detail rows). */
 const BROWSER_FRAME_ROWS = 5;
 /** Minimum rows for the browser list window on short terminals. */
@@ -216,7 +216,8 @@ export class ModelPickerComponent implements Component {
 
 	render(width: number): string[] {
 		const termRows = Math.max(16, this.#tui.terminal?.rows || process.stdout.rows || 40);
-		const listBudget = Math.floor(termRows * HEIGHT_FRACTION) - CHROME_ROWS - BROWSER_FRAME_ROWS;
+		const listBudget =
+			Math.floor(termRows * HEIGHT_FRACTION) - CHROME_ROWS_BELOW_TOP - topChromeRows() - BROWSER_FRAME_ROWS;
 		this.#browser.setMaxVisible(Math.max(MIN_VISIBLE, listBudget));
 
 		const inner = Math.max(1, width - 4);
@@ -225,7 +226,7 @@ export class ModelPickerComponent implements Component {
 			: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Switch Model"));
+		out.push(...topBorder(width, "Switch Model"));
 		out.push(row(status, width));
 		for (const line of this.#browser.render(inner)) {
 			out.push(row(line, width));

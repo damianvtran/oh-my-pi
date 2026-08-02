@@ -7,6 +7,8 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { isFullscreenViewport } from "../../../tools/render-utils";
+import { CARD_PADDING_X } from "../../components/collapsible-block";
 import {
 	enableAutoTheme,
 	getAvailableThemes,
@@ -59,14 +61,26 @@ function renderMockStatusLine(width: number): string {
 	return theme.bg("statusLineBg", fitLine(` ${left}${gap}${right} `, width));
 }
 
+/** Mirrors the real composer so the preview shows the palette in situ: a frame
+ *  in append mode, the panel fill and inset the fullscreen composer uses. */
 function renderMockEditor(width: number): string[] {
+	const prompt = `${theme.fg("accent", ">")} ${theme.fg("text", "Ask anything, edit files, run tools")}${theme.inverse(" ")}`;
+	const hint = theme.fg("dim", "enter send · shift+enter newline · / commands");
+	if (isFullscreenViewport()) {
+		const inset = padding(CARD_PADDING_X);
+		const innerWidth = Math.max(1, width - 2 * CARD_PADDING_X);
+		return [
+			theme.panelBg(padding(width), width),
+			theme.panelBg(`${inset}${fitLine(prompt, innerWidth)}${inset}`, width),
+			theme.panelBg(`${inset}${fillStyledLine(hint, innerWidth)}${inset}`, width),
+			theme.panelBg(padding(width), width),
+		];
+	}
 	const box = theme.boxRound;
 	const innerWidth = Math.max(1, width - 2);
 	const horizontal = box.horizontal.repeat(innerWidth);
 	const top = theme.fg("borderAccent", `${box.topLeft}${horizontal}${box.topRight}`);
 	const bottom = theme.fg("borderMuted", `${box.bottomLeft}${horizontal}${box.bottomRight}`);
-	const prompt = `${theme.fg("accent", ">")} ${theme.fg("text", "Ask anything, edit files, run tools")}${theme.inverse(" ")}`;
-	const hint = theme.fg("dim", "enter send · shift+enter newline · / commands");
 	return [
 		top,
 		`${theme.fg("borderAccent", box.vertical)}${fitLine(prompt, innerWidth)}${theme.fg("borderAccent", box.vertical)}`,
