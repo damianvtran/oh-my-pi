@@ -7,8 +7,8 @@
  * paint a full-width wash across a card's padding.
  *
  * The two edges are found differently, so they are tested differently: the
- * LEFT edge is the inset the app declares, and the RIGHT edge is recovered
- * per row from where the text actually stops.
+ * LEFT edge is row-local chrome metadata published by the component, and the
+ * RIGHT edge is recovered from where each row's text actually stops.
  */
 import { describe, expect, it } from "bun:test";
 import { bandForLine, extractSelectionText, highlightLineSpan, Selection, textEndColumn } from "../src/selection";
@@ -61,6 +61,10 @@ describe("bandForLine", () => {
 
 	it("selects geometrically when no inset is declared", () => {
 		expect(bandForLine(CARD_ROW, WIDTH, 0)).toEqual({ start: 0, end: 7 });
+	});
+
+	it("keeps a final content cell when a narrow box drops its right padding", () => {
+		expect(bandForLine("  x", 3, 2)).toEqual({ start: 2, end: 3 });
 	});
 });
 
@@ -132,5 +136,11 @@ describe("extractSelectionText", () => {
 
 	it("copies the whole row when no inset is declared", () => {
 		expect(extractSelectionText([CARD_ROW], range, WIDTH, 0)).toBe("  hello");
+	});
+
+	it("resolves the inset independently for heterogeneous rows", () => {
+		const rows = [CARD_ROW, "assistant".padEnd(WIDTH, " ")];
+		const multi = { start: { row: 0, col: 0 }, end: { row: 1, col: WIDTH - 1 } };
+		expect(extractSelectionText(rows, multi, WIDTH, row => (row === 0 ? 2 : 0))).toBe("hello\nassistant");
 	});
 });

@@ -7,16 +7,17 @@
  *  - a DRAG selects glyphs, so it must yield exactly the text under the
  *    highlight — not the card padding the rectangle also crosses, and not the
  *    accent rail a user card paints into its own first column;
- *  - a COPY CLICK (alt+click, or the second click of a double click) means
- *    "that message", so it must yield the block's source, which for a
- *    collapsed tool card is content the frame is not even showing.
+ *  - a COPY CLICK (Alt+click on any block, or click two on copy-only prose)
+ *    means "that source", so it must recover content a collapsed card is not
+ *    even showing without letting activation reflow the target between clicks.
  *
  * Both were wrong before this file existed: the drag cut a rectangle through
  * the chrome, and the copy click did not exist.
  */
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CARD_PADDING_X } from "@oh-my-pi/pi-coding-agent/modes/components/collapsible-block";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
@@ -24,14 +25,17 @@ import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-codin
 import { TUI } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "../../tui/test/render-stress-scheduler";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 const WIDTH = 60;
-/** Matches the chrome below; the card's text starts PAD_X + CARD_PADDING_X in. */
+/** Window gutter; card insets are published separately by each component. */
 const PAD_X = 2;
 const HEIGHT = 20;
 /** The user text is deliberately long enough to wrap, so interior rows exist. */
 const USER_TEXT = "copy me exactly and nothing else at all, not the padding either";
+const ASSISTANT_TEXT = "assistant starts at its first cell";
 const TOOL_OUTPUT = Array.from({ length: 40 }, (_, i) => `output line ${i + 1}`).join("\n");
+const READ_OUTPUT = Array.from({ length: 12 }, (_, i) => `read line ${i + 1}`).join("\n");
 
 /** Mirrors InteractiveMode#applyViewportChrome so the frame under test is the real one. */
 function applyChrome(tui: TUI, active: Theme): void {
@@ -39,7 +43,6 @@ function applyChrome(tui: TUI, active: Theme): void {
 		padX: PAD_X,
 		padTop: 0,
 		padBottom: 1,
-		textInset: CARD_PADDING_X,
 		fill: (line, width) => active.surfaceBg(line, width),
 		overlayFill: (line, width) => active.overlayBg(line, width),
 	});
@@ -54,7 +57,10 @@ interface Harness {
 	rowOf(text: string): number;
 }
 
-async function mount(active: Theme): Promise<Harness> {
+async function mountWith(
+	active: Theme,
+	populate: (transcript: TranscriptContainer, tui: TUI) => void,
+): Promise<Harness> {
 	const term = new VirtualTerminal(WIDTH, HEIGHT, 500);
 	const scheduler = new StressRenderScheduler();
 	const tui = new TUI(term, undefined, { renderScheduler: scheduler });
@@ -66,10 +72,7 @@ async function mount(active: Theme): Promise<Harness> {
 
 	const transcript = new TranscriptContainer();
 	tui.addChild(transcript);
-	transcript.addChild(new UserMessageComponent(USER_TEXT));
-	const tool = new ToolExecutionComponent("bash", { command: "ls" }, {}, undefined, tui);
-	tool.updateResult({ content: [{ type: "text", text: TOOL_OUTPUT }], isError: false }, false);
-	transcript.addChild(tool);
+	populate(transcript, tui);
 	tui.start();
 
 	const settle = () => scheduler.drain(term);
@@ -81,6 +84,16 @@ async function mount(active: Theme): Promise<Harness> {
 		return rows.findIndex(line => line.includes(needle));
 	};
 	return { tui, term, copied, settle, rowOf };
+}
+
+async function mount(active: Theme): Promise<Harness> {
+	return mountWith(active, (transcript, tui) => {
+		transcript.addChild(new UserMessageComponent(USER_TEXT));
+		transcript.addChild(new AssistantMessageComponent(createAssistantMessage(ASSISTANT_TEXT)));
+		const tool = new ToolExecutionComponent("bash", { command: "ls" }, {}, undefined, tui);
+		tool.updateResult({ content: [{ type: "text", text: TOOL_OUTPUT }], isError: false }, false);
+		transcript.addChild(tool);
+	});
 }
 
 /** One SGR press/release pair at a screen cell. `mods` are the SGR button bits. */
@@ -140,6 +153,16 @@ describe("transcript drag-selection", () => {
 		expect(text).toContain("copy me exactly");
 		expect(text).toContain("padding either");
 	});
+
+	it("keeps the first cell of unpadded assistant prose", async () => {
+		const { term, copied, rowOf } = await mount(active);
+		const row = rowOf(ASSISTANT_TEXT);
+		expect(row).toBeGreaterThanOrEqual(0);
+
+		drag(term, [row, 0], [row, WIDTH - 1]);
+
+		expect(copied).toEqual([ASSISTANT_TEXT]);
+	});
 });
 
 describe("transcript copy gesture", () => {
@@ -178,12 +201,14 @@ describe("transcript copy gesture", () => {
 		expect(Bun.stripANSI(term.getViewport().join("\n"))).not.toContain("output line 40");
 	});
 
-	it("copies on the second click of a double click", async () => {
+	it("copies a copy-only message on click two and starts a new pair on click three", async () => {
 		const { term, copied, rowOf } = await mount(active);
 		const row = rowOf("copy me exactly");
 
 		click(term, row, 10);
 		expect(copied).toHaveLength(0);
+		click(term, row, 10);
+		expect(copied).toEqual([USER_TEXT]);
 		click(term, row, 10);
 
 		expect(copied).toEqual([USER_TEXT]);
@@ -208,5 +233,33 @@ describe("transcript copy gesture", () => {
 
 		expect(copied).toHaveLength(1);
 		expect(Bun.stripANSI(term.getViewport().join("\n"))).toBe(before);
+	});
+
+	it("treats double-click on a collapsible tool as two toggles, not copy", async () => {
+		const { term, copied, settle, rowOf } = await mount(active);
+		const before = Bun.stripANSI(term.getViewport().join("\n"));
+		const row = rowOf("Bash: ls");
+
+		click(term, row, 10);
+		await settle();
+		expect(Bun.stripANSI(term.getViewport().join("\n"))).toContain("output line 40");
+		click(term, row, 10);
+		await settle();
+
+		expect(copied).toHaveLength(0);
+		expect(Bun.stripANSI(term.getViewport().join("\n"))).toBe(before);
+	});
+
+	it("copies every result in a grouped read with path labels", async () => {
+		const harness = await mountWith(active, transcript => {
+			const reads = new ReadToolGroupComponent({ showContentPreview: true });
+			reads.updateArgs({ path: "/tmp/a.txt" }, "read-1");
+			reads.updateResult({ content: [{ type: "text", text: READ_OUTPUT }], isError: false }, false, "read-1");
+			transcript.addChild(reads);
+		});
+
+		click(harness.term, harness.rowOf("a.txt"), 10, 8);
+
+		expect(harness.copied).toEqual([`Read: /tmp/a.txt\n\n${READ_OUTPUT}`]);
 	});
 });

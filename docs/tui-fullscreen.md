@@ -44,10 +44,11 @@ buys and what it costs:
 | A pinned bottom chrome that never scrolls away | The terminal's find/search, which only searches its own buffer |
 
 Two of those losses are recovered in-app: `selection.ts` implements
-drag-to-select with copy on release, wired to the clipboard by
-`InteractiveMode`. Scrollback and terminal find are not recovered and are not
-recoverable. That is the price of the mode, and it is why `append` remains the
-default.
+drag-to-select with copy on release, and source-aware zones implement Alt+click
+copy for any block plus double-click copy for prose. Scrollback and terminal
+find are not recovered. This fork defaults to fullscreen and explains the
+tradeoff on its first empty screen; `/viewport append` restores the native
+terminal behavior at any time.
 
 ### This is not an omp limitation
 
@@ -299,16 +300,17 @@ can share one button:
   press cell.
 - **Release** decides which gesture happened. If the pointer moved, it was a
   drag: the selection wins, the text is handed to `onCopy`, and **no click
-  fires**. Otherwise the click fires, but only when the release zone is the
-  same zone as the press, so dragging off a control cancels it the way every
-  other UI does.
+  fires**. Without movement, Alt+click asks the pressed zone for its source.
+  A second click does the same only for copy-only prose; activatable cards use
+  Alt+click because their first activation can reflow the frame. Ordinary
+  clicks still require release in the same zone as the press.
 
 The consequence is the important part: **a component must not implement its own
 "was the user selecting?" guard.** The engine has already decided by the time
-`onZoneClick` is called. A component-level guard would be dead code at best and,
-if it read a slightly different notion of "selecting", a source of clicks that
-silently do nothing. Components implement `onZoneClick`, `onZoneHover` and
-`onZoneWheel`, and nothing else.
+`onZoneClick` or `onZoneCopy` is called. A component-level guard would be dead
+code at best and, if it read a slightly different notion of "selecting", a
+source of clicks that silently do nothing. Components publish only the handlers
+they own.
 
 `onZoneWheel` returning `false` (or being absent) lets the wheel bubble to the
 scroll viewport, which is what keeps a wheel over a tool block scrolling the
@@ -326,15 +328,14 @@ selecting chrome.
 
 The highlight is SGR reverse video (`CSI 7 m` … `CSI 27 m`), not an explicit
 background colour. Reverse composes with whatever colours a row already carries,
-so selected text stays legible over every theme, over diff highlighting and over
-syntax-highlighted code without the selection layer knowing any of their
-colours. Rows shorter than the selection are padded, or a multi-row drag looks
-ragged on every short line it crosses.
+so selected text stays legible over every theme, diff highlighting and
+syntax-highlighted code. Each selectable surface publishes its own left chrome
+inset; the right edge is measured from where that row's text stops. The wash is
+therefore intentionally ragged across short lines, and blank rows show no wash
+while still contributing a newline to copied text.
 
-What reaches the clipboard is stripped of ANSI and right-trimmed per row: the
-frame pads every row to the terminal width, so without the trim every copied
-line would carry spaces out to the last column. A single-row selection is an
-inline fragment; a multi-row one is joined with newlines.
+Clipboard rows are stripped of ANSI and right-trimmed. A single-row selection
+is an inline fragment; a multi-row one is joined with newlines.
 
 ### Hover
 

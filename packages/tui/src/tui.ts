@@ -27,6 +27,7 @@ import {
 	isHitZoneProvider,
 	type MouseZoneTarget,
 	type PointerShape,
+	type SelectionInsetBand,
 	type ZoneMouseEvent,
 } from "./hit-zones";
 import { isKeyRelease, matchesKey } from "./keys";
@@ -295,20 +296,6 @@ export interface ViewportChrome {
 	padTop: number;
 	/** Blank rows below the pinned chrome. */
 	padBottom: number;
-	/**
-	 * Columns of card chrome inside the content area, on each side.
-	 *
-	 * Purely a selection concern: it tells the engine where a transcript card's
-	 * own padding ends and its text begins, so drag-select and copy can be
-	 * bounded by the text the way the composer's selection is. The engine
-	 * cannot infer it — once a row is painted, a leading space from a card's
-	 * inset is indistinguishable from one in indented code — and it does not
-	 * affect layout, which the app has already done by the time rows arrive.
-	 *
-	 * Zero (the default) selects geometrically, which is right for a surface
-	 * that paints no chrome.
-	 */
-	textInset?: number;
 	/**
 	 * Paints one full-width row onto the app surface. Receives the row already
 	 * inset by `padX` and must return it padded to `width`. Undefined leaves the
@@ -1687,15 +1674,23 @@ export class TUI extends Container {
 	// the gutter into the clipboard.
 	#fullscreenContentWidth = 0;
 	/**
-	 * The run of clicks the pointer is currently in, latched at press.
+	 * The current pair of clicks, latched at press.
 	 *
-	 * `count` is 1 for a single click and grows while clicks keep landing in the
-	 * same cell inside {@link TUI.#CLICK_RUN_MS}; `copyIntent` records that this
-	 * click asked for the target's source text rather than its action.
+	 * Identity is the logical zone, not merely its screen cell: activating the
+	 * first click may reflow the frame and put a different block under the same
+	 * coordinate. Count alternates 1→2→1 so a third click starts a new pair.
 	 */
-	#clickRun: { row: number; col: number; at: number; count: number; copyIntent: boolean } = {
+	#clickRun: {
+		row: number;
+		col: number;
+		zoneKey: string | null;
+		at: number;
+		count: number;
+		copyIntent: boolean;
+	} = {
 		row: -1,
 		col: -1,
+		zoneKey: null,
 		at: 0,
 		count: 0,
 		copyIntent: false,
@@ -1721,6 +1716,16 @@ export class TUI extends Container {
 	// copy-on-release stay out of the way entirely.
 	#capturedZone: CapturedZone | null = null;
 	#selection = new Selection();
+	/**
+	 * Per-frame-row left chrome widths published by visible components.
+	 *
+	 * A single viewport contains two-column cards, unpadded assistant prose and
+	 * one-column compaction details. Keeping the metadata on the rows that own it
+	 * avoids both copying a card rail and deleting real leading characters from
+	 * another component. The map survives while a selection is active so a drag
+	 * that scrolls can accumulate geometry for rows that left the viewport.
+	 */
+	#selectionInsets = new Map<number, number>();
 	// Set while the pointer is down inside the scroll region, so motion reports
 	// extend a selection instead of being treated as hover.
 	#selecting = false;
@@ -2312,6 +2317,8 @@ export class TUI extends Container {
 		this.#scrollRequest = undefined;
 		this.#wheelMomentum.reset();
 		this.#selection.clear();
+		this.#selectionInsets.clear();
+		this.#resetClickRun();
 		this.#zones = [];
 		this.#hoveredZoneKey = null;
 		this.#hoveredZoneTarget = null;
@@ -2633,6 +2640,7 @@ export class TUI extends Container {
 				// in-place resize path — and just repaint the overlay at the new
 				// size. #resizeEventPending carries to the overlay-exit render so it
 				// still classifies as a resize.
+				this.#resetClickRun();
 				if (this.#altActive) {
 					if (this.#altEnterWidth === this.terminal.columns && this.#altEnterHeight !== this.terminal.rows) {
 						this.#altToggleResizesInPlace = true;
@@ -3651,7 +3659,13 @@ export class TUI extends Container {
 			// terminals send a bare `0` button on the `m` report — so deciding
 			// "was this alt+click" from the release alone silently loses the
 			// gesture on those terminals.
-			this.#clickRun = this.#advanceClickRun(row, col, event);
+			this.#clickRun = this.#advanceClickRun(
+				row,
+				col,
+				event,
+				zone?.target.zoneKey ?? null,
+				zone?.target.doubleClickCopies === true,
+			);
 			// A fresh press always drops the previous selection, matching every
 			// text surface: click-to-dismiss is how a user cancels a selection.
 			const cleared = this.#selection.clear();
@@ -3705,7 +3719,7 @@ export class TUI extends Container {
 							this.#fullscreenScrollFrame,
 							range,
 							this.#fullscreenContentWidth,
-							this.#textInset,
+							frameRow => this.#selectionInsets.get(frameRow) ?? 0,
 						),
 					);
 				}
@@ -3722,7 +3736,7 @@ export class TUI extends Container {
 			// toggles it open must not also toggle on the click that copied it.
 			if (run.copyIntent) {
 				const text = zone.target.onZoneCopy?.(zoneEvent);
-				if (text !== undefined && text !== "") {
+				if (text !== undefined) {
 					this.onCopy?.(text);
 					this.requestRender();
 					return true;
@@ -3776,39 +3790,55 @@ export class TUI extends Container {
 		};
 	}
 
-	/** Card chrome inset the app declared, used to bound selection to text. */
-	get #textInset(): number {
-		return this.#viewportChrome.textInset ?? 0;
-	}
-
 	/**
-	 * Fold a press into the current click run and decide whether it means
-	 * "copy this" rather than "activate this".
+	 * Fold a press into one click pair and decide whether it copies.
 	 *
-	 * Two gestures ask for a copy, because neither works everywhere on its own.
-	 * A double click is what everyone already tries, but it collides with
-	 * single-click-to-expand on a tool card. Alt+click has no such collision but
-	 * is invisible to anyone who has not been told about it. Supporting both
-	 * means the discoverable gesture works and the precise one exists: a double
-	 * click on a card toggles it once and then copies it, while alt+click copies
-	 * without disturbing it at all.
+	 * A pair continues only on the same logical zone and screen cell. The zone
+	 * identity matters because the first activation can reflow the transcript
+	 * before the second press, putting a neighbour under the same cell. Only
+	 * copy-only prose targets opt into double-click copy; cards reserve double
+	 * click for two ordinary toggles and use Alt+click for unambiguous copy.
 	 *
-	 * Shift is deliberately not a copy modifier — terminals reserve shift+drag
-	 * for their own selection, so the report frequently never arrives.
+	 * `performance.now()` is monotonic, so a wall-clock correction cannot turn a
+	 * stale click into a pair. After click two the next press starts a new pair.
 	 */
 	#advanceClickRun(
 		row: number,
 		col: number,
 		event: SgrMouseEvent,
-	): { row: number; col: number; at: number; count: number; copyIntent: boolean } {
-		const now = Date.now();
+		zoneKey: string | null,
+		doubleClickCopies: boolean,
+	): {
+		row: number;
+		col: number;
+		zoneKey: string | null;
+		at: number;
+		count: number;
+		copyIntent: boolean;
+	} {
+		const now = performance.now();
 		const previous = this.#clickRun;
-		// A run only continues in the same cell. Exactness beats a radius on a
-		// grid: the cell is the unit the user is aiming at, and a second click
-		// one cell over is aimed at something else.
-		const continues = previous.row === row && previous.col === col && now - previous.at <= TUI.#CLICK_RUN_MS;
-		const count = continues ? previous.count + 1 : 1;
-		return { row, col, at: now, count, copyIntent: event.alt || count >= 2 };
+		const continues =
+			!event.alt &&
+			!previous.copyIntent &&
+			previous.count === 1 &&
+			previous.zoneKey === zoneKey &&
+			previous.row === row &&
+			previous.col === col &&
+			now - previous.at <= TUI.#CLICK_RUN_MS;
+		const count = continues ? 2 : 1;
+		return {
+			row,
+			col,
+			zoneKey,
+			at: now,
+			count,
+			copyIntent: event.alt || (doubleClickCopies && count === 2),
+		};
+	}
+
+	#resetClickRun(): void {
+		this.#clickRun = { row: -1, col: -1, zoneKey: null, at: 0, count: 0, copyIntent: false };
 	}
 
 	/**
@@ -6049,13 +6079,30 @@ export class TUI extends Container {
 		// no text at all contributes nothing.
 		const orphan = this.#orphanBlockRows(this.#scrollTop, viewportRows);
 
+		// Zones carry row-local selection geometry as well as pointer actions, so
+		// collect them before painting the selection wash for this frame.
+		this.#collectFullscreenZones(
+			children,
+			rowCounts,
+			pinnedFrom,
+			pinnedTop,
+			pinnedLines.length - pinnedRows,
+			viewportRows,
+			height,
+		);
+
 		const screen: string[] = new Array(height);
 		for (let r = 0; r < height; r++) screen[r] = "";
 		for (let r = 0; r < viewportRows; r++) {
 			const frameRow = this.#scrollTop + r;
 			if (orphan?.(frameRow)) continue;
 			let line = scrollLines[frameRow] ?? "";
-			const span = this.#selection.spanForRow(frameRow, contentWidth, line, this.#textInset);
+			const span = this.#selection.spanForRow(
+				frameRow,
+				contentWidth,
+				line,
+				this.#selectionInsets.get(frameRow) ?? 0,
+			);
 			if (span) line = highlightLineSpan(line, span.start, span.end, contentWidth);
 			screen[padTop + r] = line;
 		}
@@ -6077,8 +6124,6 @@ export class TUI extends Container {
 				screen[r] = chrome.fill ? chrome.fill(inset, width) : inset;
 			}
 		}
-
-		this.#collectFullscreenZones(children, rowCounts, pinnedFrom, pinnedTop, pinnedLines.length - pinnedRows, height);
 
 		let lines = this.#compositeOverlaysIntoWindow(screen, width, height);
 		lines = this.#prepareLinesArray(lines, width);
@@ -6273,6 +6318,7 @@ export class TUI extends Container {
 		pinnedFrom: number,
 		pinnedTop: number,
 		pinnedClipped: number,
+		viewportRows: number,
 		height: number,
 	): void {
 		const sink = this.#zoneSink;
@@ -6303,7 +6349,31 @@ export class TUI extends Container {
 			offset += rows;
 		}
 		this.#zones = sink.zones;
+		this.#recordSelectionInsets(sink.selectionInsets, this.#fullscreenPadTop, viewportRows);
 		this.#releaseStaleCapture();
+	}
+
+	/**
+	 * Remember the left chrome owned by each visible scroll-frame row.
+	 *
+	 * While a drag is active the map accumulates instead of resetting, allowing
+	 * a wheel-assisted selection to retain the geometry of rows that have
+	 * scrolled away before release.
+	 */
+	#recordSelectionInsets(bands: readonly SelectionInsetBand[], padTop: number, viewportRows: number): void {
+		if (!this.#selection.isActive) this.#selectionInsets.clear();
+		const screenEnd = padTop + viewportRows;
+		for (const band of bands) {
+			const start = Math.max(padTop, band.row);
+			const end = Math.min(screenEnd, band.row + band.rowCount);
+			for (let screenRow = start; screenRow < end; screenRow++) {
+				const frameRow = this.#scrollTop + screenRow - padTop;
+				const previous = this.#selectionInsets.get(frameRow);
+				if (previous === undefined || band.inset > previous) {
+					this.#selectionInsets.set(frameRow, band.inset);
+				}
+			}
+		}
 	}
 
 	/**

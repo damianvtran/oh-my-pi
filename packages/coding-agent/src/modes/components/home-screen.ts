@@ -56,6 +56,9 @@ const HINTS: ReadonlyArray<readonly [key: string, label: string]> = [
 	["$", "python"],
 ];
 
+const FULLSCREEN_ONBOARDING_TIP =
+	"Fullscreen uses in-app scrolling and copy: drag selects text, Alt+click copies a block, and double-click copies prose. /resume reopens a session; /viewport append restores terminal scrollback and find.";
+
 /** Columns between two hints on the affordance row. */
 const HINT_GAP = 3;
 
@@ -153,12 +156,18 @@ export class HomeHeader implements Component {
  * centred under it the way opencode's is.
  */
 export class HomeHints implements Component {
-	// Drawn once per instance so the tip does not change under the user while
-	// they are reading it. The home screen is constructed only when it shows,
-	// so this never burns a draw on a session that starts with a transcript.
-	readonly #tip = pickSessionTip();
+	static #showedFullscreenOnboarding = false;
+	readonly #tip: string | undefined;
 	#cachedWidth = -1;
 	#cachedLines: readonly string[] | undefined;
+
+	constructor() {
+		// The first empty session in each process explains the alternate-screen
+		// tradeoff where the user can act on it. Later `/new` screens return to
+		// the rotating session tips instead of repeating onboarding forever.
+		this.#tip = HomeHints.#showedFullscreenOnboarding ? pickSessionTip() : FULLSCREEN_ONBOARDING_TIP;
+		HomeHints.#showedFullscreenOnboarding = true;
+	}
 
 	invalidate(): void {
 		this.#cachedWidth = -1;

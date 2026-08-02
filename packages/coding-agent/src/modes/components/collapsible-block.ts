@@ -52,6 +52,8 @@ export type BlockCopySource = () => string | undefined;
  * second copy zone underneath would simply never be reached.
  */
 export class BlockCopyTarget implements MouseZoneTarget {
+	readonly doubleClickCopies = true;
+
 	constructor(
 		readonly zoneKey: string,
 		private readonly source: BlockCopySource,
@@ -229,6 +231,15 @@ export class BlockCard {
 		}
 		this.#rows = rows;
 		return this.#box.render(width);
+	}
+
+	/**
+	 * Publish the card's row-local selection geometry without creating a
+	 * pointer target. Real controls remain the only zones eligible for dispatch.
+	 */
+	publishSelectionInset(sink: HitZoneSink, rowCount: number): void {
+		if (!this.active || rowCount <= 0) return;
+		sink.selectionInset(0, rowCount, CARD_PADDING_X);
 	}
 
 	invalidate(): void {

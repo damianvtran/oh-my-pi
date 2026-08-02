@@ -178,6 +178,7 @@ export class BashExecutionComponent extends Container {
 	 * selection), so the output stays drag-selectable underneath.
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
+		this.#card.publishSelectionInset(sink, this.#cardRows);
 		// Children publish rows local to the container; the card's top pad sits
 		// above all of them.
 		sink.withOffset(this.#card.topRows, () => super.publishHitZones(sink));

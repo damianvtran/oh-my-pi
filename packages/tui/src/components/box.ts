@@ -49,6 +49,8 @@ export class Box implements Component {
 	// renderer's rows would silently drop every zone.
 	#lastChildLines: (readonly string[])[] = [];
 	#lastContentRowOffset = 0;
+	#lastContentRowCount = 0;
+	#lastContentColumnOffset = 0;
 
 	#ignoreTight = false;
 
@@ -153,6 +155,8 @@ export class Box implements Component {
 		// regardless of the cache, so this geometry is always current.
 		this.#lastChildLines = childLines;
 		this.#lastContentRowOffset = contentRows > 0 ? (border ? 1 : 0) + this.#paddingY : 0;
+		this.#lastContentRowCount = contentRows;
+		this.#lastContentColumnOffset = (border ? 1 : 0) + paddingX;
 		const cached = this.#cached;
 		if (
 			cached !== undefined &&
@@ -247,17 +251,17 @@ export class Box implements Component {
 	}
 
 	/**
-	 * Forward children's hit zones, shifted past the top border and vertical
-	 * padding so a child's local row 0 lands on the first row of box CONTENT.
+	 * Forward children's pointer zones and row-local selection geometry, shifted
+	 * past this Box's own padding and optional border.
 	 *
-	 * Columns are deliberately NOT translated by `paddingX`. Every zone in the
-	 * transcript is a full-width row target, and shifting its start would make
-	 * a click in the left gutter miss the row it visually belongs to. A child
-	 * needing exact columns computes them against the full terminal width.
+	 * Pointer-zone columns deliberately remain unchanged: transcript controls
+	 * own their full row. Selection insets compose separately, because the same
+	 * cells are card chrome rather than source text when a drag copies glyphs.
 	 */
 	publishHitZones(sink: HitZoneSink): void {
 		const refs = this.#lastChildLines;
 		if (refs.length !== this.children.length) return;
+		sink.selectionInset(this.#lastContentRowOffset, this.#lastContentRowCount, this.#lastContentColumnOffset);
 		let offset = this.#lastContentRowOffset;
 		for (let i = 0; i < this.children.length; i++) {
 			const lines = refs[i];
@@ -265,7 +269,9 @@ export class Box implements Component {
 			const child = this.children[i]!;
 			if (isHitZoneProvider(child)) {
 				const base = offset;
-				sink.withOffset(base, () => child.publishHitZones(sink));
+				sink.withOffset(base, () => {
+					sink.withSelectionInset(this.#lastContentColumnOffset, () => child.publishHitZones(sink));
+				});
 			}
 			offset += lines.length;
 		}

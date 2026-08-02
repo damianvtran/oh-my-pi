@@ -1,3 +1,4 @@
+import type { HitZoneSink } from "../hit-zones";
 import type { Component } from "../tui";
 import {
 	applyBackgroundToLine,
@@ -227,5 +228,11 @@ export class Text implements Component {
 		this.#cachedLines = result;
 
 		return result.length > 0 ? result : [""];
+	}
+
+	publishHitZones(sink: HitZoneSink): void {
+		const rows = this.#cachedLines?.length ?? 0;
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		sink.selectionInset(0, rows, paddingX);
 	}
 }

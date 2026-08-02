@@ -1,4 +1,4 @@
-import { Box, type Component, Markdown } from "@oh-my-pi/pi-tui";
+import { Box, type Component, type HitZoneSink, Markdown } from "@oh-my-pi/pi-tui";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import type { BranchSummaryMessage, CompactionSummaryMessage, CustomMessage } from "../../session/messages";
 
@@ -36,6 +36,11 @@ class SummaryDividerComponent implements Component {
 			: ["", this.#divider(width), ""];
 		this.#cache = { width, lines };
 		return lines;
+	}
+
+	publishHitZones(sink: HitZoneSink): void {
+		if (!this.#expanded) return;
+		sink.withOffset(3, () => this.#detailBox().publishHitZones(sink));
 	}
 
 	#divider(width: number): string {
@@ -109,6 +114,10 @@ export class CompactionSummaryMessageComponent implements Component {
 		return this.#divider.render(width);
 	}
 
+	publishHitZones(sink: HitZoneSink): void {
+		this.#divider.publishHitZones(sink);
+	}
+
 	#detailMarkdown(): string {
 		const tokenStr = this.message.tokensBefore.toLocaleString();
 		const frameCount = this.message.images?.length ?? 0;
@@ -144,6 +153,10 @@ export class HandoffSummaryMessageComponent implements Component {
 
 	render(width: number): readonly string[] {
 		return this.#divider.render(width);
+	}
+
+	publishHitZones(sink: HitZoneSink): void {
+		this.#divider.publishHitZones(sink);
 	}
 
 	#detailMarkdown(): string {
@@ -187,6 +200,10 @@ export class BranchSummaryMessageComponent implements Component {
 
 	render(width: number): readonly string[] {
 		return this.#divider.render(width);
+	}
+
+	publishHitZones(sink: HitZoneSink): void {
+		this.#divider.publishHitZones(sink);
 	}
 }
 

@@ -36,25 +36,23 @@ const SGR_REVERSE_OFF = "\x1b[27m";
 const SEGMENT_RESET = "\x1b[0m";
 
 /**
- * Columns of a composed row that hold content rather than card chrome.
+ * Columns of a composed row that hold content rather than surface chrome.
  *
  * The transcript is painted, not laid out: by the time a row reaches the
- * selection layer it is a string of cells in which a card's padding, its
- * filled background and a user card's accent rail are indistinguishable from
- * text. A rectangular cut over those cells is what put two leading spaces and
- * a `▌` on the clipboard.
+ * selection layer it is a string of cells in which padding, fill and an accent
+ * rail are indistinguishable from text.
  *
  * The two edges are found differently on purpose:
  *
- * - The LEFT edge cannot be recovered from the row. Leading spaces are
- *   meaningful inside a card (indented code, nested list items) and chrome
- *   outside it, and the glyphs are identical. So the app declares its inset
- *   once ({@link TUI.setViewportChrome}) and the engine trusts it.
- * - The RIGHT edge is recovered per row, because every row is padded out to
- *   the full width and the padding is unambiguously not content.
+ * - The LEFT edge comes from row-local metadata published by the component.
+ *   Leading spaces are meaningful inside a card (indented code, nested list
+ *   items) and chrome outside it, so recovering the boundary from glyphs would
+ *   corrupt one of those cases. Different rows may declare different insets.
+ * - The RIGHT edge is recovered from the row because trailing fill is
+ *   unambiguously not content.
  *
- * This is what makes the transcript behave like the composer, whose selection
- * is bounded by the length of the line rather than the width of the terminal.
+ * This matches the composer, whose selection is bounded by the length of each
+ * line rather than the width of the terminal.
  */
 export interface TextBand {
 	/** First content column. */
@@ -90,7 +88,10 @@ export function textEndColumn(line: string): number {
 export function bandForLine(line: string | undefined, width: number, inset: number): TextBand | null {
 	if (line === undefined) return null;
 	const start = Math.max(0, Math.min(inset, width));
-	const end = Math.min(width - start, textEndColumn(line));
+	// The row itself is authoritative on the right: trailing card fill is spaces
+	// and disappears from textEndColumn(). Subtracting the left inset from width
+	// incorrectly erases a real final cell when a narrow Box drops its right pad.
+	const end = Math.min(width, textEndColumn(line));
 	return end > start ? { start, end } : null;
 }
 
@@ -269,6 +270,13 @@ export function highlightLineSpan(line: string, start: number, end: number, widt
 	);
 }
 
+/** A fixed inset or row-aware resolver for heterogeneous transcript surfaces. */
+export type TextInset = number | ((row: number, line: string) => number);
+
+function resolveTextInset(inset: TextInset, row: number, line: string): number {
+	return typeof inset === "function" ? inset(row, line) : inset;
+}
+
 /**
  * Recover the plain text a selection covers, for the clipboard.
  *
@@ -281,7 +289,7 @@ export function extractSelectionText(
 	frame: readonly string[],
 	range: SelectionRange,
 	width: number,
-	inset = 0,
+	inset: TextInset = 0,
 ): string {
 	const rows: string[] = [];
 	for (let row = range.start.row; row <= range.end.row; row++) {
@@ -289,7 +297,7 @@ export function extractSelectionText(
 		if (line === undefined) continue;
 		const start = row === range.start.row ? range.start.col : 0;
 		const end = row === range.end.row ? Math.min(width, range.end.col + 1) : width;
-		const span = clampToBand(start, end, line, width, inset);
+		const span = clampToBand(start, end, line, width, resolveTextInset(inset, row, line));
 		if (!span) {
 			rows.push("");
 			continue;

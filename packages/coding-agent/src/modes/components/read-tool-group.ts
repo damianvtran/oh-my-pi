@@ -352,8 +352,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#sealed = false;
 	// The engine repaints after a consumed click, so the toggle only has to
 	// rebuild this group's display.
-	readonly #header = new CollapsibleBlockHeader(`read:${++readToolGroupInstanceSeq}`, () =>
-		this.setExpanded(!this.#expanded),
+	readonly #header = new CollapsibleBlockHeader(
+		`read:${++readToolGroupInstanceSeq}`,
+		() => this.setExpanded(!this.#expanded),
+		() => this.#copySource(),
 	);
 	readonly #headerPainter = new HeaderRowPainter();
 	readonly #card = new BlockCard();
@@ -541,8 +543,27 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * selection), so preview code stays drag-selectable underneath.
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
+		this.#card.publishSelectionInset(sink, this.#cardRows);
 		sink.withOffset(this.#card.topRows, () => super.publishHitZones(sink));
 		this.#header.publish(sink, 0, this.#cardRows);
+	}
+
+	/**
+	 * Complete grouped read results, labeled by path.
+	 *
+	 * A group can combine unrelated files and its collapsed tree may show none
+	 * of their bodies. Labels preserve that boundary in the clipboard while the
+	 * source text remains unwrapped and untruncated.
+	 */
+	#copySource(): string | undefined {
+		const sections: string[] = [];
+		for (const entry of this.#entries.values()) {
+			const content = entry.contentText?.trimEnd();
+			if (!content) continue;
+			const path = entry.path.trim() || "unknown";
+			sections.push(`Read: ${path}\n\n${content}`);
+		}
+		return sections.length > 0 ? sections.join("\n\n") : undefined;
 	}
 
 	/**

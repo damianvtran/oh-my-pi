@@ -30,7 +30,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"|-----|--------|",
 		"| `Enter` | Send message |",
 		`| \`Shift+Enter\` / \`${alt}+Enter\` | New line |`,
-		`| \`Ctrl+A\` / \`${cmd}+A\` | Select all — then Backspace or type to replace the draft |`,
+		`| \`${bindings.keybindings.getDisplayString("tui.editor.selectAll") || "Disabled"}\` | Select all — then Backspace or type to replace the draft |`,
 		`| \`Ctrl+W\` / \`${alt}+Backspace\` | Delete word backwards |`,
 		"| `Ctrl+U` | Delete to start of line |",
 		"| `Ctrl+K` | Delete to end of line |",

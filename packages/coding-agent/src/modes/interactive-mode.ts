@@ -1552,11 +1552,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			padX: 2,
 			padTop: 0,
 			padBottom: 1,
-			// Every transcript card insets its body by CARD_PADDING_X, and once a
-			// row is painted that inset is indistinguishable from indented code.
-			// Declaring it here is what lets drag-select and copy stop at the text
-			// instead of cutting a rectangle through the card's padding and rail.
-			textInset: CARD_PADDING_X,
 			// Arrows, not bare method references: these read private state off the
 			// Theme instance, and `theme` is rebound when the user switches theme,
 			// so a captured reference would keep painting the old palette.

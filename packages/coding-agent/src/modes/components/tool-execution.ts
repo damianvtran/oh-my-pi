@@ -1158,6 +1158,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * selection), so body text stays selectable underneath.
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
+		this.#card.publishSelectionInset(sink, this.#cardRows);
 		// A collapsed card dropped rows the children's memoized geometry still
 		// counts, so their zones would land on rows that are no longer drawn.
 		// Children publish rows local to the container; the card's top pad sits

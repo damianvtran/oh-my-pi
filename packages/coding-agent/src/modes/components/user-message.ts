@@ -178,6 +178,7 @@ export class UserMessageComponent extends Container {
 	}
 
 	override publishHitZones(sink: HitZoneSink): void {
+		this.#card.publishSelectionInset(sink, this.#renderedRows);
 		super.publishHitZones(sink);
 		this.#copyTarget.publish(sink, 0, this.#renderedRows);
 	}
@@ -202,6 +203,7 @@ export class CollapsedSyntheticMessageComponent implements Component {
 	#body?: UserMessageComponent;
 	readonly #summary: string;
 	readonly #card = new BlockCard();
+	#renderedRows = 0;
 
 	constructor(
 		private readonly text: string,
@@ -241,8 +243,13 @@ export class CollapsedSyntheticMessageComponent implements Component {
 		// injected as a user turn, which is why it renders as one at all. The dim
 		// body is what says it was not typed.
 		const lines = carded ? drawAccentRail(this.#card.paint(body, width, false)) : body;
+		this.#renderedRows = lines.length;
 		this.#cache = { width, carded, lines };
 		return lines;
+	}
+
+	publishHitZones(sink: HitZoneSink): void {
+		this.#card.publishSelectionInset(sink, this.#renderedRows);
 	}
 
 	#renderExpanded(width: number, carded: boolean): readonly string[] {
