@@ -43,6 +43,8 @@ let bashExecutionInstanceSeq = 0;
 
 export class BashExecutionComponent extends Container {
 	#outputLines: string[] = [];
+	/** Sanitized final output retained independently of display-line clamping. */
+	#copyOutput = "";
 	#status: ExecutionStatus = "running";
 	#exitCode: number | undefined = undefined;
 	#loader: Loader;
@@ -284,12 +286,13 @@ export class BashExecutionComponent extends Container {
 
 	#setOutput(output: string): void {
 		const clean = sanitizeWithOptionalSixelPassthrough(output, sanitizeText);
+		this.#copyOutput = clean;
 		this.#outputLines = clean ? this.#clampLinesPreservingSixel(clean.split("\n")) : [];
 	}
 
 	/** Command and complete retained output, independent of the collapsed preview. */
 	#copySource(): string {
-		const output = this.getOutput().trimEnd();
+		const output = (this.#copyOutput || this.getOutput()).trimEnd();
 		const command = `Bash:\n\n${this.command}`;
 		return output.length > 0 ? `${command}\n\nOutput:\n${output}` : command;
 	}

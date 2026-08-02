@@ -29,6 +29,8 @@ export type EvalExecutionLanguage = "python" | "js";
 
 export class EvalExecutionComponent extends Container {
 	#outputLines: string[] = [];
+	/** Sanitized final output retained independently of display-line clamping. */
+	#copyOutput = "";
 	#status: ExecutionStatus = "running";
 	#exitCode: number | undefined = undefined;
 	#loader: Loader;
@@ -208,12 +210,13 @@ export class EvalExecutionComponent extends Container {
 
 	#setOutput(output: string): void {
 		const clean = sanitizeText(output);
+		this.#copyOutput = clean;
 		this.#outputLines = clean ? clean.split("\n").map(line => this.#clampDisplayLine(line)) : [];
 	}
 
 	/** Cell source and complete retained output, independent of the collapsed preview. */
 	#copySource(): string {
-		const output = this.getOutput().trimEnd();
+		const output = (this.#copyOutput || this.getOutput()).trimEnd();
 		const code = `Eval (${this.language}):\n\n${this.code}`;
 		return output.length > 0 ? `${code}\n\nOutput:\n${output}` : code;
 	}

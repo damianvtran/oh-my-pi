@@ -44,6 +44,7 @@ const ASSISTANT_TEXT = "assistant starts at its first cell";
 const TOOL_OUTPUT = Array.from({ length: 40 }, (_, i) => `output line ${i + 1}`).join("\n");
 const READ_OUTPUT = Array.from({ length: 12 }, (_, i) => `read line ${i + 1}`).join("\n");
 const ERROR_OUTPUT = "provider rejected this turn";
+const LONG_OUTPUT = "x".repeat(4_001);
 
 /** Mirrors InteractiveMode#applyViewportChrome so the frame under test is the real one. */
 function applyChrome(tui: TUI, active: Theme): void {
@@ -233,6 +234,27 @@ describe("transcript copy gesture", () => {
 		expect(Bun.stripANSI(harness.term.getViewport().join("\n"))).toBe(before);
 	});
 
+	it("copies the inline error instead of partial assistant prose", async () => {
+		const harness = await mountWith(active, transcript => {
+			transcript.addChild(
+				new AssistantMessageComponent({
+					...createAssistantMessage("partial answer before failure"),
+					stopReason: "error",
+					errorMessage: ERROR_OUTPUT,
+				}),
+			);
+		});
+		const row = harness.rowOf(`Error: ${ERROR_OUTPUT}`);
+		expect(row).toBeGreaterThanOrEqual(0);
+		const before = Bun.stripANSI(harness.term.getViewport().join("\n"));
+
+		click(harness.term, row, 10, 8);
+		await harness.settle();
+
+		expect(harness.copied).toEqual([ERROR_OUTPUT]);
+		expect(Bun.stripANSI(harness.term.getViewport().join("\n"))).toBe(before);
+	});
+
 	it("copies local bash source and output without toggling the card", async () => {
 		const harness = await mountWith(active, (transcript, tui) => {
 			const bash = new BashExecutionComponent("printf hello", tui);
@@ -248,6 +270,21 @@ describe("transcript copy gesture", () => {
 		expect(Bun.stripANSI(harness.term.getViewport().join("\n"))).toBe(before);
 	});
 
+	it("copies retained bash output beyond the display-line cap", async () => {
+		const harness = await mountWith(active, (transcript, tui) => {
+			const bash = new BashExecutionComponent("printf long", tui);
+			bash.setComplete(0, false, { output: LONG_OUTPUT });
+			transcript.addChild(bash);
+		});
+		const rendered = Bun.stripANSI(harness.term.getViewport().join("\n"));
+		expect(rendered).toContain("visible columns omitted");
+		expect(rendered).not.toContain(LONG_OUTPUT);
+
+		click(harness.term, harness.rowOf("$ printf long"), 10, 8);
+
+		expect(harness.copied).toEqual([`Bash:\n\nprintf long\n\nOutput:\n${LONG_OUTPUT}`]);
+	});
+
 	it("copies local eval source and output without toggling the card", async () => {
 		const harness = await mountWith(active, (transcript, tui) => {
 			const evalBlock = new EvalExecutionComponent("print('hi')", tui);
@@ -261,6 +298,21 @@ describe("transcript copy gesture", () => {
 
 		expect(harness.copied).toEqual(["Eval (python):\n\nprint('hi')\n\nOutput:\nhi"]);
 		expect(Bun.stripANSI(harness.term.getViewport().join("\n"))).toBe(before);
+	});
+
+	it("copies retained eval output beyond the display-line cap", async () => {
+		const harness = await mountWith(active, (transcript, tui) => {
+			const evalBlock = new EvalExecutionComponent("print('long')", tui);
+			evalBlock.setComplete(0, false, { output: LONG_OUTPUT });
+			transcript.addChild(evalBlock);
+		});
+		const rendered = Bun.stripANSI(harness.term.getViewport().join("\n"));
+		expect(rendered).toContain("chars omitted");
+		expect(rendered).not.toContain(LONG_OUTPUT);
+
+		click(harness.term, harness.rowOf(">>>"), 10, 8);
+
+		expect(harness.copied).toEqual([`Eval (python):\n\nprint('long')\n\nOutput:\n${LONG_OUTPUT}`]);
 	});
 
 	it("copies a collab guest's attribution and original prose", async () => {
