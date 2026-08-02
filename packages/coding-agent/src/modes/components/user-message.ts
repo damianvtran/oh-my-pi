@@ -148,8 +148,16 @@ export class UserMessageComponent extends Container {
 			return this.#zoneLines;
 		}
 		const wrapped = this.#card.active ? drawAccentRail(lines) : lines.slice();
-		wrapped[0] = OSC133_ZONE_START + wrapped[0];
-		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
+		// Append mode only. There the transcript IS the terminal's scrollback, so
+		// a prompt zone is real and buys jump-to-prompt. In the fullscreen
+		// viewport it is a lie told once per visible card per frame: the rows are
+		// a repainted window over content the terminal never receives, nothing is
+		// navigable, and hosts that render prompt zones paint a band across the
+		// card's first row for a prompt that does not exist.
+		if (!this.#card.active) {
+			wrapped[0] = OSC133_ZONE_START + wrapped[0];
+			wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
+		}
 		this.#zoneSource = lines;
 		this.#zoneLines = wrapped;
 		return wrapped;
