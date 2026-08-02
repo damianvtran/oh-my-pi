@@ -630,8 +630,10 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (!target) return usage("Usage: /wake cancel <id|all>", runtime);
 			if (schedules.length === 0) return usage("No scheduled wakeups to cancel.", runtime);
 			if (target.toLowerCase() === "all") {
-				runtime.session.setWakeSchedules([]);
-				await runtime.output(`Cancelled ${schedules.length} scheduled wakeup${schedules.length === 1 ? "" : "s"}.`);
+				const purged = runtime.session.setWakeSchedules([]);
+				await runtime.output(
+					`Cancelled ${schedules.length} scheduled wakeup${schedules.length === 1 ? "" : "s"} and purged ${purged} queued ${purged === 1 ? "delivery" : "deliveries"}.`,
+				);
 				return commandConsumed();
 			}
 			// Ids are the handles the agent itself uses (`w1`, `w2`), so an
@@ -641,9 +643,10 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (!doomed) {
 				return usage(`No scheduled wakeup "${target}". Active: ${schedules.map(s => s.id).join(", ")}`, runtime);
 			}
-			const preview = shortDetail(doomed.message, WAKE_LIST_MESSAGE_LIMIT);
-			runtime.session.setWakeSchedules(schedules.filter(schedule => schedule.id !== doomed.id));
-			await runtime.output(`Cancelled wakeup ${doomed.id} — ${preview}`);
+			const purged = runtime.session.setWakeSchedules(schedules.filter(schedule => schedule.id !== doomed.id));
+			await runtime.output(
+				`Cancelled wakeup ${doomed.id} and purged ${purged} queued ${purged === 1 ? "delivery" : "deliveries"} — ${preview}`,
+			);
 			return commandConsumed();
 		},
 	},

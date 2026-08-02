@@ -52,11 +52,12 @@ function renderCard(details: WakePromptDetails | undefined, content: string): st
 	return Bun.stripANSI(new WakeMessageComponent(message).render(80).join("\n"));
 }
 
-function wakeRuntime(schedules: WakeSchedule[]) {
+function wakeRuntime(schedules: WakeSchedule[], purgedDeliveries = 0) {
 	let live = schedules;
 	const output = vi.fn(async (_text: string) => {});
 	const setWakeSchedules = vi.fn((next: WakeSchedule[]) => {
 		live = next;
+		return purgedDeliveries;
 	});
 	const runtime = {
 		session: { getWakeSchedules: () => [...live], setWakeSchedules },
@@ -211,13 +212,13 @@ describe("/wake", () => {
 		expect(h.text()).toContain("No scheduled wakeups");
 	});
 
-	it("cancels one schedule by id and leaves the rest armed", async () => {
-		const h = wakeRuntime([schedule(), schedule({ id: "w2", message: "Ping the on-call channel." })]);
+	it("cancels one schedule by id, purges its queued deliveries, and leaves the rest armed", async () => {
+		const h = wakeRuntime([schedule(), schedule({ id: "w2", message: "Ping the on-call channel." })], 2);
 
 		await executeAcpBuiltinSlashCommand("/wake cancel w1", h.runtime);
 
 		expect(h.remaining().map(s => s.id)).toEqual(["w2"]);
-		expect(h.text()).toContain("Cancelled wakeup w1");
+		expect(h.text()).toContain("Cancelled wakeup w1 and purged 2 queued deliveries");
 	});
 
 	it("names the live ids when the id does not resolve", async () => {
@@ -229,13 +230,13 @@ describe("/wake", () => {
 		expect(h.text()).toContain("w1, w2");
 	});
 
-	it("cancels every schedule and confirms the count", async () => {
-		const h = wakeRuntime([schedule(), schedule({ id: "w2" }), schedule({ id: "w3" })]);
+	it("cancels every schedule and confirms the scheduled and queued counts", async () => {
+		const h = wakeRuntime([schedule(), schedule({ id: "w2" }), schedule({ id: "w3" })], 6);
 
 		await executeAcpBuiltinSlashCommand("/wake cancel all", h.runtime);
 
 		expect(h.remaining()).toEqual([]);
-		expect(h.text()).toContain("Cancelled 3 scheduled wakeups.");
+		expect(h.text()).toContain("Cancelled 3 scheduled wakeups and purged 6 queued deliveries.");
 	});
 
 	it("rejects an unknown subcommand without touching the schedules", async () => {

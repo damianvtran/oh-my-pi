@@ -87,6 +87,13 @@ function wakeCount(count: number): string {
 	return `${count} wake${count === 1 ? "" : "s"}`;
 }
 
+/** Cancellation result for already-fired prompts that had not started a turn. */
+function purgedDeliverySummary(count: number): string {
+	return count === 0
+		? "No queued deliveries were pending."
+		: `Purged ${count} already-fired queued ${count === 1 ? "delivery" : "deliveries"}.`;
+}
+
 /**
  * A rejection carries the pre-call schedule list so the transcript keeps
  * showing the state that actually exists, not the one the call asked for.
@@ -278,11 +285,14 @@ export class WakeTool implements AgentTool<typeof wakeSchema, WakeToolDetails> {
 		}
 
 		const schedules = existing.filter(schedule => schedule.id !== id);
-		this.session.setWakeSchedules?.(schedules);
+		const purgedDeliveries = this.session.setWakeSchedules?.(schedules) ?? 0;
 		const remaining = schedules.length === 0 ? "No wakes remain." : `${wakeCount(schedules.length)} still scheduled.`;
 		return {
 			content: [
-				{ type: "text", text: `Wake ${id} cancelled (was ${describeWakeSchedule(target, nowMs)}). ${remaining}` },
+				{
+					type: "text",
+					text: `Wake ${id} cancelled (was ${describeWakeSchedule(target, nowMs)}). ${purgedDeliverySummary(purgedDeliveries)} ${remaining}`,
+				},
 			],
 			details: { op: "cancel", schedules, targetId: id, nowMs },
 		};

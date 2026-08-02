@@ -11,7 +11,7 @@ interface WakeSession {
 	stored: () => WakeSchedule[];
 }
 
-function createSession(taskDepth = 0, initial: WakeSchedule[] = []): WakeSession {
+function createSession(taskDepth = 0, initial: WakeSchedule[] = [], purgedDeliveries = 0): WakeSession {
 	let schedules = initial;
 	return {
 		stored: () => schedules,
@@ -25,6 +25,7 @@ function createSession(taskDepth = 0, initial: WakeSchedule[] = []): WakeSession
 			getWakeSchedules: () => schedules,
 			setWakeSchedules: next => {
 				schedules = next;
+				return purgedDeliveries;
 			},
 		},
 	};
@@ -205,6 +206,16 @@ describe("WakeTool cancel", () => {
 		expect(textOf(result)).toContain("Wake w1 cancelled");
 		expect(textOf(result)).toContain("1 wake still scheduled.");
 		expect(result.details?.targetId).toBe("w1");
+	});
+
+	it("reports already-fired queued deliveries purged with the cancellation", async () => {
+		const fake = createSession(0, [], 6);
+		const tool = new WakeTool(fake.session);
+		await tool.execute("c1", { every: "1m", limit: 20, message: "poll" });
+
+		const result = await tool.execute("c2", { op: "cancel", id: "w1" });
+
+		expect(textOf(result)).toContain("Purged 6 already-fired queued deliveries.");
 	});
 
 	it("names the live ids when the id is unknown", async () => {

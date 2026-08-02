@@ -9,7 +9,7 @@ Schedules a **self-prompt** that arrives later in **this same session**. When it
 |`wake({message, every, limit})`|Fire every `every`, `limit` times|
 |`wake({message, at, every})`|Start the cadence at `at` (e.g. daily on the hour)|
 |`wake({op:"list"})`|Show armed wakes with their ids|
-|`wake({op:"cancel", id})`|Retire one wake|
+|`wake({op:"cancel", id})`|Retire one wake and purge its already-fired queued deliveries|
 
 ## `at` / `until` forms
 
@@ -33,7 +33,7 @@ Schedules a **self-prompt** that arrives later in **this same session**. When it
 
 - Write `message` as an instruction to your future self: what to check, what counts as a change, and what to do about it. It arrives with no other context from now.
 - **`every` needs a bound**: pass `until` or `limit`, or state in your reply the condition under which you will cancel. An unbounded cadence with no cancel plan burns the session down.
-- **Cancel when the longitudinal goal is met.** The moment the pipeline went green, the metric settled, the answer arrived — `wake({op:"cancel", id})`. Every delivery echoes the exact cancel call; use it. Leaving a satisfied watch armed is a defect.
+- **Cancel when the longitudinal goal is met.** The moment the pipeline went green, the metric settled, the answer arrived — `wake({op:"cancel", id})`. Cancellation stops future firings and purges already-fired deliveries still waiting in the follow-up queue; the result reports how many it removed. Every delivery echoes the exact cancel call; use it. Leaving a satisfied watch armed is a defect.
 - Lost the id? `wake({op:"list"})`. Never guess.
 - One op per call. `op:"list"` with `message`, or `op:"cancel"` with `every`, is rejected outright — nothing is scheduled or cancelled.
 
