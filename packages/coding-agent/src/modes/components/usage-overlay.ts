@@ -1,4 +1,11 @@
-import { type Component, matchesKey, ScrollView, type TUI } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	type MouseRoutable,
+	matchesKey,
+	ScrollView,
+	type SgrMouseEvent,
+	type TUI,
+} from "@oh-my-pi/pi-tui";
 import { theme } from "../theme/theme";
 import { bottomBorder, row, topBorder, topChromeRows } from "./overlay-box";
 
@@ -7,6 +14,8 @@ const MIN_BODY_ROWS = 5;
 /** Keep the usage modal subordinate to the conversation behind it. */
 const HEIGHT_FRACTION = 0.65;
 const FOOTER_HINT = "↑/↓ scroll · PgUp/PgDn page · Home/End · Esc/q close";
+/** Rows a wheel notch moves inside the panel, matching the transcript's step. */
+const WHEEL_SCROLL_ROWS = 3;
 
 /**
  * Floating, scrollable provider-usage panel.
@@ -21,7 +30,7 @@ const FOOTER_HINT = "↑/↓ scroll · PgUp/PgDn page · Home/End · Esc/q close
  * underneath, unlike the previous `/usage` implementation which appended a
  * permanent block to scrollback.
  */
-export class UsageOverlayComponent implements Component {
+export class UsageOverlayComponent implements Component, MouseRoutable {
 	readonly #tui: TUI;
 	readonly #renderContent: (width: number) => string;
 	readonly #onClose: () => void;
@@ -44,9 +53,21 @@ export class UsageOverlayComponent implements Component {
 		// Content is immutable for one open panel. Geometry is reconciled in render.
 	}
 
+	/**
+	 * Wheel over the panel scrolls the panel. The engine only calls this for
+	 * reports that landed inside the overlay's own rectangle, so there is no
+	 * position test to repeat here.
+	 */
+	routeMouse(event: SgrMouseEvent): void {
+		if (event.wheel === null) return;
+		this.#scrollView.scroll(event.wheel * WHEEL_SCROLL_ROWS);
+		this.#tui.requestRender();
+	}
+
 	handleInput(data: string): void {
-		// Mouse reporting is intentionally disabled for this normal-screen overlay;
-		// do not leak a stray report into the vim-style single-key handlers below.
+		// Reports inside the panel are consumed by `routeMouse` before reaching
+		// here; anything left is a report from outside it, which must not leak
+		// into the vim-style single-key handlers below.
 		if (data.startsWith("\x1b[<")) return;
 		if (matchesKey(data, "escape") || data === "q") {
 			this.#close();
