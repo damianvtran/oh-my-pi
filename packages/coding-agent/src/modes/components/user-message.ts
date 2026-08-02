@@ -179,7 +179,7 @@ export class UserMessageComponent extends Container {
 
 	override publishHitZones(sink: HitZoneSink): void {
 		this.#card.publishSelectionInset(sink, this.#renderedRows);
-		super.publishHitZones(sink);
+		this.#card.publishContentGeometry(sink, () => super.publishHitZones(sink));
 		this.#copyTarget.publish(sink, 0, this.#renderedRows);
 	}
 }

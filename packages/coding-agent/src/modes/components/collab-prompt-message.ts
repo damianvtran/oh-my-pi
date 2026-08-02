@@ -86,6 +86,6 @@ export class CollabPromptMessageComponent extends Container {
 
 	override publishHitZones(sink: HitZoneSink): void {
 		this.#card.publishSelectionInset(sink, this.#renderedRows);
-		super.publishHitZones(sink);
+		this.#card.publishContentGeometry(sink, () => super.publishHitZones(sink));
 	}
 }

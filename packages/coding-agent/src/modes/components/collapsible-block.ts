@@ -242,6 +242,23 @@ export class BlockCard {
 		sink.selectionInset(0, rowCount, CARD_PADDING_X);
 	}
 
+	/**
+	 * Publish geometry owned by content rendered inside this card.
+	 *
+	 * Row and column offsets must move together: the Box paints one top row and
+	 * two left chrome cells before its children, while pointer zones themselves
+	 * intentionally continue to own the card's full width.
+	 */
+	publishContentGeometry(sink: HitZoneSink, publish: () => void): void {
+		if (!this.active) {
+			publish();
+			return;
+		}
+		sink.withOffset(this.topRows, () => {
+			sink.withSelectionInset(CARD_PADDING_X, publish);
+		});
+	}
+
 	invalidate(): void {
 		this.#box.invalidate();
 	}

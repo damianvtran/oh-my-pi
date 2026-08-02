@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
-import type { Component } from "@oh-my-pi/pi-tui";
+import type { Component, HitZoneProvider, HitZoneSink } from "@oh-my-pi/pi-tui";
 import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { pluralize } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
@@ -991,27 +991,31 @@ export function capParseErrors(
 
 /**
  * Standard width+expand keyed render cache used by every search-style tool
- * renderer. `compute` re-runs only when the cache key changes; the returned
- * Component is the canonical `{ render, invalidate }` pair.
+ * renderer. `compute` re-runs only when the cache key changes. Horizontal
+ * padding is also published as selection geometry so a card containing this
+ * component composes both insets instead of copying one chrome cell.
  */
 export function createCachedComponent(
 	getExpanded: () => boolean,
 	compute: (width: number, expanded: boolean) => string[],
 	options: { paddingX?: number } = {},
-): Component {
+): Component & HitZoneProvider {
 	let cached: { key: bigint; lines: string[] } | undefined;
+	const paddingX = Math.max(0, options.paddingX ?? 0);
 	return {
 		render(width: number): readonly string[] {
 			const expanded = getExpanded();
 			const key = new Hasher().bool(expanded).u32(width).digest();
 			if (cached?.key === key) return cached.lines;
-			const paddingX = Math.max(0, options.paddingX ?? 0);
 			const innerWidth = Math.max(1, width - paddingX * 2);
 			const lines = compute(innerWidth, expanded);
 			const pad = paddingX === 0 ? "" : " ".repeat(paddingX);
 			const paddedLines = paddingX === 0 ? lines : lines.map(line => `${pad}${line}${pad}`);
 			cached = { key, lines: paddedLines };
 			return paddedLines;
+		},
+		publishHitZones(sink: HitZoneSink): void {
+			sink.selectionInset(0, cached?.lines.length ?? 0, paddingX);
 		},
 		invalidate() {
 			cached = undefined;

@@ -1161,9 +1161,9 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#card.publishSelectionInset(sink, this.#cardRows);
 		// A collapsed card dropped rows the children's memoized geometry still
 		// counts, so their zones would land on rows that are no longer drawn.
-		// Children publish rows local to the container; the card's top pad sits
-		// above all of them.
-		if (!this.#rowsCollapsed) sink.withOffset(this.#card.topRows, () => super.publishHitZones(sink));
+		if (!this.#rowsCollapsed) {
+			this.#card.publishContentGeometry(sink, () => super.publishHitZones(sink));
+		}
 		this.#header.publish(sink, 0, this.#cardRows);
 	}
 

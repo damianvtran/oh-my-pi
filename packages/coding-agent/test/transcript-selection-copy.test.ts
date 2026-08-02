@@ -36,6 +36,7 @@ const USER_TEXT = "copy me exactly and nothing else at all, not the padding eith
 const ASSISTANT_TEXT = "assistant starts at its first cell";
 const TOOL_OUTPUT = Array.from({ length: 40 }, (_, i) => `output line ${i + 1}`).join("\n");
 const READ_OUTPUT = Array.from({ length: 12 }, (_, i) => `read line ${i + 1}`).join("\n");
+const ERROR_OUTPUT = "provider rejected this turn";
 
 /** Mirrors InteractiveMode#applyViewportChrome so the frame under test is the real one. */
 function applyChrome(tui: TUI, active: Theme): void {
@@ -163,6 +164,23 @@ describe("transcript drag-selection", () => {
 
 		expect(copied).toEqual([ASSISTANT_TEXT]);
 	});
+
+	it("composes a tool card's inset with its padded result rows", async () => {
+		const harness = await mountWith(active, (transcript, tui) => {
+			const tool = new ToolExecutionComponent("glob", { path: "/tmp/*.ts" }, {}, undefined, tui);
+			tool.updateResult({ content: [{ type: "text", text: "/tmp/alpha.ts\n/tmp/beta.ts" }], isError: false }, false);
+			tool.setExpanded(true);
+			transcript.addChild(tool);
+		});
+		const row = harness.rowOf("/tmp/alpha.ts");
+		expect(row).toBeGreaterThanOrEqual(0);
+
+		drag(harness.term, [row, 0], [row, WIDTH - 1]);
+
+		expect(harness.copied).toHaveLength(1);
+		expect(harness.copied[0]).toContain("/tmp/alpha.ts");
+		expect(harness.copied[0]!.startsWith(" ")).toBe(false);
+	});
 });
 
 describe("transcript copy gesture", () => {
@@ -185,6 +203,27 @@ describe("transcript copy gesture", () => {
 		click(term, row, 10, 8);
 
 		expect(copied).toEqual([USER_TEXT]);
+	});
+
+	it("copies an assistant error row without expanding it", async () => {
+		const harness = await mountWith(active, transcript => {
+			transcript.addChild(
+				new AssistantMessageComponent({
+					...createAssistantMessage(""),
+					stopReason: "error",
+					errorMessage: ERROR_OUTPUT,
+				}),
+			);
+		});
+		const row = harness.rowOf(`Error: ${ERROR_OUTPUT}`);
+		expect(row).toBeGreaterThanOrEqual(0);
+		const before = Bun.stripANSI(harness.term.getViewport().join("\n"));
+
+		click(harness.term, row, 10, 8);
+		await harness.settle();
+
+		expect(harness.copied).toEqual([ERROR_OUTPUT]);
+		expect(Bun.stripANSI(harness.term.getViewport().join("\n"))).toBe(before);
 	});
 
 	it("copies a tool card's whole output, not the rows on screen", async () => {
@@ -250,16 +289,18 @@ describe("transcript copy gesture", () => {
 		expect(Bun.stripANSI(term.getViewport().join("\n"))).toBe(before);
 	});
 
-	it("copies every result in a grouped read with path labels", async () => {
+	it("copies every grouped read result, including an empty file, with path labels", async () => {
 		const harness = await mountWith(active, transcript => {
 			const reads = new ReadToolGroupComponent({ showContentPreview: true });
+			reads.updateArgs({ path: "/tmp/empty.txt" }, "read-empty");
+			reads.updateResult({ content: [{ type: "text", text: "" }], isError: false }, false, "read-empty");
 			reads.updateArgs({ path: "/tmp/a.txt" }, "read-1");
 			reads.updateResult({ content: [{ type: "text", text: READ_OUTPUT }], isError: false }, false, "read-1");
 			transcript.addChild(reads);
 		});
 
-		click(harness.term, harness.rowOf("a.txt"), 10, 8);
+		click(harness.term, harness.rowOf("empty.txt"), 10, 8);
 
-		expect(harness.copied).toEqual([`Read: /tmp/a.txt\n\n${READ_OUTPUT}`]);
+		expect(harness.copied).toEqual([`Read: /tmp/empty.txt\n\nRead: /tmp/a.txt\n\n${READ_OUTPUT}`]);
 	});
 });

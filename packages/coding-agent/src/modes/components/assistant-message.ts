@@ -283,8 +283,10 @@ export class AssistantMessageComponent extends Container {
 	 * The engine repaints after a consumed click, so the toggle only has to
 	 * rebuild this block's content.
 	 */
-	readonly #errorHeader = new CollapsibleBlockHeader(`assistant-error:${++assistantMessageInstanceSeq}`, () =>
-		this.setExpanded(!this.#errorExpanded),
+	readonly #errorHeader = new CollapsibleBlockHeader(
+		`assistant-error:${++assistantMessageInstanceSeq}`,
+		() => this.setExpanded(!this.#errorExpanded),
+		() => this.#copySource() ?? this.#errorCopySource(),
 	);
 	readonly #errorHeaderPainter = new HeaderRowPainter();
 	/**
@@ -410,6 +412,15 @@ export class AssistantMessageComponent extends Container {
 			.join("\n\n")
 			.trim();
 		return text.length > 0 ? text : undefined;
+	}
+
+	/** Raw provider error when an error-only turn has no assistant prose to copy. */
+	#errorCopySource(): string | undefined {
+		if (!this.#lastMessage) return undefined;
+		const presentation = resolveAssistantErrorPresentation(this.#lastMessage);
+		if (presentation.kind !== "full") return undefined;
+		const text = presentation.text.trim();
+		return text.length > 0 ? text : "Unknown error";
 	}
 
 	setHideThinkingBlock(hide: boolean): void {

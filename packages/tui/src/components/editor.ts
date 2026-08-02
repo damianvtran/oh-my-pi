@@ -1414,10 +1414,11 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 		while (next !== undefined && next.length > 0) {
 			next = this.#handleInputChunk(next);
 		}
-		// Every keystroke ends a pointer selection. The edit handlers consumed it
-		// already (replace-on-type, delete); anything else moved the caret out
-		// from under it, and leaving a stale wash behind would be a lie.
-		if (!this.#keepSelectionAfterKey) this.#selectionAnchor = undefined;
+		// A completed key or paste ends a pointer selection. A fragmented
+		// bracketed paste is one logical input, so preserve select-all while its
+		// start/payload chunks are still buffered; the closing chunk performs the
+		// replacement before clearing the wash.
+		if (!this.#keepSelectionAfterKey && !this.#pasteHandler.active) this.#selectionAnchor = undefined;
 	}
 
 	/** Process one input chunk. Returns the unconsumed tail of a completed paste, if any. */

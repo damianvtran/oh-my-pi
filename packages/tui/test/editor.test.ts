@@ -198,6 +198,18 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("x");
 		});
 
+		it("replaces the buffer when a bracketed paste arrives in separate chunks after select-all", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa\nbeta");
+			editor.handleInput(CTRL_A);
+
+			editor.handleInput("\x1b[200~");
+			editor.handleInput("replacement");
+			editor.handleInput("\x1b[201~");
+
+			expect(editor.getText()).toBe("replacement");
+		});
+
 		it("is a no-op on an empty buffer", () => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.handleInput(CTRL_A);

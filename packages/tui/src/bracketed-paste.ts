@@ -75,6 +75,11 @@ export class BracketedPasteHandler {
 		this.#byteLimit = options.byteLimit ?? DEFAULT_BYTE_LIMIT;
 	}
 
+	/** Whether a start marker has arrived without its matching end marker. */
+	get active(): boolean {
+		return this.#active;
+	}
+
 	/**
 	 * Process incoming terminal data for bracketed paste sequences.
 	 *
