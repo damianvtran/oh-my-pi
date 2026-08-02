@@ -22,6 +22,7 @@ describe("parseSgrMouse", () => {
 			row: 8,
 			release: false,
 			wheel: null,
+			wheelX: null,
 			motion: false,
 			leftClick: true,
 		});
@@ -91,6 +92,7 @@ describe("routeSelectListMouse", () => {
 		row: 0,
 		release: false,
 		wheel: null,
+		wheelX: null,
 		motion: false,
 		leftClick: false,
 	};

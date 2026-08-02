@@ -18,8 +18,20 @@ export interface SgrMouseEvent {
 	row: number;
 	/** True for a release report (`m` suffix). */
 	release: boolean;
-	/** Wheel direction: -1 up, 1 down, null when not a wheel event. */
+	/**
+	 * Vertical wheel direction: -1 up, 1 down, null when the report is not a
+	 * vertical wheel notch.
+	 *
+	 * Horizontal notches are deliberately NOT folded in here. SGR encodes the
+	 * wheel axis in the low bits — 64/65 vertical, 66/67 horizontal — and a
+	 * `button & 1` test cannot tell 65 (down) from 67 (right). A trackpad swipe
+	 * is never purely vertical, so the terminal interleaves horizontal notches
+	 * through every gesture; read as vertical they invert the scroll direction
+	 * mid-swipe and the transcript oscillates against the reader's finger.
+	 */
 	wheel: -1 | 1 | null;
+	/** Horizontal wheel direction: -1 left, 1 right, null when not one. */
+	wheelX: -1 | 1 | null;
 	/** True when the pointer moved (hover or drag) rather than clicked. */
 	motion: boolean;
 	/** True for a left-button press (not motion, not release, not wheel). */
@@ -38,10 +50,16 @@ export function parseSgrMouse(data: string): SgrMouseEvent | null {
 	const col = Number(match[2]) - 1;
 	const row = Number(match[3]) - 1;
 	const release = match[4] === "m";
-	const wheel = button & 64 ? ((button & 1 ? 1 : -1) as 1 | -1) : null;
-	const motion = (button & 32) !== 0 && wheel === null;
-	const leftClick = !release && wheel === null && !motion && (button & 3) === 0;
-	return { button, col, row, release, wheel, motion, leftClick };
+	// Bit 64 marks a wheel report; bit 1 then selects the axis (0 vertical,
+	// 1 horizontal) and bit 0 the direction within it.
+	const isWheel = (button & 64) !== 0;
+	const horizontal = isWheel && (button & 2) !== 0;
+	const towardEnd = (button & 1) !== 0;
+	const wheel = isWheel && !horizontal ? ((towardEnd ? 1 : -1) as 1 | -1) : null;
+	const wheelX = horizontal ? ((towardEnd ? 1 : -1) as 1 | -1) : null;
+	const motion = (button & 32) !== 0 && !isWheel;
+	const leftClick = !release && !isWheel && !motion && (button & 3) === 0;
+	return { button, col, row, release, wheel, wheelX, motion, leftClick };
 }
 
 /** Handler invoked with a decoded SGR event; returning `false` reports unhandled. */
