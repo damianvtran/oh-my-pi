@@ -53,3 +53,5 @@ export * from "./ttyid";
 export * from "./tui";
 // Utilities
 export * from "./utils";
+// Trackpad-shaped wheel gesture accumulation
+export * from "./wheel-momentum";

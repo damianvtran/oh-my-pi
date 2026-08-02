@@ -65,7 +65,16 @@ function selectionContrast(t: { panelBgAnsi: string; selectionBgAnsi: string }):
  */
 function dragSelect(editor: Editor, width: number, toCol: number): { frame: string; selected: string } {
 	editor.render(width);
-	const raw = { button: 0, col: 0, row: 0, release: false, wheel: null, motion: false, leftClick: true } as const;
+	const raw = {
+		button: 0,
+		col: 0,
+		row: 0,
+		release: false,
+		wheel: null,
+		wheelX: null,
+		motion: false,
+		leftClick: true,
+	} as const;
 	editor.onZoneDrag("start", { raw, localRow: 0, localCol: 0 });
 	editor.onZoneDrag("move", { raw, localRow: 0, localCol: toCol });
 	return { frame: editor.render(width).join("\n"), selected: editor.getSelectedText() };

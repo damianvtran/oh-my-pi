@@ -58,6 +58,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "./utils";
+import { WheelMomentum } from "./wheel-momentum";
 
 const SEGMENT_RESET = "\x1b[0m";
 /**
@@ -1645,6 +1646,9 @@ export class TUI extends Container {
 	// resolved it. Held because only the compose knows the transcript's current
 	// height; see `scrollTo`.
 	#scrollRequest: number | undefined;
+	// Trackpad gesture state for the transcript wheel. Held on the TUI because a
+	// gesture spans reports and has to survive between them.
+	readonly #wheelMomentum = new WheelMomentum();
 	// Scroll region of the last fullscreen frame: the composed rows of every
 	// root child before the pinned run. Retained because pointer hit testing and
 	// selection extraction both address frame rows, not screen rows.
@@ -2273,6 +2277,7 @@ export class TUI extends Container {
 		this.#scrollTop = 0;
 		this.#stickyBottom = true;
 		this.#scrollRequest = undefined;
+		this.#wheelMomentum.reset();
 		this.#selection.clear();
 		this.#zones = [];
 		this.#hoveredZoneKey = null;
@@ -3560,13 +3565,19 @@ export class TUI extends Container {
 		if (!event) return false;
 		const { row, col } = event;
 
+		// A horizontal notch reaches here as `wheel === null` and falls through to
+		// the inert tail below: omp scrolls one axis, and reading the other as
+		// vertical is what made a trackpad swipe fight itself.
 		if (event.wheel !== null) {
 			const zone = hitTestZones(this.#zones, row, col);
 			if (zone?.target.onZoneWheel?.(event.wheel, this.#zoneEvent(event, zone))) {
 				this.requestRender();
 				return true;
 			}
-			this.scrollBy(event.wheel * TUI.#WHEEL_SCROLL_ROWS);
+			const rows = this.#wheelMomentum.rows(event.wheel, TUI.#WHEEL_SCROLL_ROWS);
+			// Zero means this notch only bought a fraction of a row. It is carried,
+			// not dropped, so the gesture still travels the distance it asked for.
+			if (rows !== 0) this.scrollBy(rows);
 			return true;
 		}
 
