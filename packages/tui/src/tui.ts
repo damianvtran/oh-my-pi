@@ -1628,9 +1628,23 @@ export class TUI extends Container {
 	#scrollTop = 0;
 	// While true the viewport re-pins to the bottom on every frame, so streaming
 	// output stays in view. Any upward scroll clears it and any scroll back to
-	// within one row of the bottom restores it — the behaviour that stops the
-	// view yanking under the reader mid-stream.
+	// the bottom restores it — the behaviour that stops the view yanking under
+	// the reader mid-stream.
+	//
+	// This is INTENT, not geometry. It is re-derived only from the fresh row
+	// count a frame actually composed, never from `maxScrollTop`, whose backing
+	// frame is one render behind whenever the transcript has changed since.
 	#stickyBottom = true;
+	// Set while the engine is correcting the offset itself (the per-frame re-pin
+	// and the shrink clamp). Ported from opencode's renderer, where it is the
+	// guard that keeps sticky's own correction from being read back as a user
+	// gesture; without it the correction re-latches intent and the view
+	// oscillates against a transcript whose height is still settling.
+	#applyingSticky = false;
+	// Row the reader last asked for, unclamped, or `undefined` once a frame has
+	// resolved it. Held because only the compose knows the transcript's current
+	// height; see `scrollTo`.
+	#scrollRequest: number | undefined;
 	// Scroll region of the last fullscreen frame: the composed rows of every
 	// root child before the pinned run. Retained because pointer hit testing and
 	// selection extraction both address frame rows, not screen rows.
@@ -2258,6 +2272,7 @@ export class TUI extends Container {
 		this.#viewportMode = mode;
 		this.#scrollTop = 0;
 		this.#stickyBottom = true;
+		this.#scrollRequest = undefined;
 		this.#selection.clear();
 		this.#zones = [];
 		this.#hoveredZoneKey = null;
@@ -2320,23 +2335,67 @@ export class TUI extends Container {
 		return this.#zones.length;
 	}
 
+	/**
+	 * Move the viewport to `row`.
+	 *
+	 * The row is recorded as a REQUEST and resolved by the next compose, because
+	 * this is the one place that cannot know the answer. `maxScrollTop` measures
+	 * the frame currently on screen, and a transcript that has changed since —
+	 * a streaming card growing, a settled one collapsing to its summary — is a
+	 * different height. Clamping a gesture against that number is how a nudge
+	 * downward gets pinned to a bottom that has already moved: the reader is
+	 * latched into following a tail they never reached, and the next frame
+	 * yanks them to the real one.
+	 *
+	 * The offset is still updated provisionally so hit testing and selection,
+	 * which address rows of the frame on screen, stay correct until then.
+	 */
 	scrollTo(row: number): boolean {
 		if (this.#viewportMode !== "fullscreen") return false;
-		const max = this.maxScrollTop;
-		const next = Math.max(0, Math.min(max, Math.round(row)));
-		const sticky = next >= max;
-		if (next === this.#scrollTop && sticky === this.#stickyBottom) return false;
-		this.#scrollTop = next;
-		this.#stickyBottom = sticky;
+		const target = Math.max(0, Math.round(row));
+		const provisional = Math.min(this.maxScrollTop, target);
+		const settled = this.#scrollRequest === undefined && provisional === this.#scrollTop && provisional === target;
+		this.#scrollRequest = target;
+		this.#scrollTop = provisional;
+		if (settled) return false;
 		this.onScrollChange?.();
 		this.requestRender();
 		return true;
 	}
 
+	/**
+	 * Re-derive follow-the-tail from where the offset now sits, against `max`
+	 * rows of overflow.
+	 *
+	 * Two guards, both ported from opencode's renderer after its scroll model
+	 * was read end to end:
+	 *
+	 * - An engine-initiated correction may only RE-ENGAGE following, never end
+	 *   it. The per-frame re-pin moves the offset itself, and treating that move
+	 *   as a gesture is how a reader who is following gets silently dropped out
+	 *   of follow mode by the very code meant to keep them in it.
+	 * - A transcript that overflows by a row or less is never "scrolled away
+	 *   from". Without this, one row of streaming growth flickers the intent on
+	 *   and off frame to frame.
+	 */
+	#syncStickyBottom(max: number): void {
+		if (this.#applyingSticky) {
+			if (this.#scrollTop >= max) this.#stickyBottom = true;
+			return;
+		}
+		if (max <= TUI.#STICKY_SLACK_ROWS) {
+			this.#stickyBottom = true;
+			return;
+		}
+		this.#stickyBottom = this.#scrollTop >= max;
+	}
+
 	/** Jump to the tail and resume following it. */
 	scrollToBottom(): void {
+		// Deliberately unbounded: the compose clamps it to whatever the tail
+		// turns out to be, which is the only value that is not already stale.
+		this.scrollTo(Number.MAX_SAFE_INTEGER);
 		this.#stickyBottom = true;
-		this.scrollTo(this.maxScrollTop);
 	}
 
 	/** True when a drag-selection is currently held. Click handlers check this. */
@@ -5836,11 +5895,33 @@ export class TUI extends Container {
 		this.#fullscreenPadX = padX;
 		this.#fullscreenPadTop = padTop;
 
-		// Re-pin before windowing so content that arrived this frame is visible
-		// in this frame rather than one frame later.
+		// Resolve the offset before windowing, so content that arrived this frame
+		// is visible in this frame rather than one frame later.
+		//
+		// This is the ONE place the offset is decided, and the only place with a
+		// true row count: `scrollLines` is the transcript as it exists now, while
+		// every offset written between renders was bounded by the previous
+		// frame's height. A pending request is the reader's own gesture meeting
+		// that count for the first time, so it derives follow intent directly.
+		// Everything else is the engine correcting itself and runs under the
+		// guard, which lets the correction re-engage following but never end it.
 		const maxScroll = Math.max(0, scrollLines.length - viewportRows);
-		if (this.#stickyBottom) this.#scrollTop = maxScroll;
-		else if (this.#scrollTop > maxScroll) this.#scrollTop = maxScroll;
+		const request = this.#scrollRequest;
+		this.#scrollRequest = undefined;
+		if (request !== undefined) {
+			this.#scrollTop = Math.min(maxScroll, request);
+			this.#syncStickyBottom(maxScroll);
+		} else {
+			const wasApplying = this.#applyingSticky;
+			this.#applyingSticky = true;
+			try {
+				if (this.#stickyBottom) this.#scrollTop = maxScroll;
+				else if (this.#scrollTop > maxScroll) this.#scrollTop = maxScroll;
+				this.#syncStickyBottom(maxScroll);
+			} finally {
+				this.#applyingSticky = wasApplying;
+			}
+		}
 
 		// Blocks clipped by the window edge can leave nothing on screen but their
 		// own painted inset rows: a card's blank top or bottom padding, in the
@@ -6050,6 +6131,16 @@ export class TUI extends Container {
 	 * a walk of the block, which is what this bound exists to prevent.
 	 */
 	static readonly #RAIL_PROBE_ROWS = 4;
+
+	/**
+	 * Overflow, in rows, below which the transcript always follows its tail.
+	 *
+	 * A transcript that overflows by a single row has no meaningful "scrolled
+	 * away" state: one row of streaming growth would otherwise toggle follow
+	 * intent between frames and the view would shimmer against the bottom edge.
+	 * opencode's renderer draws the same line at the same row count.
+	 */
+	static readonly #STICKY_SLACK_ROWS = 1;
 
 	/**
 	 * Rebuild the pointer zone list for this frame, normalized to SCREEN
