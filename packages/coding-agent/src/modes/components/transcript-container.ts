@@ -1,4 +1,5 @@
 import {
+	type BlockRowSpans,
 	type Component,
 	Container,
 	type HitZoneSink,
@@ -220,6 +221,7 @@ const EMPTY_TAIL: readonly string[] = [];
 export class TranscriptContainer
 	extends Container
 	implements
+		BlockRowSpans,
 		NativeScrollbackLiveRegion,
 		NativeScrollbackCommittedRows,
 		NativeScrollbackWidthEpoch,

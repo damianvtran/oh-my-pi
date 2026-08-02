@@ -56,8 +56,10 @@ export class UsageOverlayComponent implements Component, MouseRoutable {
 	/**
 	 * Wheel over the panel scrolls the panel. The engine only calls this for
 	 * reports that landed inside the overlay's own rectangle, so there is no
-	 * position test to repeat here. Everything else is declined so the engine
-	 * stays free to route it — this panel owns no clickable regions.
+	 * position test to repeat here. This panel owns no clickable regions, so
+	 * everything else is declined — which drops it: while an overlay is up the
+	 * engine does not route pointer input at all, and a declined report falls
+	 * through to this component's own `handleInput`.
 	 */
 	routeMouse(event: SgrMouseEvent): boolean {
 		if (event.wheel === null) return false;
@@ -67,9 +69,10 @@ export class UsageOverlayComponent implements Component, MouseRoutable {
 	}
 
 	handleInput(data: string): void {
-		// Reports inside the panel are consumed by `routeMouse` before reaching
-		// here; anything left is a report from outside it, which must not leak
-		// into the vim-style single-key handlers below.
+		// A report that landed inside the panel and was declined by `routeMouse`
+		// arrives here, as does one from outside it. Neither is a keystroke, and
+		// this guard is what stops both from reaching the single-key handlers
+		// below. Any overlay that declines a report needs it.
 		if (data.startsWith("\x1b[<")) return;
 		if (matchesKey(data, "escape") || data === "q") {
 			this.#close();

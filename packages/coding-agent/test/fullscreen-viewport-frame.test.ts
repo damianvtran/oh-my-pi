@@ -263,4 +263,33 @@ describe("fullscreen viewport frame", () => {
 			tui.stop();
 		}
 	});
+
+	it("keeps a block the window sits inside on screen while its blank run scrolls past", async () => {
+		const { term, tui, transcript, settle } = mount(active);
+		const rail = "\u258e";
+		try {
+			// One block taller than the viewport whose middle is a run of rows that
+			// carry nothing but its rail - a pasted spaced file, a padded table.
+			transcript.addChild(
+				new StaticRows([`${rail} head`, ...Array.from({ length: 20 }, () => `${rail}   `), `${rail} tail`]),
+			);
+			tui.requestRender();
+			await settle();
+
+			const max = tui.maxScrollTop;
+			expect(max).toBeGreaterThan(0);
+			for (let offset = 0; offset <= max; offset++) {
+				tui.scrollTo(offset);
+				await settle();
+				// The window is INSIDE the block: its visible rows are the block's
+				// middle, not the remains of a clipped edge, so they must survive.
+				// Suppressing them blanks the whole viewport for as long as the
+				// blank run is on screen, then snaps the block back.
+				const shown = term.getViewport().filter(line => Bun.stripANSI(line).includes(rail)).length;
+				expect(shown, `viewport is empty at scrollTop ${offset}`).toBeGreaterThan(0);
+			}
+		} finally {
+			tui.stop();
+		}
+	});
 });

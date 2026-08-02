@@ -102,8 +102,12 @@ export function routeSelectListMouse(target: SelectListMouseTarget, event: SgrMo
 export interface MouseRoutable {
 	/**
 	 * `line`/`col` are 0-based within the component's rendered output.
-	 * Return `false` to decline the event so the host can route it elsewhere;
-	 * anything else (including `undefined`) consumes it.
+	 *
+	 * Return `false` to decline the report, which DROPS it: while an overlay is
+	 * up the engine routes no pointer input, so a declined report reaches only
+	 * the focused component's `handleInput`. A declining overlay must therefore
+	 * ignore `\x1b[<` there itself. Anything else (including `undefined`)
+	 * consumes it.
 	 */
 	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean | undefined | void;
 }

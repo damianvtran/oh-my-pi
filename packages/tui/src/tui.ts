@@ -263,6 +263,21 @@ const NO_BLOCK_STARTS: readonly number[] = Object.freeze([]);
 const ZERO_BLOCK_START: readonly number[] = Object.freeze([0]);
 
 /**
+ * Whether `starts` is usable as a block ledger: strictly ascending and inside
+ * `[0, rowCount)`. `#blockIndexAt` binary-searches it, so a violation does not
+ * fail loudly — it silently attributes rows to the wrong block.
+ */
+function isAscendingWithin(starts: readonly number[], rowCount: number): boolean {
+	if (starts.length === 0) return true;
+	if (starts[0]! < 0) return false;
+	if (starts[starts.length - 1]! >= rowCount) return false;
+	for (let i = 1; i < starts.length; i++) {
+		if (starts[i]! <= starts[i - 1]!) return false;
+	}
+	return true;
+}
+
+/**
  * Window chrome for `fullscreen` mode: the gutter around the content and the
  * base surface painted behind every row.
  *
@@ -5903,14 +5918,20 @@ export class TUI extends Container {
 			const end = starts[index + 1]!;
 			// Whole blocks are never orphans, however blank they are.
 			if (start >= scrollTop && end <= windowEnd) continue;
+			// Clipped at BOTH ends means the window sits INSIDE the block: the
+			// visible rows are its middle, not the remains of an edge. A tall
+			// tool card with a run of blank output lines would otherwise blank
+			// the whole viewport for as long as that run is on screen.
+			if (start < scrollTop && end > windowEnd) continue;
 			const from = Math.max(start, scrollTop);
 			const to = Math.min(end, windowEnd);
-			// A window narrow enough to sit inside one block hits it from both edges.
+			// Both window edges can land in the same block.
 			if (ranges.some(range => range.start === from && range.end === to)) continue;
-			// A clipped block always has a row just outside the window on the
-			// clipped side; its first column is the rail reference.
-			const probe = from > start ? from - 1 : to < end ? to : -1;
-			const rail = probe >= 0 ? this.#firstColumn(Bun.stripANSI(lines[probe] ?? "")) : "";
+			// A rail is a property of every row its block owns, so it is only
+			// inferred when the block's own edges agree on it. One adjacent row
+			// is not enough: a diff block clipped to a lone `-` would adopt `-`
+			// from the `-removed` line above and discard itself as decoration.
+			const rail = this.#blockRailGlyph(lines, start, end);
 			let hasText = false;
 			for (let row = from; row < to && !hasText; row++) {
 				const stripped = Bun.stripANSI(lines[row] ?? "");
@@ -5923,6 +5944,39 @@ export class TUI extends Container {
 		}
 		if (ranges.length === 0) return undefined;
 		return frameRow => ranges.some(range => frameRow >= range.start && frameRow < range.end);
+	}
+
+	/**
+	 * The glyph a block paints down its first column on every row it draws, or
+	 * `""` when it paints none.
+	 *
+	 * Sampled from the block's own head rather than from the row adjacent to the
+	 * window: a rail is contiguous from the block's first drawn row by
+	 * construction, while an adjacent row is just whatever text happened to be
+	 * there — a diff block clipped to a lone `-` would adopt `-` from the
+	 * `-removed` line above and discard itself as decoration. Three agreeing
+	 * rows are enough to tell a rail from a coincidence.
+	 *
+	 * A block's span runs from the previous block's end to the next block's
+	 * start, so it opens with the separator row assembly placed above the block
+	 * and closes with the one below: leading blanks are skipped and the tail is
+	 * never sampled. A blank first column is not a rail — a card without one
+	 * pads with spaces, which the caller already reads as decoration.
+	 */
+	#blockRailGlyph(lines: readonly string[], start: number, end: number): string {
+		let head = start;
+		let first = "";
+		while (head < end && (first === "" || first === " ")) {
+			first = this.#firstColumn(Bun.stripANSI(lines[head] ?? ""));
+			head++;
+		}
+		if (first === "" || first === " ") return "";
+		const last = Math.min(head + 2, end);
+		if (last === head) return "";
+		for (let row = head; row < last; row++) {
+			if (this.#firstColumn(Bun.stripANSI(lines[row] ?? "")) !== first) return "";
+		}
+		return first;
 	}
 
 	/** Index of the block containing `row`, or -1. `starts` is ascending. */
@@ -5950,18 +6004,20 @@ export class TUI extends Container {
 	/**
 	 * Block starts within one scroll-region child, in that child's own rows.
 	 *
-	 * A child that assembles its own rows reports its ledger directly. A plain
-	 * `Container` is the concatenation of its children, so its memoized child
-	 * row counts are the boundaries — but only when they actually add up to the
-	 * rows it returned, which a subclass that inserts separators or trims blank
-	 * edges breaks. Anything unverifiable degrades to one opaque block, which
-	 * is always safe: an opaque block is never suppressed.
+	 * A child that assembles its own rows reports its ledger directly, checked
+	 * here for the two properties the binary search in {@link #blockIndexAt}
+	 * assumes: strictly ascending, and inside the rows the child actually drew.
+	 * A plain `Container` is the concatenation of its children, so its memoized
+	 * child row counts are the boundaries — but only when they actually add up
+	 * to the rows it returned, which a subclass that inserts separators or trims
+	 * blank edges breaks. Anything unverifiable degrades to one opaque block,
+	 * which is always safe: an opaque block is never suppressed.
 	 */
 	#localBlockStarts(child: Component, rowCount: number): readonly number[] {
 		if (rowCount <= 0) return NO_BLOCK_STARTS;
 		if (hasBlockRowSpans(child)) {
 			const declared = child.blockStartRows();
-			if (declared !== undefined) return declared;
+			if (declared !== undefined && isAscendingWithin(declared, rowCount)) return declared;
 		}
 		if (child instanceof Container) {
 			const counts = child.memoizedChildRowCounts();

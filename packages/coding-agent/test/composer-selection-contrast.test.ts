@@ -144,3 +144,44 @@ describe("composer selection wash", () => {
 		expect(frame).toContain(`${theme.selectionBgAnsi}${selected}\x1b[49m`);
 	});
 });
+
+describe("floating overlay surface", () => {
+	beforeEach(async () => {
+		await initSettings("fullscreen");
+	});
+
+	it.each(["dark", "light", "alabaster", "birch"])(
+		"separates a floating panel from both the transcript and its own selection (%s)",
+		async name => {
+			const t = (await getThemeByName(name))!;
+			const overlay = bgOpenToHex(t.overlayBgAnsi);
+			// A modal in fullscreen draws no rule, so the fill is the only edge it
+			// has against the cards behind it.
+			expect(overlay).not.toBe(bgOpenToHex(t.panelBgAnsi));
+			// And `elementBg` is where a select list paints its own selected row,
+			// so an overlay filled with it swallows its own selection.
+			expect(overlay).not.toBe(bgOpenToHex(t.elementBgAnsi));
+		},
+	);
+
+	it("keeps a select list's selected row visible against the overlay it sits on", async () => {
+		await setTheme("dark");
+		const selected = getEditorTheme().selectList.selectedRow?.("row");
+		expect(selected).toContain(theme.elementBgAnsi);
+		expect(selected).not.toContain(theme.overlayBgAnsi);
+	});
+
+	it("resolves on every bundled theme without collapsing onto a lower rung", async () => {
+		let checked = 0;
+		for (const name of ["dark", "light", ...Object.keys(defaultThemes)]) {
+			const t = await getThemeByName(name);
+			// A theme that paints no surface at all derives no ladder; it opts out
+			// of the fill entirely rather than getting a guessed one.
+			if (!t || t.overlayBgAnsi === "") continue;
+			expect(t.overlayBg("ab", 4)).toContain("ab");
+			expect(bgOpenToHex(t.overlayBgAnsi)).not.toBe(bgOpenToHex(t.elementBgAnsi));
+			checked++;
+		}
+		expect(checked).toBeGreaterThan(90);
+	});
+});

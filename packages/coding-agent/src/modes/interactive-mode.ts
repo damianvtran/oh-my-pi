@@ -1509,10 +1509,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * shows at rest and scrolls away with the content; as chrome it would stay
 	 * pinned over a scrolled transcript and read as a clipped row.
 	 *
-	 * Overlays fill on `elementBg`, one rung above the `panelBg` every transcript
+	 * Overlays fill on `overlayBg`, two rungs above the `panelBg` every transcript
 	 * card uses. In fullscreen a floating panel draws no rule — its fill is the
 	 * only thing defining it — so sharing a rung with the cards left a modal
-	 * landing over one with no perceptible edge on either side.
+	 * landing over one with no perceptible edge. It cannot borrow `elementBg`
+	 * either: that is where a select list paints its own selected row.
 	 */
 	#applyViewportChrome(): void {
 		this.ui.setViewportChrome({
@@ -1523,7 +1524,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Theme instance, and `theme` is rebound when the user switches theme,
 			// so a captured reference would keep painting the old palette.
 			fill: (line, width) => theme.surfaceBg(line, width),
-			overlayFill: (line, width) => theme.elementBg(line, width),
+			overlayFill: (line, width) => theme.overlayBg(line, width),
 		});
 	}
 

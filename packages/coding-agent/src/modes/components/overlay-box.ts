@@ -6,8 +6,9 @@
  * Append mode paints a frame with `theme.boxRound` glyphs (rounded corners,
  * sharp tee/cross junctions) in the `border`/`accent` colors. Fullscreen paints
  * no frame at all: the overlay is a raised surface marked out by its fill, and
- * the engine washes every composited overlay row with `theme.panelBg`, so the
- * rules degrade to plain gaps and the corners and verticals to plain inset.
+ * the engine washes every composited overlay row with `theme.overlayBg` — a
+ * rung the transcript never uses, so the fill alone is the edge — so the rules
+ * degrade to plain gaps and the corners and verticals to plain inset.
  *
  * Both modes lay out on identical column geometry, deliberately. Callers cache
  * hit rows and click columns against these widths and budget their body height
