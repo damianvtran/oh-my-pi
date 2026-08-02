@@ -539,6 +539,13 @@ export class AgentSession {
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
 	readonly #wake: WakeScheduler;
+	/**
+	 * Stable identities of explicitly cancelled schedules. The scheduler
+	 * advances recurrence by replacing the schedule object, while an in-flight
+	 * delivery still holds the prior object, so object identity cannot guard the
+	 * async queue-insertion race.
+	 */
+	readonly #cancelledWakeScheduleKeys = new Set<string>();
 	#replanTitleRefreshInFlight: Promise<void> | undefined = undefined;
 	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
 	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
@@ -5493,6 +5500,8 @@ export class AgentSession {
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
+			/** Re-check immediately before queue insertion; false drops a stale async delivery. */
+			queueGuard?: () => boolean;
 		},
 	): Promise<void> {
 		const textContent =
@@ -5520,7 +5529,7 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
+			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText, options.queueGuard);
 			return;
 		}
 		if (this.isStreaming) {
@@ -5530,7 +5539,7 @@ export class AgentSession {
 			for (const notice of keywordNotices) {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
+			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText, options?.queueGuard);
 			return;
 		}
 
@@ -6247,6 +6256,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp",
 		queueChipText?: string,
+		queueGuard?: () => boolean,
 	): Promise<void> {
 		const details =
 			queueChipText !== undefined
@@ -6268,6 +6278,9 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		// Preflight and image normalization are async. Cancellation can happen
+		// while either is in flight, so the guard belongs at the insertion edge.
+		if (queueGuard && !queueGuard()) return;
 		this.#allowQueuedMessageDrainRetry();
 		if (deliverAs === "followUp") {
 			this.agent.followUp(normalizedAppMessage);
@@ -6537,14 +6550,58 @@ export class AgentSession {
 		return [...this.#wake.schedules];
 	}
 
-	/** Replace the schedule list (create / cancel), persisting and re-arming it. */
-	setWakeSchedules(schedules: WakeSchedule[]): void {
+	/** Identity retained across recurrence advances but distinct across normal handle reuse. */
+	#wakeScheduleKey(schedule: WakeSchedule): string {
+		return `${schedule.id}\0${schedule.createdAt}`;
+	}
+
+	/**
+	 * Replace the schedule list, persist it, and purge deliveries belonging to
+	 * schedules removed by this update. Returns the number of already-fired
+	 * prompts removed from the queues.
+	 */
+	setWakeSchedules(schedules: WakeSchedule[]): number {
+		const remainingIds = new Set(schedules.map(schedule => schedule.id));
+		const cancelled = this.#wake.schedules.filter(schedule => !remainingIds.has(schedule.id));
+		for (const schedule of cancelled) this.#cancelledWakeScheduleKeys.add(this.#wakeScheduleKey(schedule));
 		this.#wake.update(schedules);
+		return this.#purgeQueuedWakeDeliveries(new Set(cancelled.map(schedule => schedule.id)));
+	}
+
+	/** Remove queued wake prompts without disturbing unrelated queued work. */
+	#purgeQueuedWakeDeliveries(cancelledIds: ReadonlySet<string>): number {
+		if (cancelledIds.size === 0) return 0;
+		const isCancelledWake = (message: AgentMessage): boolean =>
+			message.role === "custom" &&
+			message.customType === WAKE_PROMPT_MESSAGE_TYPE &&
+			isRecord(message.details) &&
+			typeof message.details.id === "string" &&
+			cancelledIds.has(message.details.id);
+		const steering = this.agent.peekSteeringQueue();
+		const followUp = this.agent.peekFollowUpQueue();
+		const nextTurn = this.#pendingNextTurnMessages;
+		const keptSteering = steering.filter(message => !isCancelledWake(message));
+		const keptFollowUp = followUp.filter(message => !isCancelledWake(message));
+		const keptNextTurn = nextTurn.filter(message => !isCancelledWake(message));
+		const purged =
+			steering.length -
+			keptSteering.length +
+			(followUp.length - keptFollowUp.length) +
+			(nextTurn.length - keptNextTurn.length);
+		if (purged > 0) {
+			this.agent.replaceQueues(keptSteering, keptFollowUp);
+			this.#pendingNextTurnMessages = keptNextTurn;
+		}
+		return purged;
 	}
 
 	/** Re-read schedules from the current branch and re-arm. */
 	#syncWakeSchedulesFromBranch(): void {
-		this.#wake.load(getLatestWakeSchedulesFromEntries(this.sessionManager.getBranch()));
+		const schedules = getLatestWakeSchedulesFromEntries(this.sessionManager.getBranch());
+		// Navigating back to a branch where a schedule is live intentionally
+		// re-arms it, even if a descendant branch cancelled the same identity.
+		for (const schedule of schedules) this.#cancelledWakeScheduleKeys.delete(this.#wakeScheduleKey(schedule));
+		this.#wake.load(schedules);
 	}
 
 	/**
@@ -6555,6 +6612,7 @@ export class AgentSession {
 	 * late. While idle this starts a turn immediately, which is the whole point.
 	 */
 	#deliverWake(wake: DueWake): void {
+		const scheduleKey = this.#wakeScheduleKey(wake.schedule);
 		const details: WakePromptDetails = { id: wake.schedule.id, occurrence: wake.occurrence, final: wake.final };
 		if (wake.plannedTotal !== undefined) details.plannedTotal = wake.plannedTotal;
 		if (wake.schedule.everyMs !== undefined) details.everyMs = wake.schedule.everyMs;
@@ -6566,7 +6624,11 @@ export class AgentSession {
 				details,
 				attribution: "user",
 			},
-			{ streamingBehavior: "followUp", queueChipText: formatWakeChipText(wake) },
+			{
+				streamingBehavior: "followUp",
+				queueChipText: formatWakeChipText(wake),
+				queueGuard: () => !this.#cancelledWakeScheduleKeys.has(scheduleKey),
+			},
 		).catch(error => {
 			logger.warn("wake prompt injection failed", { id: wake.schedule.id, error: String(error) });
 		});

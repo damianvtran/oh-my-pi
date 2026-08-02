@@ -333,8 +333,11 @@ export interface ToolSession {
 	setTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Copy of this session's live scheduled-wakeup list. Absent ⇒ the `wake` tool is not offered. */
 	getWakeSchedules?: () => WakeSchedule[];
-	/** Replace the scheduled-wakeup list: persists it to the branch and re-arms the timers. */
-	setWakeSchedules?: (schedules: WakeSchedule[]) => void;
+	/**
+	 * Replace the scheduled-wakeup list, persist/re-arm it, and return the
+	 * number of already-fired prompts purged because their schedule was removed.
+	 */
+	setWakeSchedules?: (schedules: WakeSchedule[]) => number;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
 	getToolChoiceQueue?(): ToolChoiceQueue;
 	/** Build a model-provider-specific ToolChoice that targets the named tool, or undefined if unsupported. */

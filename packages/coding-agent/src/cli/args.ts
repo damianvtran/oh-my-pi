@@ -372,7 +372,6 @@ export function reportCliUsageError(
 	return true;
 }
 
-
 export function printHelp(): void {
 	process.stdout.write(
 		`${chalk.bold(APP_NAME)} - AI coding assistant\n\n` +
