@@ -286,7 +286,7 @@ export class AssistantMessageComponent extends Container {
 	readonly #errorHeader = new CollapsibleBlockHeader(
 		`assistant-error:${++assistantMessageInstanceSeq}`,
 		() => this.setExpanded(!this.#errorExpanded),
-		() => this.#copySource() ?? this.#errorCopySource(),
+		() => this.#errorCopySource() ?? this.#copySource(),
 	);
 	readonly #errorHeaderPainter = new HeaderRowPainter();
 	/**
@@ -414,7 +414,7 @@ export class AssistantMessageComponent extends Container {
 		return text.length > 0 ? text : undefined;
 	}
 
-	/** Raw provider error when an error-only turn has no assistant prose to copy. */
+	/** Raw provider error associated with the inline error row. */
 	#errorCopySource(): string | undefined {
 		if (!this.#lastMessage) return undefined;
 		const presentation = resolveAssistantErrorPresentation(this.#lastMessage);
