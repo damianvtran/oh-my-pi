@@ -11,7 +11,11 @@
  * the ones that do not. Three properties matter:
  *
  * - **It never blocks the agent.** A relay that will not start costs phone
- *   access, not your session, so this runs unawaited and swallows everything.
+ *   access, not your session, so nothing on the way to the prompt awaits this.
+ *   `collab.autoStart` hosting *does* await it — off the critical path, in a
+ *   detached chain — because a host that cannot reach the relay never retries,
+ *   so starting one before the heal finishes is how a login-time session ends up
+ *   permanently unreachable from the phone.
  * - **It is idempotent under a thundering herd.** Eight terminals starting at
  *   once must not restart each other's services: a job that is merely still
  *   starting is left alone, and only a job that is loaded-but-dead is kicked.
@@ -34,6 +38,24 @@ import type { MobileServiceSpec } from "./types";
  */
 const HEAL_WAIT_MS = 4_000;
 
+/**
+ * Grace for a job launchd already reports as `running`. Much longer than
+ * {@link HEAL_WAIT_MS} because the process exists and is binding — at login the
+ * whole stack pages in cold behind everything else macOS is starting, and the
+ * relay has been seen taking the better part of twenty seconds to listen.
+ * Kickstarting it in that window would restart a service that was about to work,
+ * once per terminal in the login storm.
+ */
+const STARTING_WAIT_MS = 25_000;
+
+/**
+ * Bring one service to a state where it answers.
+ *
+ * Every exit path either proves the service healthy or has exhausted what this
+ * process can do about it, because callers now *sequence* on it: hosting waits
+ * for this to resolve, so resolving early on a service that is still starting
+ * would hand the caller the same race the wait exists to close.
+ */
 async function healService(spec: MobileServiceSpec): Promise<void> {
 	if (await waitForHealthy(spec.healthUrl, 0)) return;
 	const state = await serviceState(spec.label);
@@ -51,9 +73,16 @@ async function healService(spec: MobileServiceSpec): Promise<void> {
 	// Loaded but silent. Give it the grace window first: a concurrent launch may
 	// have just started it, and kickstarting a starting job is what turned eight
 	// simultaneous launches into a restart storm in the pre-repo version of this.
-	if (await waitForHealthy(spec.healthUrl, HEAL_WAIT_MS)) return;
+	if (await waitForHealthy(spec.healthUrl, state === "running" ? STARTING_WAIT_MS : HEAL_WAIT_MS)) return;
 	const result = await kickstartService(spec.label);
-	if (!result.ok) logger.debug("mobile: kickstart during heal failed", { label: spec.label, stderr: result.stderr });
+	if (!result.ok) {
+		logger.debug("mobile: kickstart during heal failed", { label: spec.label, stderr: result.stderr });
+		return;
+	}
+	// launchd returns as soon as it has accepted the restart, so without this the
+	// heal resolves before the service is listening and anything sequenced behind
+	// it races the very start it just asked for.
+	await waitForHealthy(spec.healthUrl, HEAL_WAIT_MS);
 }
 
 /**

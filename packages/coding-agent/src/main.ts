@@ -556,8 +556,7 @@ async function runInteractiveMode(
 	// `collab.publishLink`). Placed after the `omp join` dispatch above, and
 	// skipped whenever a join was requested at all: a process launched to join
 	// someone else's room must never end up hosting its own, including when the
-	// join failed. Deliberately not awaited — the relay handshake has a 15 s
-	// ceiling and an unreachable relay must not delay the prompt.
+	// join failed.
 	// Matched against the schema values rather than `!== "off"`: merged settings
 	// are not validated against the enum, so a typo or an unquoted YAML boolean
 	// would otherwise fall through to a full-control room the user never asked for.
@@ -567,13 +566,6 @@ async function runInteractiveMode(
 	// resume and require a relaunch.
 	const autoStartCollab = settings.get("collab.autoStart");
 	const autoStartHosts = autoStartCollab === "full" || autoStartCollab === "view";
-	if (autoStartHosts && joinLink === undefined && !mode.collabHost && !mode.collabGuest) {
-		void startCollabHosting(mode, {
-			view: autoStartCollab === "view",
-			qr: false,
-			followSession: true,
-		}).catch(() => {});
-	}
 
 	// Heal the mobile services (`omp mobile install`) if they are installed,
 	// enabled and not answering. launchd handles the normal cases; this covers a
@@ -582,7 +574,28 @@ async function runInteractiveMode(
 	// start costs phone access, never this session. Gated on the same
 	// `autoStartHosts` check, because a session that hosts no room has nothing for
 	// the portal to aggregate.
-	if (autoStartHosts) void ensureMobileServices().catch(() => {});
+	const mobileServicesHealed = autoStartHosts ? ensureMobileServices().catch(() => {}) : undefined;
+
+	if (autoStartHosts && joinLink === undefined && !mode.collabHost && !mode.collabGuest) {
+		// Hosting waits for that heal rather than racing it. A session launched at
+		// login — a cmux workspace restored after a reboot, a Terminal window
+		// macOS reopened — routinely starts before launchd has the relay
+		// listening, and a first connect that fails is terminal: the host
+		// reconnects a connection it *lost*, never one that never opened. The room
+		// is then silently never published and the session is invisible from the
+		// phone until someone types `/collab` into it. Awaiting costs one loopback
+		// probe when the relay is already up, and is the entire fix when it is not.
+		// Still off the critical path: the whole chain is unawaited, so the prompt
+		// appears while this settles.
+		void (async () => {
+			await mobileServicesHealed;
+			await startCollabHosting(mode, {
+				view: autoStartCollab === "view",
+				qr: false,
+				followSession: true,
+			});
+		})().catch(() => {});
+	}
 
 	if (initialMessage !== undefined) {
 		session.maybeStartTitleGeneration(initialMessage);
