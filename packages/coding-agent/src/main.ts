@@ -30,6 +30,7 @@ import { buildInitialMessage } from "./cli/initial-message";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
+import { CmuxResumeBinder } from "./cmux/resume";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
@@ -550,6 +551,15 @@ async function runInteractiveMode(
 	if (joinLink !== undefined) {
 		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
+
+	// Tell cmux how to bring this session back if the machine restarts under it.
+	// Independent of collab and of the mobile stack: it costs one background
+	// subprocess and it is the difference between a restored workspace resuming
+	// this session and coming back as an empty shell. Re-asserted on every
+	// session change, so `/resume` and friends move the binding with the process.
+	const cmuxResume = new CmuxResumeBinder();
+	cmuxResume.register(mode.sessionManager.getSessionId());
+	mode.sessionManager.onSessionIdChanged(sessionId => cmuxResume.register(sessionId));
 
 	// `collab.autoStart` hosts the session without a keystroke, so a local
 	// supervisor can discover and drive every running omp (see

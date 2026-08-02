@@ -53,7 +53,9 @@ function makeHostContext(sessionId: string, cwd: string): InteractiveModeContext
 				entries: [],
 			}),
 			onEntryAppended: undefined,
-			onSessionIdChanged: undefined,
+			// Never fired here: this suite only checks what the portal discovers, but
+			// `CollabHost` subscribes unconditionally for a session-following room.
+			onSessionIdChanged: () => () => {},
 		},
 		session: {
 			isStreaming: false,

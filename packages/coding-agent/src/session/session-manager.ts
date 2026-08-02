@@ -493,19 +493,31 @@ export class SessionManager {
 	onEntryAppended?: (entry: SessionEntry) => void;
 
 	/**
-	 * Collab rebind tap: invoked after the active session id changes — resume,
-	 * new/clear, fork, branch/tree navigation, and the rollback that restores a
-	 * failed switch. A room whose lifetime is the *process* (`collab.autoStart`)
-	 * uses it to follow the session the user is now in; without it the room can
-	 * only end with the session it was started on, which is exactly what makes
-	 * an in-session `/resume` drop remote access until omp is relaunched.
+	 * Session-id observers: invoked after the active session id changes —
+	 * resume, new/clear, fork, branch/tree navigation, and the rollback that
+	 * restores a failed switch.
+	 *
+	 * A set rather than a single slot because two independent features follow
+	 * the process across a switch and neither may silently unhook the other: a
+	 * room whose lifetime is the *process* (`collab.autoStart`) rebinds so an
+	 * in-session `/resume` does not drop remote access until the next launch,
+	 * and the cmux resume binding re-points the surface at the session the user
+	 * actually ended up in (see `cmux/resume.ts`).
 	 *
 	 * Fired mid-transition (the manager has adopted the new session before
 	 * AgentSession finishes restoring model/thinking/messages), so an observer
 	 * that reads more than the id MUST defer its work — see
 	 * `CollabHost.#scheduleSessionRebind`.
 	 */
-	onSessionIdChanged?: (sessionId: string) => void;
+	readonly #sessionIdListeners = new Set<(sessionId: string) => void>();
+
+	/** Subscribe to {@link #sessionIdListeners}; call the result to unsubscribe. */
+	onSessionIdChanged(listener: (sessionId: string) => void): () => void {
+		this.#sessionIdListeners.add(listener);
+		return () => {
+			this.#sessionIdListeners.delete(listener);
+		};
+	}
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -1101,19 +1113,21 @@ export class SessionManager {
 
 	/**
 	 * Single funnel for every session-id write, so {@link onSessionIdChanged}
-	 * cannot be bypassed by a transition that assigns the field directly. Only a
-	 * genuine change notifies, and an observer's failure is contained: a broken
-	 * tap must never abort a session switch.
+	 * subscribers cannot be bypassed by a transition that assigns the field
+	 * directly. Only a genuine change notifies, and an observer's failure is
+	 * contained twice over: a broken tap must never abort a session switch, and
+	 * must never cost a healthy tap its notification either — hence the
+	 * per-listener try rather than one around the loop.
 	 */
 	#setSessionId(sessionId: string): void {
 		if (this.#sessionId === sessionId) return;
 		this.#sessionId = sessionId;
-		const callback = this.onSessionIdChanged;
-		if (!callback) return;
-		try {
-			callback(sessionId);
-		} catch (err) {
-			logger.warn("collab session-id hook failed", { error: String(err) });
+		for (const listener of this.#sessionIdListeners) {
+			try {
+				listener(sessionId);
+			} catch (err) {
+				logger.warn("session-id hook failed", { error: String(err) });
+			}
 		}
 	}
 

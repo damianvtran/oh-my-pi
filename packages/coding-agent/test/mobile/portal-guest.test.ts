@@ -168,12 +168,15 @@ interface HostHarness {
  * Minimal InteractiveModeContext double: only the members `CollabHost` touches,
  * mirroring ../collab/session-rebind.test.ts. `sessionManager` reads through
  * `loaded`, so {@link switchSession} reproduces what a resume does to the real
- * manager — adopt a new id/cwd/transcript, then fire the `onSessionIdChanged`
- * tap every id write funnels through.
+ * manager — adopt a new id/cwd/transcript, then notify the `onSessionIdChanged`
+ * subscribers every id write funnels through. `notifySessionIdChanged` is the
+ * harness's stand-in for the manager's `#setSessionId`, which the double has no
+ * id writes to hang the notification off.
  */
 function makeHostHarness(loaded: LoadedSession): HostHarness {
 	const bus = new EventBus();
 	let listener: ((event: AgentSessionEvent) => void) | undefined;
+	const sessionIdListeners = new Set<(sessionId: string) => void>();
 	const ctx = {
 		settings: { get: () => "" },
 		sessionManager: {
@@ -184,7 +187,15 @@ function makeHostHarness(loaded: LoadedSession): HostHarness {
 				entries: loaded.entries,
 			}),
 			onEntryAppended: undefined,
-			onSessionIdChanged: undefined,
+			onSessionIdChanged: (subscriber: (sessionId: string) => void) => {
+				sessionIdListeners.add(subscriber);
+				return () => {
+					sessionIdListeners.delete(subscriber);
+				};
+			},
+			notifySessionIdChanged: (sessionId: string) => {
+				for (const subscriber of sessionIdListeners) subscriber(sessionId);
+			},
 		},
 		session: {
 			isStreaming: false,
@@ -215,7 +226,9 @@ function makeHostHarness(loaded: LoadedSession): HostHarness {
 
 function switchSession(ctx: InteractiveModeContext, loaded: LoadedSession, next: Partial<LoadedSession>): void {
 	Object.assign(loaded, next);
-	ctx.sessionManager.onSessionIdChanged?.(loaded.id);
+	(ctx.sessionManager as unknown as { notifySessionIdChanged: (sessionId: string) => void }).notifySessionIdChanged(
+		loaded.id,
+	);
 }
 
 // ── Guest observer ──────────────────────────────────────────────────────────
