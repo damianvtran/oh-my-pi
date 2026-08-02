@@ -57,8 +57,10 @@ export class BashExecutionComponent extends Container {
 	#cardRows = 0;
 	// The engine repaints after a consumed click, so the toggle only has to
 	// rebuild this block's display.
-	readonly #header = new CollapsibleBlockHeader(`bash:${++bashExecutionInstanceSeq}`, () =>
-		this.setExpanded(!this.#expanded),
+	readonly #header = new CollapsibleBlockHeader(
+		`bash:${++bashExecutionInstanceSeq}`,
+		() => this.setExpanded(!this.#expanded),
+		() => this.#copySource(),
 	);
 	readonly #headerPainter = new HeaderRowPainter();
 	readonly #card = new BlockCard();
@@ -283,6 +285,13 @@ export class BashExecutionComponent extends Container {
 	#setOutput(output: string): void {
 		const clean = sanitizeWithOptionalSixelPassthrough(output, sanitizeText);
 		this.#outputLines = clean ? this.#clampLinesPreservingSixel(clean.split("\n")) : [];
+	}
+
+	/** Command and complete retained output, independent of the collapsed preview. */
+	#copySource(): string {
+		const output = this.getOutput().trimEnd();
+		const command = `Bash:\n\n${this.command}`;
+		return output.length > 0 ? `${command}\n\nOutput:\n${output}` : command;
 	}
 
 	/**

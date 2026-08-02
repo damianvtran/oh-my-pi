@@ -41,8 +41,10 @@ export class EvalExecutionComponent extends Container {
 	#cardRows = 0;
 	// The engine repaints after a consumed click, so the toggle only has to
 	// rebuild this block's display.
-	readonly #header = new CollapsibleBlockHeader(`eval:${++evalExecutionInstanceSeq}`, () =>
-		this.setExpanded(!this.#expanded),
+	readonly #header = new CollapsibleBlockHeader(
+		`eval:${++evalExecutionInstanceSeq}`,
+		() => this.setExpanded(!this.#expanded),
+		() => this.#copySource(),
 	);
 	readonly #headerPainter = new HeaderRowPainter();
 	readonly #card = new BlockCard();
@@ -207,6 +209,13 @@ export class EvalExecutionComponent extends Container {
 	#setOutput(output: string): void {
 		const clean = sanitizeText(output);
 		this.#outputLines = clean ? clean.split("\n").map(line => this.#clampDisplayLine(line)) : [];
+	}
+
+	/** Cell source and complete retained output, independent of the collapsed preview. */
+	#copySource(): string {
+		const output = this.getOutput().trimEnd();
+		const code = `Eval (${this.language}):\n\n${this.code}`;
+		return output.length > 0 ? `${code}\n\nOutput:\n${output}` : code;
 	}
 
 	getOutput(): string {

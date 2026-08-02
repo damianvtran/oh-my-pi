@@ -198,11 +198,16 @@ export class UserMessageComponent extends Container {
  * observability data stays intact in `__advisor.jsonl`.
  */
 export class CollapsedSyntheticMessageComponent implements Component {
+	static #instances = 0;
 	#expanded = false;
 	#cache?: { width: number; carded: boolean; lines: readonly string[] };
 	#body?: UserMessageComponent;
 	readonly #summary: string;
 	readonly #card = new BlockCard();
+	readonly #copyTarget = new BlockCopyTarget(
+		`synthetic-user:${++CollapsedSyntheticMessageComponent.#instances}`,
+		() => this.text,
+	);
 	#renderedRows = 0;
 
 	constructor(
@@ -250,6 +255,7 @@ export class CollapsedSyntheticMessageComponent implements Component {
 
 	publishHitZones(sink: HitZoneSink): void {
 		this.#card.publishSelectionInset(sink, this.#renderedRows);
+		this.#copyTarget.publish(sink, 0, this.#renderedRows);
 	}
 
 	#renderExpanded(width: number, carded: boolean): readonly string[] {

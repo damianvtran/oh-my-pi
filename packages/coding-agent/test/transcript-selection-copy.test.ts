@@ -15,12 +15,19 @@
  * the chrome, and the copy click did not exist.
  */
 import { beforeEach, describe, expect, it } from "bun:test";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { BashExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/bash-execution";
+import { CollabPromptMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/collab-prompt-message";
+import { EvalExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/eval-execution";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
-import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
+import {
+	CollapsedSyntheticMessageComponent,
+	UserMessageComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "../../tui/test/render-stress-scheduler";
@@ -224,6 +231,66 @@ describe("transcript copy gesture", () => {
 
 		expect(harness.copied).toEqual([ERROR_OUTPUT]);
 		expect(Bun.stripANSI(harness.term.getViewport().join("\n"))).toBe(before);
+	});
+
+	it("copies local bash source and output without toggling the card", async () => {
+		const harness = await mountWith(active, (transcript, tui) => {
+			const bash = new BashExecutionComponent("printf hello", tui);
+			bash.setComplete(0, false, { output: "hello\nworld" });
+			transcript.addChild(bash);
+		});
+		const before = Bun.stripANSI(harness.term.getViewport().join("\n"));
+
+		click(harness.term, harness.rowOf("$ printf hello"), 10, 8);
+		await harness.settle();
+
+		expect(harness.copied).toEqual(["Bash:\n\nprintf hello\n\nOutput:\nhello\nworld"]);
+		expect(Bun.stripANSI(harness.term.getViewport().join("\n"))).toBe(before);
+	});
+
+	it("copies local eval source and output without toggling the card", async () => {
+		const harness = await mountWith(active, (transcript, tui) => {
+			const evalBlock = new EvalExecutionComponent("print('hi')", tui);
+			evalBlock.setComplete(0, false, { output: "hi" });
+			transcript.addChild(evalBlock);
+		});
+		const before = Bun.stripANSI(harness.term.getViewport().join("\n"));
+
+		click(harness.term, harness.rowOf(">>>"), 10, 8);
+		await harness.settle();
+
+		expect(harness.copied).toEqual(["Eval (python):\n\nprint('hi')\n\nOutput:\nhi"]);
+		expect(Bun.stripANSI(harness.term.getViewport().join("\n"))).toBe(before);
+	});
+
+	it("copies a collab guest's attribution and original prose", async () => {
+		const harness = await mountWith(active, transcript => {
+			transcript.addChild(
+				new CollabPromptMessageComponent({
+					role: "custom",
+					customType: COLLAB_PROMPT_MESSAGE_TYPE,
+					content: "hello from the guest",
+					display: true,
+					details: { from: "ada" },
+					timestamp: 0,
+				}),
+			);
+		});
+
+		click(harness.term, harness.rowOf("«ada»"), 10, 8);
+
+		expect(harness.copied).toEqual(["From ada:\n\nhello from the guest"]);
+	});
+
+	it("copies a collapsed synthetic user's complete source", async () => {
+		const source = "# Session update\n\nA complete remote transcript payload.";
+		const harness = await mountWith(active, transcript => {
+			transcript.addChild(new CollapsedSyntheticMessageComponent(source));
+		});
+
+		click(harness.term, harness.rowOf("Session update"), 10, 8);
+
+		expect(harness.copied).toEqual([source]);
 	});
 
 	it("copies a tool card's whole output, not the rows on screen", async () => {
