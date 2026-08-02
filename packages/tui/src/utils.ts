@@ -228,6 +228,22 @@ const OSC66_PREFIX = "\x1b]66;";
 const ESC = "\x1b";
 const TAB = "\t";
 const LONG_WIDTH_FAST_PATH_MIN = 128;
+// APC / PM / SOS strings (`ESC _`, `ESC ^`, `ESC X` ... BEL or ST). These carry
+// application metadata and paint NOTHING, but `Bun.stringWidth` only strips
+// CSI/OSC, so their payload is counted as printable text. That matters because
+// the engine's own caret sentinel is an APC string (`CURSOR_MARKER`): a row
+// carrying the caret measured 5 cells too wide, and every consumer that pads a
+// row to a width - `applyBackgroundToLine` above all - stopped its fill short by
+// exactly that much, leaving an unpainted notch at the right edge of whichever
+// composer row the caret was on.
+const APC_SPAN_REGEX = /\x1b[_^X][\s\S]*?(?:\x07|\x1b\\)/g;
+/** True when `str` may contain an APC/PM/SOS span, from `index` onward. Two
+ *  `indexOf` probes are cheaper than running the regex on every measured row. */
+function hasApcSpan(str: string, index: number): boolean {
+	return (
+		str.indexOf("\x1b_", index) !== -1 || str.indexOf("\x1b^", index) !== -1 || str.indexOf("\x1bX", index) !== -1
+	);
+}
 
 // Pin Bun.stringWidth semantics to the native width engine and guard against Bun
 // default drift: strip ANSI/OSC (don't count escape bytes) and treat
@@ -365,6 +381,15 @@ export function visibleWidth(str: string): number {
 				}
 			}
 			width += scale * (explicit ?? Bun.stringWidth(m[2], STRING_WIDTH_OPTS));
+		}
+	}
+
+	// APC/PM/SOS: subtract each span back out. `Bun.stringWidth` leaves the
+	// payload counted, but nothing in the span reaches the screen.
+	if (hasApcSpan(str, i)) {
+		APC_SPAN_REGEX.lastIndex = 0;
+		for (let m = APC_SPAN_REGEX.exec(str); m !== null; m = APC_SPAN_REGEX.exec(str)) {
+			width -= Bun.stringWidth(m[0], STRING_WIDTH_OPTS);
 		}
 	}
 

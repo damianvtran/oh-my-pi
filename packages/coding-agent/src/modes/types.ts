@@ -289,6 +289,12 @@ export interface InteractiveModeContext {
 	 * the transcript.
 	 */
 	showTransientStatus(message: string, styleFn: ((text: string) => string) | undefined): void;
+	/**
+	 * Show or hide the startup welcome/changelog run above the transcript. Set
+	 * false while the main view is drilled into a subagent, whose transcript
+	 * should open on its assignment rather than on this session's banner.
+	 */
+	setStartupChromeHidden(hidden: boolean): void;
 	showModelCycleTrack(track: string): void;
 	showError(message: string): void;
 	showPinnedError(message: string): void;

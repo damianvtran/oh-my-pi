@@ -395,16 +395,20 @@ function isEditorTheme(value: unknown): value is EditorTheme {
  * shares their left edge. `theme` is read inside `fill` rather than captured so
  * a `/theme` switch repaints against the new palette.
  *
- * The right inset is one column wider than the left. The status strip that
- * opens the panel starts with a wide glyph, so an equal inset reads as heavier
- * on the left; the extra column squares it up optically. Two blank rows close
- * the panel so the caret is not sitting on its bottom edge.
+ * The insets are equal. They were not while the status strip opened the panel:
+ * that row starts with a wide glyph, which made a symmetric inset read as
+ * heavier on the left. The strip now closes the panel instead, so the first
+ * thing on every row is ordinary text and the optical correction it needed
+ * would itself be the asymmetry.
+ *
+ * One blank row closes the panel under the status strip. A second is what the
+ * caret needed back when it could land on the last row; the strip is there now.
  */
 const COMPOSER_PANEL: EditorPanelSurface = {
 	fill: (line, width) => theme.panelBg(line, width),
 	paddingLeft: 2,
-	paddingRight: 3,
-	paddingBottom: 2,
+	paddingRight: 2,
+	paddingBottom: 1,
 };
 
 /**

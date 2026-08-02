@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentRowList } from "@oh-my-pi/pi-coding-agent/modes/components/agent-row-list";
 import { InteractiveMode, renderSubagentHudLines } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import {
 	type ObservableSession,
@@ -89,7 +90,7 @@ function makeProgressPayload(
 }
 
 function render(sessions: ObservableSession[], columns = 120): string {
-	return Bun.stripANSI(renderSubagentHudLines(sessions, columns).join("\n"));
+	return Bun.stripANSI(renderSubagentHudLines(sessions, columns).lines.join("\n"));
 }
 
 describe("subagent HUD lines", () => {
@@ -113,7 +114,7 @@ describe("subagent HUD lines", () => {
 			{ id: "main", kind: "main", label: "Main Session", status: "active", lastUpdate: Date.now() },
 			...finishedStates.map(status => makeSession({ id: `Done-${status}`, status, description: "old work" })),
 		];
-		expect(renderSubagentHudLines(sessions, 120)).toEqual([]);
+		expect(renderSubagentHudLines(sessions, 120).lines).toEqual([]);
 
 		const out = render([...sessions, makeSession({ id: "StillRunning", description: "live work" })]);
 		expect(out).toContain("StillRunning: live work");
@@ -140,7 +141,7 @@ describe("subagent HUD lines", () => {
 			makeSession({ id: "SyncSpawn", description: "inline task work", detached: false }),
 			makeSession({ id: "EvalSpawn", description: "eval cell work", detached: undefined }),
 		];
-		expect(renderSubagentHudLines(sessions, 120)).toEqual([]);
+		expect(renderSubagentHudLines(sessions, 120).lines).toEqual([]);
 
 		const out = render([...sessions, makeSession({ id: "BackgroundSpawn", description: "detached work" })]);
 		expect(out).toContain("BackgroundSpawn: detached work");
@@ -283,7 +284,7 @@ describe("InteractiveMode subagent observer UI sync", () => {
 	it("coalesces a burst of progress observer changes into one HUD rebuild and render request", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const requestRender = vi.spyOn(mode.ui, "requestRender").mockImplementation(() => {});
-		const rebuildHud = vi.spyOn(mode.subagentContainer, "clear");
+		const rebuildHud = vi.spyOn(AgentRowList.prototype, "setRows");
 		vi.useFakeTimers();
 
 		for (let index = 0; index < 6; index++) {

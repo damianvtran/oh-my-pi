@@ -4,9 +4,14 @@
  * inner <output>/<preview> body, while non-envelope result text (bash jobs)
  * passes through unchanged.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SessionFocusController } from "@oh-my-pi/pi-coding-agent/modes/controllers/session-focus-controller";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { HitZoneSink, isHitZoneProvider } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../src/prompts/tools/task-summary.md" with { type: "text" };
 import { hubToolRenderer } from "../src/tools/hub";
@@ -253,6 +258,62 @@ describe("job renderer task-result preview", () => {
 			expect(output).toContain("1 running agent — no jobs");
 			expect(output).toContain("Worker");
 			expect(output).toContain("grepping the tree");
+		});
+
+		it("makes task and agent-roster rows hoverable and drillable", async () => {
+			const registry = new AgentRegistry();
+			for (const id of ["Job1", "Worker"]) {
+				registry.register({
+					id,
+					displayName: id,
+					kind: "sub",
+					parentId: MAIN_AGENT_ID,
+					session: {} as AgentSession,
+					status: "running",
+				});
+			}
+			const focus = new SessionFocusController(
+				{ collabGuest: undefined } as unknown as InteractiveModeContext,
+				registry,
+			);
+			const focusAgent = vi.spyOn(focus, "focusAgent").mockResolvedValue();
+			try {
+				const result = {
+					content: [{ type: "text" as const, text: "" }],
+					details: {
+						op: "jobs" as const,
+						jobs: [jobsData[0]!],
+						agents: [{ id: "Worker", parentId: "Main", activity: "grepping the tree", ageMs: 65_000 }],
+					},
+				};
+				const component = hubToolRenderer.renderResult(
+					result,
+					{ expanded: true, isPartial: false } as Parameters<typeof hubToolRenderer.renderResult>[1],
+					theme,
+					{ op: "jobs" },
+				);
+				const lines = component.render(120) as readonly string[];
+				expect(isHitZoneProvider(component)).toBe(true);
+				if (!isHitZoneProvider(component)) throw new Error("Expected a hit-zone provider");
+				const sink = new HitZoneSink();
+				component.publishHitZones(sink);
+
+				expect(sink.zones).toHaveLength(2);
+				const byId = new Map(sink.zones.map(zone => [zone.target.zoneKey.split(":").at(-1), zone]));
+				const jobZone = byId.get("Job1");
+				const workerZone = byId.get("Worker");
+				expect(jobZone?.row).toBe(lines.findIndex(line => Bun.stripANSI(line).includes("Job1 running")));
+				expect(workerZone?.row).toBe(lines.findIndex(line => Bun.stripANSI(line).includes("Worker")));
+				expect(jobZone?.target.pointerShape).toBe("pointer");
+
+				expect(jobZone?.target.onZoneHover?.(true)).toBe(true);
+				expect(component.render(120)[jobZone!.row]).toContain("\x1b[48;2;");
+				expect(jobZone?.target.onZoneClick?.({} as never)).toBe(true);
+				await Promise.resolve();
+				expect(focusAgent).toHaveBeenCalledWith("Job1");
+			} finally {
+				focus.dispose();
+			}
 		});
 
 		it("keeps a sealed bare-poll result visible when it carries an agent roster", () => {

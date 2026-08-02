@@ -33,4 +33,15 @@ describe("Text component", () => {
 		expect(out).toContain("[BLUE]hello");
 		expect(out).not.toContain("[RED]hello");
 	});
+
+	it("caps wrapped output after layout and marks the folded tail", () => {
+		const text = new Text("one two three four", 0, 0);
+		expect(text.render(7).length).toBeGreaterThan(1);
+
+		text.setMaxLines(1);
+		const lines = text.render(7);
+		expect(lines).toHaveLength(1);
+		expect(Bun.stripANSI(lines[0] ?? "")).toEndWith("…");
+		expect(Bun.stringWidth(lines[0] ?? "")).toBeLessThanOrEqual(7);
+	});
 });

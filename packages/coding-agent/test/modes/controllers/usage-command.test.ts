@@ -8,6 +8,11 @@ interface RenderableBlock {
 	render(width: number): string[];
 }
 
+interface UsageOverlayHarness {
+	ctx: InteractiveModeContext;
+	showOverlay: ReturnType<typeof vi.fn>;
+	hideOverlay: ReturnType<typeof vi.fn>;
+}
 function isRenderableBlock(value: unknown): value is RenderableBlock {
 	return value !== null && typeof value === "object" && "render" in value && typeof value.render === "function";
 }
@@ -24,6 +29,26 @@ function createUsageSessionDouble() {
 	return { getUsageReportingModelSelectors: () => [] };
 }
 
+function createUsageContext(): UsageOverlayHarness {
+	const hideOverlay = vi.fn();
+	const showOverlay = vi.fn(() => ({ hide: hideOverlay }));
+	const ctx = {
+		session: createUsageSessionDouble(),
+		editor: {},
+		ui: {
+			terminal: { columns: 100, rows: 30 },
+			showOverlay,
+			setFocus: vi.fn(),
+			requestRender: vi.fn(),
+		},
+		present: vi.fn(),
+		presentCommandOutput: vi.fn(),
+		showWarning: vi.fn(),
+		showError: vi.fn(),
+	} as unknown as InteractiveModeContext;
+	return { ctx, showOverlay, hideOverlay };
+}
+
 describe("CommandController /usage", () => {
 	beforeAll(async () => {
 		const theme = await getThemeByName("dark");
@@ -32,15 +57,7 @@ describe("CommandController /usage", () => {
 	});
 
 	it("renders bars and free percentage for limits that only report remainingFraction", async () => {
-		const present = vi.fn();
-		const ctx = {
-			session: createUsageSessionDouble(),
-			ui: { terminal: { columns: 100 } },
-			present,
-			presentCommandOutput: present,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext;
+		const { ctx, showOverlay, hideOverlay } = createUsageContext();
 		const controller = new CommandController(ctx);
 		const reports: UsageReport[] = [
 			{
@@ -62,25 +79,20 @@ describe("CommandController /usage", () => {
 
 		await controller.handleUsageCommand(reports);
 
-		expect(present).toHaveBeenCalledTimes(1);
-		const firstCall = present.mock.calls[0];
-		expect(firstCall).toBeDefined();
-		const output = renderPresentedBlocks(firstCall?.[0]);
+		expect(showOverlay).toHaveBeenCalledTimes(1);
+		const overlay = showOverlay.mock.calls[0]?.[0];
+		const output = renderPresentedBlocks(overlay);
+		expect(output).toContain("Usage");
+		expect(output).toContain("Esc/q close");
+		overlay.handleInput("\x1b");
+		expect(hideOverlay).toHaveBeenCalledTimes(1);
 		expect(output).toContain("25% free");
 		expect(output).toContain("█");
 		expect(output).not.toContain("··········");
 	});
 
 	it("renders Cursor request quotas in the /usage view", async () => {
-		const present = vi.fn();
-		const ctx = {
-			session: createUsageSessionDouble(),
-			ui: { terminal: { columns: 100 } },
-			present,
-			presentCommandOutput: present,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext;
+		const { ctx, showOverlay } = createUsageContext();
 		const controller = new CommandController(ctx);
 		const now = Date.now();
 		const reports: UsageReport[] = [
@@ -110,10 +122,8 @@ describe("CommandController /usage", () => {
 
 		await controller.handleUsageCommand(reports);
 
-		expect(present).toHaveBeenCalledTimes(1);
-		const firstCall = present.mock.calls[0];
-		expect(firstCall).toBeDefined();
-		const output = renderPresentedBlocks(firstCall?.[0]);
+		expect(showOverlay).toHaveBeenCalledTimes(1);
+		const output = renderPresentedBlocks(showOverlay.mock.calls[0]?.[0]);
 		expect(output).toContain("Cursor");
 		expect(output).toContain("gpt-4 requests");
 		expect(output).toContain("70% free");
@@ -121,15 +131,7 @@ describe("CommandController /usage", () => {
 	});
 
 	it("renders saved reset expiry lines for future and expired credits", async () => {
-		const present = vi.fn();
-		const ctx = {
-			session: createUsageSessionDouble(),
-			ui: { terminal: { columns: 100 } },
-			present,
-			presentCommandOutput: present,
-			showWarning: vi.fn(),
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext;
+		const { ctx, showOverlay } = createUsageContext();
 		const controller = new CommandController(ctx);
 		const now = Date.now();
 		const dayMs = 24 * 60 * 60 * 1000;
@@ -150,10 +152,8 @@ describe("CommandController /usage", () => {
 
 		await controller.handleUsageCommand(reports);
 
-		expect(present).toHaveBeenCalledTimes(1);
-		const firstCall = present.mock.calls[0];
-		expect(firstCall).toBeDefined();
-		const output = renderPresentedBlocks(firstCall?.[0]);
+		expect(showOverlay).toHaveBeenCalledTimes(1);
+		const output = renderPresentedBlocks(showOverlay.mock.calls[0]?.[0]);
 		expect(output).toContain("Saved rate-limit resets");
 		expect(output).toContain("user@example.com: 2 saved resets");
 		expect(output).toContain(`expires in`);

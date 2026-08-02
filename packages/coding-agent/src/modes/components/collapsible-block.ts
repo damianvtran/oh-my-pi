@@ -48,6 +48,9 @@ export class CollapsibleBlockHeader implements MouseZoneTarget {
 		private readonly onToggle: () => void,
 	) {}
 
+	/** Expand/collapse is an activation, so the pointer reads as a hand. */
+	readonly pointerShape = "pointer" as const;
+
 	/**
 	 * Whether the block is worth pointing at. A block whose collapsed form
 	 * already shows everything has nothing to reveal, so it publishes no zone,

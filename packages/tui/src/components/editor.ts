@@ -434,14 +434,15 @@ export interface EditorPanelSurface {
 	/** Columns of dead space between the panel edge and the text on every row. */
 	paddingLeft: number;
 	/**
-	 * Columns reserved on the right. Kept separate from `paddingLeft` because
-	 * the status strip in the panel's first row opens with a wide glyph, which
-	 * makes an equal inset read as heavier on the left; the host compensates by
-	 * asking for one more column here.
+	 * Columns reserved on the right. Kept separate from `paddingLeft` so a host
+	 * can correct for content that opens a row with a wide glyph, which makes an
+	 * equal inset read as heavier on one side. Hosts with ordinary text on every
+	 * row should pass the same value as `paddingLeft`.
 	 */
 	paddingRight: number;
 	/**
-	 * Blank rows below the last text row. One is enough to close the surface;
+	 * Blank rows below the last row of the panel - the status content when the
+	 * host supplies it, otherwise the last text row. One closes the surface;
 	 * more gives the caret room to sit off the bottom edge.
 	 */
 	paddingBottom: number;
@@ -526,6 +527,8 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 	#selectionAnchor: { line: number; col: number } | undefined;
 
 	readonly zoneKey = `editor:${nextEditorZoneId++}`;
+	/** The editor's zone is its text area, so the pointer reads as an I-beam. */
+	readonly pointerShape = "text" as const;
 
 	// Emacs-style kill ring
 	#killRing = new KillRing();
@@ -1116,14 +1119,11 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 		}
 
 		if (panel) {
-			// Same status content the frame used to carry, now an ordinary row on
-			// the fill. The blank row under it is what keeps the status and the
-			// input from reading as one block now that no rule separates them.
-			const statusWidth = Math.max(0, width - this.#panelPaddingX);
-			const status = this.#topBorderProvider ? this.#topBorderProvider(statusWidth) : this.#topBorderContent;
-			if (status) {
-				result.push(status.width <= statusWidth ? status.content : truncateToWidth(status.content, statusWidth));
-			}
+			// One blank row opens the surface so the first line of input is not
+			// jammed against the panel's top edge. The status content that used to
+			// sit here now closes the panel instead (see below): reading order is
+			// prompt first, then what the prompt will be sent with, which is where
+			// the eye already goes after typing.
 			result.push("");
 		}
 
@@ -1369,6 +1369,18 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 		}
 
 		if (!panel) return result;
+
+		// The status content closes the panel: a blank row separates it from the
+		// input so the two do not read as one block, then the strip itself, then
+		// `paddingBottom` to lift it off the panel's bottom edge. It sits below
+		// the autocomplete list deliberately - the strip describes what SENDING
+		// will do, so it belongs under everything that is part of composing.
+		const statusWidth = Math.max(0, width - this.#panelPaddingX);
+		const status = this.#topBorderProvider ? this.#topBorderProvider(statusWidth) : this.#topBorderContent;
+		if (status?.content) {
+			result.push("");
+			result.push(status.width <= statusWidth ? status.content : truncateToWidth(status.content, statusWidth));
+		}
 		// Closing pad, then inset and paint every row in one pass so the whole
 		// composer reads as a single raised surface. The fill contrast against
 		// the canvas behind it is the only boundary there is now.

@@ -28,6 +28,17 @@ export interface TreeListOptions<T> {
 	/** Called once per item with `isLast: false` during budget calculation;
 	 *  line count MUST NOT vary based on `isLast`. */
 	renderItem: (item: T, context: TreeContext) => string | string[];
+	/**
+	 * Report where each item actually landed in the returned array: `startLine`
+	 * is the index of its first row, `lineCount` how many it occupies.
+	 *
+	 * Callers that make rows clickable need this to map a row back to its item,
+	 * and only this function knows the mapping — items can be dropped by the
+	 * collapse cap or the line budget, and the summary row shifts everything
+	 * after it. Recomputing that outside would be a second copy of the layout
+	 * rules, which is exactly how a hit zone drifts one row off its target.
+	 */
+	onItemRows?: (item: T, startLine: number, lineCount: number) => void;
 }
 
 export function renderTreeList<T>(options: TreeListOptions<T>, theme: Theme): string[] {
@@ -64,6 +75,7 @@ export function renderTreeList<T>(options: TreeListOptions<T>, theme: Theme): st
 			const isLast = summary === "" && i === items.length - 1;
 			const prefix = `${theme.fg("dim", getTreeBranch(isLast, theme))} `;
 			const continuePrefix = `${theme.fg("dim", getTreeContinuePrefix(isLast, theme))}`;
+			options.onItemRows?.(items[i]!, lines.length, itemLines.length);
 			lines.push(`${prefix}${replaceTabs(itemLines[0]!)}`);
 			for (let j = 1; j < itemLines.length; j++) {
 				lines.push(`${continuePrefix}${replaceTabs(itemLines[j]!)}`);
@@ -158,6 +170,7 @@ export function renderTreeList<T>(options: TreeListOptions<T>, theme: Theme): st
 		const continuePrefix = `${theme.fg("dim", getTreeContinuePrefix(isLast, theme))}`;
 		const itemLines = preRendered[i]!;
 		if (itemLines.length === 0) continue;
+		options.onItemRows?.(items[candidateIndices[i]!]!, lines.length, itemLines.length);
 		lines.push(`${prefix}${replaceTabs(itemLines[0]!)}`);
 		for (let j = 1; j < itemLines.length; j++) {
 			lines.push(`${continuePrefix}${replaceTabs(itemLines[j]!)}`);

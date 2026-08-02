@@ -371,6 +371,34 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
+	 * Per-cell background of a viewport row as `#rrggbb`, or `"default"` for a
+	 * cell the terminal would paint with the canvas colour.
+	 *
+	 * `getViewportRowBackgroundColumns` only answers "is this cell painted",
+	 * which cannot see a row that is fully painted in the WRONG colour - the
+	 * shape of every fill-consistency bug in the fullscreen viewport, where a
+	 * card and its padding must land on the same rung of the surface ladder.
+	 * Reading the values directly is also what keeps such a test honest about
+	 * ANSI: reconstructing colours by re-parsing the emitted byte stream needs a
+	 * full SGR state machine, and an approximate one silently invents defects.
+	 */
+	getViewportRowBackgrounds(row: number): string[] {
+		const cells = this.#presentedRowCells(row);
+		if (!cells) return [];
+		const out: string[] = [];
+		for (let col = 0; col < cells.length; col++) {
+			const cell = cells[col];
+			if (!cell || this.#isDefaultBg(cell)) {
+				out.push("default");
+				continue;
+			}
+			const hex = ((cell.bg_r << 16) | (cell.bg_g << 8) | cell.bg_b).toString(16).padStart(6, "0");
+			out.push(`#${hex}`);
+		}
+		return out;
+	}
+
+	/**
 	 * Columns in a viewport row whose cells carry a non-default foreground color.
 	 * Used with unreset-SGR regressions to ensure per-line resets confine
 	 * foreground attributes to the row that emitted them.

@@ -6,6 +6,7 @@ import {
 	padding,
 	publishLineWidths,
 	replaceTabs,
+	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "../utils";
@@ -33,6 +34,27 @@ export class Text implements Component {
 		if (this.#ignoreTight === ignore) return this;
 		this.#ignoreTight = ignore;
 		this.#widthEpochRevision++;
+		this.invalidate();
+		return this;
+	}
+
+	#maxLines: number | undefined;
+
+	/**
+	 * Cap the wrapped output at `maxLines` rows, truncating the last kept row so
+	 * the drop is visible rather than silent. `undefined` restores unbounded
+	 * wrapping.
+	 *
+	 * Exists for text that shares a fixed layout slot with something else, where
+	 * an unexpectedly long message does not just look wrong but MOVES the rest
+	 * of the UI: the fullscreen viewport's pinned status toast is one row of
+	 * bottom chrome, and a single unbounded message (an MCP summary naming every
+	 * tool) grew it to 67 rows, squeezing the transcript to its floor and
+	 * throwing the scroll position by 26 rows and back.
+	 */
+	setMaxLines(maxLines: number | undefined): this {
+		if (this.#maxLines === maxLines) return this;
+		this.#maxLines = maxLines;
 		this.invalidate();
 		return this;
 	}
@@ -146,7 +168,18 @@ export class Text implements Component {
 		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
 		const contentWidth = Math.max(1, width - paddingX * 2);
 		// Wrap text (this preserves ANSI codes but does NOT pad)
-		const wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth);
+		const allWrapped = wrapTextWithAnsi(normalizedText, contentWidth);
+		// Cap AFTER wrapping so the kept rows are the ones that would have been
+		// painted anyway; truncating the source first would re-wrap differently
+		// and could still overflow at a narrow width. The dropped rows are folded
+		// back onto the last kept row before it is truncated, so the cut shows as
+		// an ellipsis instead of the text just stopping.
+		let wrappedLines = allWrapped;
+		if (this.#maxLines !== undefined && allWrapped.length > this.#maxLines) {
+			const cap = Math.max(1, this.#maxLines);
+			wrappedLines = allWrapped.slice(0, cap - 1);
+			wrappedLines.push(truncateToWidth(allWrapped.slice(cap - 1).join(" "), contentWidth));
+		}
 
 		// Add margins and background to each line
 		const leftMargin = padding(paddingX);

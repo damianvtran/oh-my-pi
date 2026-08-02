@@ -106,17 +106,12 @@ export class HomeHeader implements Component {
 	#cachedLines: readonly string[] | undefined;
 
 	/**
-	 * Model and provider, restoring what the welcome box put under the logo.
-	 * The home composer is too narrow to carry the status strip in its border
-	 * without eliding the path, so that strip is suppressed while the home
-	 * screen is up and the one fact worth reading at startup is shown here
-	 * instead. opencode names the model on its home screen for the same reason.
+	 * Wordmark and version only. The model, reasoning effort and working
+	 * directory now ride on the composer's own status strip a few rows below,
+	 * and printing the model here as well repeated the same word twice inside
+	 * three rows.
 	 */
-	constructor(
-		private readonly version: string,
-		private readonly modelName: string,
-		private readonly providerName: string,
-	) {}
+	constructor(private readonly version: string) {}
 
 	/** Sweep the logo gradient once, the same intro the welcome box plays. */
 	playIntro(requestRender: () => void): void {
@@ -138,14 +133,7 @@ export class HomeHeader implements Component {
 		const animating = this.#intro.running;
 		if (!animating && this.#cachedLines && this.#cachedWidth === width) return this.#cachedLines;
 		const wordmark = `${theme.bold(theme.fg("accent", APP_NAME))} ${theme.fg("muted", `v${this.version}`)}`;
-		const lines = [
-			...this.#intro.frame().map(line => center(line, width)),
-			"",
-			center(wordmark, width),
-			center(theme.fg("text", this.modelName), width),
-			center(theme.fg("muted", this.providerName), width),
-			"",
-		];
+		const lines = [...this.#intro.frame().map(line => center(line, width)), "", center(wordmark, width), ""];
 		this.#cachedLines = animating ? undefined : lines;
 		this.#cachedWidth = animating ? -1 : width;
 		return lines;
@@ -291,8 +279,8 @@ export class HomeScreen {
 	 */
 	readonly hints = new HomeColumn();
 
-	constructor(version: string, modelName: string, providerName: string) {
-		this.header = new HomeHeader(version, modelName, providerName);
+	constructor(version: string) {
+		this.header = new HomeHeader(version);
 		this.notices.setCentered(true);
 		this.hints.setCentered(true);
 		this.hints.addChild(new HomeHints());

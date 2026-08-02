@@ -26,6 +26,7 @@ import {
 	hitTestZones,
 	isHitZoneProvider,
 	type MouseZoneTarget,
+	type PointerShape,
 	type ZoneMouseEvent,
 } from "./hit-zones";
 import { isKeyRelease, matchesKey } from "./keys";
@@ -1583,6 +1584,8 @@ export class TUI extends Container {
 	#zoneSink = new HitZoneSink();
 	#hoveredZoneKey: string | null = null;
 	#hoveredZoneTarget: MouseZoneTarget | null = null;
+	/** Last shape asked of the terminal, so an unchanged hover writes nothing. */
+	#pointerShape: PointerShape = "default";
 	// The zone a press landed in. A click only fires when the release lands in
 	// the same zone, so dragging off a control cancels it like every other UI.
 	#pressedZoneKey: string | null = null;
@@ -2664,6 +2667,9 @@ export class TUI extends Container {
 		if (this.#resizeAltActive) {
 			this.terminal.write(this.#leaveResizeAltSequence());
 		}
+		// Before any alt-screen exit: the shape is terminal state, not screen
+		// state, so leaving it set would hand a hand-cursor to the shell.
+		this.#resetPointerShape();
 		if (this.#altActive || this.#pendingAltExit) {
 			const mouseExit = this.#altMouseTrackingActive ? MOUSE_TRACKING_OFF : "";
 			const exitSequence = this.#pendingAltExit || `${mouseExit}${this.#keyboardEnhancementExit()}\x1b[?1049l`;
@@ -3521,7 +3527,31 @@ export class TUI extends Container {
 		this.#hoveredZoneKey = key;
 		this.#hoveredZoneTarget = zone?.target ?? null;
 		if (zone?.target.onZoneHover?.(true)) dirty = true;
+		this.#applyPointerShape(zone?.target.pointerShape ?? "default");
 		if (dirty) this.requestRender();
+	}
+
+	/**
+	 * Ask the terminal for a mouse cursor shape (OSC 22).
+	 *
+	 * Written straight to the terminal rather than folded into the frame: the
+	 * pointer moves far more often than the frame changes, and most moves are
+	 * hover-only with nothing to repaint. Tracked so an unchanged shape costs
+	 * nothing, and reset to `default` on teardown by {@link #resetPointerShape}
+	 * so a shell inheriting the terminal does not keep our hand cursor.
+	 */
+	#applyPointerShape(shape: PointerShape): void {
+		if (!TERMINAL.pointerShapes) return;
+		if (shape === this.#pointerShape) return;
+		this.#pointerShape = shape;
+		this.terminal.write(`\x1b]22;${shape}\x07`);
+	}
+
+	/** Hand the cursor back to the terminal's own default. */
+	#resetPointerShape(): void {
+		if (!TERMINAL.pointerShapes || this.#pointerShape === "default") return;
+		this.#pointerShape = "default";
+		this.terminal.write("\x1b]22;default\x07");
 	}
 
 	#consumeCellSizeResponse(data: string): boolean {

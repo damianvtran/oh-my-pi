@@ -492,6 +492,9 @@
 - Added a home screen for a session that starts with no conversation in the fullscreen viewport: the wordmark, version, model and provider centred in the window above a composer inset to roughly two thirds, with the hint row and session tip beneath it. It is chrome rather than transcript, so it never scrolls, and it is gone the moment the first block arrives. Startup notices that landed before it are adopted into it and filed into the transcript when it comes down.
 - Added `+N` / `-N` change counts to edit blocks in the collapsed one-line form as well as the expanded card, colored with the theme's existing `toolDiffAdded` and `toolDiffRemoved` roles.
 - Added `paddingRight` and `paddingBottom` to `EditorPanelSurface`. The fullscreen composer sets a right inset one column wider than its left, because the status strip opens with a wide glyph and an equal inset reads as heavier on the left, and closes with two blank rows so the caret never sits on the panel's bottom edge.
+- Added clickable, hover-highlighted subagent rows to both the anchored Subagents HUD and `hub wait` / jobs output. Clicking a row opens that agent's live transcript through the same focus controller as task blocks.
+- Added OSC 22 pointer-shape feedback in Kitty, Ghostty, and WezTerm: interactive rows use a hand, the composer uses a text cursor, and teardown always restores the terminal default.
+- Added a compact, scrollable `/usage` overlay that can be dismissed with `Esc` or `q`, replacing the usage report's permanent transcript block.
 
 ### Fixed
 
@@ -503,6 +506,10 @@
 - Fixed the update banner and the MCP status line running the full width of the window on the fullscreen home screen while everything around them was centred. Both now sit on the home column with the composer, and the hint row's hand-rolled gutter was replaced by that same column so the three cannot drift apart. Filed into the transcript they go back to full width with every other block.
 - Fixed the pinned status toast sitting one column left of every card, hint and composer row under `tui.tight`, which shaves a column off decorative padding. The toast's inset is the shared column rather than decoration, so it now opts out the way a tool card already does.
 - Fixed `/new` stranding the previous session's update banner and MCP summary at the top of the fresh conversation when it ran before the home screen had come down: the confirmation line is itself a first block, so dismissal filed the parked run behind it. Resetting the transcript now takes the home screen and any live toast down first and discards the parked notices rather than filing them.
+- Fixed the fullscreen composer chrome reading as a nested double panel: the text area now shares the outer panel surface, the status strip sits below it with deliberate spacing, and the empty-session home composer keeps model, effort, and working-directory context visible without restoring the cramped inline strip.
+- Fixed fullscreen user-message cards crowding adjacent content by restoring a bare canvas row between cards and aligning the first content row with the card inset.
+- Fixed long transient status messages wrapping into extra pinned rows and making the transcript bounce. The toast now stays one row tall and folds overflow with an ellipsis.
+- Fixed the main session's welcome and changelog chrome remaining above a drilled-in subagent transcript. Agent focus now hides that startup-only chrome and returning to the main session restores it.
 
 ## [17.2.4] - 2026-08-01
 

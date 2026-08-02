@@ -240,7 +240,11 @@ export class SessionFocusController {
 			}
 			await this.ctx.eventController.handleEvent(event);
 		});
-		this.ctx.statusLine.setSession(target, this.#focusedAgentId);
+		this.ctx.statusLine.setSession(target, this.focusedAgentId);
+		// The welcome banner belongs to the main session's startup, so it comes
+		// off while another agent's transcript is underneath it and returns on the
+		// way back out. Set before the rebuild below so one render covers both.
+		this.ctx.setStartupChromeHidden(this.#stack.length > 0);
 		// Clearing native scrollback only makes sense where the terminal owns it.
 		// The fullscreen viewport paints its own frame, so the erase buys nothing
 		// and costs a full transcript re-emit on every level of the drill path.

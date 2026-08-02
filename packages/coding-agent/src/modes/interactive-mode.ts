@@ -154,6 +154,7 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
+import { type AgentRowAnchor, AgentRowList } from "./components/agent-row-list";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
@@ -168,6 +169,7 @@ import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/plan-review-overlay";
+import { StartupChrome } from "./components/startup-chrome";
 import { StatusLineComponent } from "./components/status-line";
 import { SubagentFooter } from "./components/subagent-footer";
 import type { ToolExecutionHandle } from "./components/tool-execution";
@@ -472,22 +474,32 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * Only detached background spawns are listed: a sync task call blocks the
  * parent turn and its inline tool block already renders progress live, and
  * eval `agent()` spawns are rendered by their own eval cell tree.
- * Returns an empty array when nothing is running so the container can clear.
+ * Returns empty rows when nothing is running so the container can clear, plus
+ * the anchors mapping each rendered row back to the agent it stands for.
  */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number): string[] {
+export function renderSubagentHudLines(
+	sessions: ObservableSession[],
+	columns: number,
+): { lines: string[]; anchors: AgentRowAnchor[] } {
 	const running = sessions.filter(
 		session => session.kind === "subagent" && session.status === "active" && session.detached === true,
 	);
-	if (running.length === 0) return [];
+	if (running.length === 0) return { lines: [], anchors: [] };
 
 	const dot = theme.styledSymbol("status.done", "accent");
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
 	const hiddenCount = running.length - visible.length;
+	// Which tree row belongs to which agent, so the rows can be drilled into.
+	// Collected during the render walk because `renderTreeList` owns the mapping
+	// from item to row: one item is always one row here, but reading it back
+	// from the output would mean re-parsing the connectors we just drew.
+	const rowAgentIds: string[] = [];
 	const rows = renderTreeList(
 		{
 			items: visible,
 			expanded: true,
 			renderItem: session => {
+				rowAgentIds.push(session.id);
 				const displayId = formatTaskId(session.id);
 				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
@@ -510,7 +522,14 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	if (hiddenCount > 0) {
 		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
 	}
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+	// Two header rows precede the tree, and every tree row is shifted right by
+	// one space, so anchor line N is tree row N plus that offset.
+	const HEADER_ROWS = 2;
+	const anchors: AgentRowAnchor[] = rowAgentIds.map((agentId, i) => ({ line: HEADER_ROWS + i, agentId }));
+	return {
+		lines: ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)],
+		anchors,
+	};
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -757,6 +776,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#voiceHue = 0;
 	#voicePreviousShowHardwareCursor: boolean | null = null;
 	#voicePreviousUseTerminalCursor: boolean | null = null;
+	/** Clickable rows of the anchored Subagents HUD; retained so hover survives a rebuild. */
+	readonly #subagentHud = new AgentRowList("subagent-hud");
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
@@ -770,6 +791,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mcpConnectedServers = new Set<string>();
 	#mcpFailedServers = new Map<string, { error: string; sourcePath?: string }>();
 	#welcomeComponent?: WelcomeComponent;
+	/**
+	 * The welcome/changelog run, mounted above the transcript. Held so drilling
+	 * into a subagent can hide it: see {@link StartupChrome}.
+	 */
+	readonly #startupChrome = new StartupChrome();
 	#homeScreen?: HomeScreen;
 	readonly #chatHost: ChatBlockHost = { requestRender: () => this.ui.requestRender() };
 
@@ -885,14 +911,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		// (#4145). The TUI throttles renders at ~30fps, so a long-running eval
 		// spraying events no longer runs `getTopBorder` synchronously in the
 		// hot path where the render never gets to paint the result.
-		// Suppressed while the home screen is up: the composer is inset to about
-		// two thirds there, and the strip elides the working directory to fit,
-		// which reads as a broken path rather than a status. The model and
-		// provider it would have carried are printed under the wordmark instead,
-		// and the strip returns in full the moment the transcript opens.
-		this.editor.setTopBorderProvider(availableWidth =>
-			this.#homeScreen ? undefined : this.statusLine.getTopBorder(availableWidth),
-		);
+		//
+		// The home screen gets the strip too. It is the only indication of the
+		// model, the reasoning effort and the working directory a fresh session
+		// has, and those are exactly what a user checks before the first prompt.
+		// The bar already fits itself to the width it is handed — right-hand
+		// segments drop first, then the path shrinks — so the narrower home
+		// composer keeps the identity segments rather than a truncated path.
+		this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
 		this.subagentFooter = new SubagentFooter({
 			state: () => {
 				const agentId = this.#focusController.focusedAgentId;
@@ -1141,7 +1167,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.configWarnings.length === 0 &&
 			this.session.messages.length === 0;
 		if (showHomeScreen) {
-			this.#homeScreen = new HomeScreen(this.#version, modelName, providerName);
+			this.#homeScreen = new HomeScreen(this.#version);
 			for (const parked of [...this.chatContainer.children]) {
 				this.chatContainer.removeChild(parked);
 				this.#homeScreen.notices.addChild(parked);
@@ -1163,32 +1189,36 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#getWelcomeLspServers(),
 			);
 
-			// Setup UI layout
-			this.ui.addChild(new Spacer(1));
-			this.ui.addChild(this.#welcomeComponent);
-			this.ui.addChild(new Spacer(1));
+			// Setup UI layout. Everything here goes into one run so drilling into
+			// a subagent can take the whole banner off screen in one move.
+			this.#startupChrome.addChild(new Spacer(1));
+			this.#startupChrome.addChild(this.#welcomeComponent);
+			this.#startupChrome.addChild(new Spacer(1));
 			if (!options.suppressWelcomeIntro) {
 				this.playWelcomeIntro();
 			}
 
 			// Add changelog if provided
 			if (startupChangelog) {
-				this.ui.addChild(new DynamicBorder());
-				this.ui.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-				this.ui.addChild(new Spacer(1));
+				this.#startupChrome.addChild(new DynamicBorder());
+				this.#startupChrome.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+				this.#startupChrome.addChild(new Spacer(1));
 				if (settings.get("startup.changelogMode") === "summary") {
 					const summary = formatStartupChangelogSummary(startupChangelog).replace(
 						/\/changelog(?: full)?/g,
 						command => theme.bold(command),
 					);
-					this.ui.addChild(new Text(summary, 1, 0));
+					this.#startupChrome.addChild(new Text(summary, 1, 0));
 				} else {
-					this.ui.addChild(new Markdown(startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
+					this.#startupChrome.addChild(
+						new Markdown(startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()),
+					);
 				}
-				this.ui.addChild(new Spacer(1));
-				this.ui.addChild(new DynamicBorder());
+				this.#startupChrome.addChild(new Spacer(1));
+				this.#startupChrome.addChild(new DynamicBorder());
 			}
 		}
+		this.ui.addChild(this.#startupChrome);
 
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
@@ -2513,10 +2543,16 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * the "active" state.
 	 */
 	#renderSubagentList(): void {
-		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
-		if (lines.length === 0) return;
-		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
+		const { lines, anchors } = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
+		// The list component is retained across rebuilds, not recreated: it holds
+		// the hover state, and a fresh instance every observer tick would drop the
+		// wash the moment the row it belongs to updated its progress text.
+		this.#subagentHud.setRows(lines, anchors);
+		if (this.subagentContainer.children.length === 0 && lines.length > 0) {
+			this.subagentContainer.addChild(this.#subagentHud);
+		} else if (lines.length === 0) {
+			this.subagentContainer.clear();
+		}
 	}
 
 	async #loadTodoList(): Promise<void> {
@@ -4504,11 +4540,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(nextEditor));
-		// Same suppression as the initial wiring: an editor swapped in while the
-		// home screen is still up must not bring the elided strip back with it.
-		nextEditor.setTopBorderProvider(availableWidth =>
-			this.#homeScreen ? undefined : this.statusLine.getTopBorder(availableWidth),
-		);
+		// Same wiring as the initial editor: the strip renders on the home screen
+		// too, so a swapped-in editor must carry the provider unconditionally.
+		nextEditor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
 			nextEditor.setHistoryStorage(this.historyStorage);
@@ -4676,7 +4710,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			// layout shaves a column off decorative padding, but this inset is the
 			// shared column itself, and losing it puts the toast out of line with
 			// everything above it.
-			this.#transientStatusText = new Text(message, CARD_PADDING_X, 0).setIgnoreTight(true).setStyleFn(styleFn);
+			//
+			// `setMaxLines(1)` is load-bearing, not cosmetic. This row is pinned
+			// chrome: its height comes out of the scrolling region, so a long
+			// status (the MCP summary naming every connected tool ran to 67 rows)
+			// collapses the transcript to its 3-row floor and jumps the scroll
+			// offset by that much, then back when the toast is replaced. That
+			// read as violent scroll jitter with no apparent cause.
+			this.#transientStatusText = new Text(message, CARD_PADDING_X, 0)
+				.setIgnoreTight(true)
+				.setMaxLines(1)
+				.setStyleFn(styleFn);
 			this.#transientStatusContainer.addChild(this.#transientStatusText);
 		}
 		this.#transientStatusTimer = setTimeout(() => {
@@ -4685,6 +4729,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}, TRANSIENT_STATUS_MS);
 		this.#transientStatusTimer.unref?.();
 		this.ui.requestRender();
+	}
+
+	setStartupChromeHidden(hidden: boolean): void {
+		if (this.#startupChrome.setHidden(hidden)) this.ui.requestRender();
 	}
 
 	showError(message: string): void {

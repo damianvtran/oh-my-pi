@@ -5,15 +5,18 @@
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { Component } from "@oh-my-pi/pi-tui";
+import type { Component, HitZoneProvider, HitZoneSink, MouseZoneTarget } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import type { AsyncJob, AsyncJobManager } from "../../async";
 import { settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
+import type { AgentRowAnchor } from "../../modes/components/agent-row-list";
+import { SessionFocusController } from "../../modes/controllers/session-focus-controller";
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
+import { padToWidth } from "../../tui/utils";
 import type { ToolSession } from "..";
 import {
 	formatBadge,
@@ -601,7 +604,39 @@ export function jobsRenderResult(
 	});
 
 	let cached: RenderCache | undefined;
-	return {
+	// Rows that stand for a live agent, refreshed on every render because the
+	// collapse cap and line budget move them. A `task` job's id IS its agent id,
+	// which is what makes the mapping possible without threading extra state.
+	let agentAnchors: AgentRowAnchor[] = [];
+	let hoveredAgentId: string | undefined;
+	const zoneTargets = new Map<string, MouseZoneTarget>();
+	const zoneTarget = (agentId: string): MouseZoneTarget => {
+		const existing = zoneTargets.get(agentId);
+		if (existing) return existing;
+		const target: MouseZoneTarget = {
+			zoneKey: `hub-job-agent:${agentId}`,
+			pointerShape: "pointer",
+			onZoneClick: () => {
+				const focus = SessionFocusController.active();
+				if (!focus?.canFocus(agentId)) return false;
+				void focus.focusAgent(agentId);
+				return true;
+			},
+			onZoneHover: hovered => {
+				const next = hovered ? agentId : undefined;
+				if (!hovered && hoveredAgentId !== agentId) return false;
+				if (hoveredAgentId === next) return false;
+				hoveredAgentId = next;
+				// The hover wash is applied during render, so the memoized bytes
+				// from the last frame no longer describe this state.
+				cached = undefined;
+				return true;
+			},
+		};
+		zoneTargets.set(agentId, target);
+		return target;
+	};
+	const component: Component & HitZoneProvider = {
 		render(width: number): readonly string[] {
 			const expanded = options.expanded;
 			const spinnerFrame = options.spinnerFrame ?? 0;
@@ -615,12 +650,21 @@ export function jobsRenderResult(
 			const key = new Hasher().bool(expanded).u32(width).u32(spinnerFrame).bool(shimmerActive).digest();
 			if (!shimmerActive && cached?.key === key) return cached.lines;
 
+			agentAnchors = [];
 			const itemLines = renderTreeList<JobSnapshot>(
 				{
 					items: sortedJobs,
 					expanded,
 					maxCollapsed: COLLAPSED_LIST_LIMIT,
 					itemType: "job",
+					// Only the head row of a task job is drillable: the label
+					// continuation and result preview beneath it belong to the same
+					// agent but are content, and washing them would make the hover
+					// look like a block selection rather than a row. Offset by the
+					// header row so anchors are in the block's own frame rows.
+					onItemRows: (job, startLine) => {
+						if (job.type === "task") agentAnchors.push({ line: 1 + startLine, agentId: job.id });
+					},
 					renderItem: job => {
 						const lines: string[] = [];
 						const icon = formatStatusIcon(
@@ -693,6 +737,7 @@ export function jobsRenderResult(
 
 			// Agents run outside job control; render them as their own tree so
 			// they never skew the job counts or the "waiting on N jobs" title.
+			const agentAnchorBase = 1 + itemLines.length; // header row, then the job tree
 			const agentLines =
 				agents.length === 0
 					? []
@@ -702,6 +747,9 @@ export function jobsRenderResult(
 								expanded,
 								maxCollapsed: COLLAPSED_LIST_LIMIT,
 								itemType: "agent",
+								onItemRows: (agent, startLine) => {
+									agentAnchors.push({ line: agentAnchorBase + startLine, agentId: agent.id });
+								},
 								renderItem: agent => {
 									const icon = agent.live
 										? formatStatusIcon("running", uiTheme, options.spinnerFrame)
@@ -721,11 +769,27 @@ export function jobsRenderResult(
 						);
 
 			const all = [header, ...itemLines, ...agentLines].map(l => truncateToWidth(l, width, Ellipsis.Unicode));
+			// Hover wash last, over the truncated row, so it spans exactly the
+			// columns the zone covers.
+			if (hoveredAgentId !== undefined) {
+				for (const anchor of agentAnchors) {
+					if (anchor.agentId !== hoveredAgentId) continue;
+					const row = all[anchor.line];
+					if (row !== undefined) all[anchor.line] = uiTheme.hoverBg(padToWidth(row, width));
+				}
+			}
 			cached = { key, lines: all };
 			return all;
+		},
+		publishHitZones(sink: HitZoneSink): void {
+			for (const anchor of agentAnchors) {
+				if (SessionFocusController.active()?.canFocus(anchor.agentId) !== true) continue;
+				sink.zone(zoneTarget(anchor.agentId), anchor.line, 1);
+			}
 		},
 		invalidate() {
 			cached = undefined;
 		},
 	};
+	return component;
 }
