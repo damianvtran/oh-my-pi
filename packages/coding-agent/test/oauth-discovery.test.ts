@@ -369,6 +369,106 @@ describe("resource_metadata chain", () => {
 		});
 	});
 
+	it("prefers resource-scoped scopes over the auth server's scope universe and reads an array `resource`", async () => {
+		// Shape taken verbatim from gitlab.com: the protected resource needs only
+		// `mcp`, while the authorization server advertises every scope it knows
+		// (including `sudo`/`admin_mode`), and `resource` arrives as an array
+		// rather than RFC 9728's single string. Reading the AS list first made
+		// OMP request admin scopes; the string-only `resource` read dropped the
+		// audience indicator from the stored credential.
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+
+			if (url === "https://gitlab.com/.well-known/oauth-protected-resource/api/v4/mcp") {
+				return new Response(
+					JSON.stringify({
+						resource: ["https://gitlab.com/api/v4/mcp"],
+						authorization_servers: ["https://gitlab.com"],
+						scopes_supported: ["mcp"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === "https://gitlab.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://gitlab.com",
+						authorization_endpoint: "https://gitlab.com/oauth/authorize",
+						token_endpoint: "https://gitlab.com/oauth/token",
+						registration_endpoint: "https://gitlab.com/oauth/register",
+						scopes_supported: ["api", "read_api", "sudo", "admin_mode", "mcp"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(
+			"https://gitlab.com/api/v4/mcp",
+			undefined,
+			"https://gitlab.com/.well-known/oauth-protected-resource/api/v4/mcp",
+			{ fetch: fetchImpl },
+		);
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://gitlab.com/oauth/authorize",
+			tokenUrl: "https://gitlab.com/oauth/token",
+			registrationUrl: "https://gitlab.com/oauth/register",
+			clientId: undefined,
+			scopes: "mcp",
+			resource: "https://gitlab.com/api/v4/mcp",
+		});
+	});
+
+	it("carries `offline_access` over from the auth server when the resource omits it", async () => {
+		// `offline_access` governs refresh-token issuance at the AS, not access to
+		// the resource, so an RFC 9728 document has no reason to list it and its
+		// absence there is not a signal to drop it. Losing it costs the refresh
+		// token on an AS that gates one behind it — the exact "keeps losing auth"
+		// failure resource-first scope precedence exists to prevent.
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+
+			if (url === "https://gateway.example.com/.well-known/oauth-protected-resource") {
+				return new Response(
+					JSON.stringify({
+						resource: "https://gateway.example.com",
+						authorization_servers: ["https://sso.example.com"],
+						scopes_supported: ["mcp.read"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === "https://sso.example.com/.well-known/oauth-authorization-server") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://sso.example.com",
+						authorization_endpoint: "https://sso.example.com/oauth/auth",
+						token_endpoint: "https://sso.example.com/oauth/token",
+						scopes_supported: ["openid", "mcp.read", "mcp.admin", "offline_access"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(
+			"https://gateway.example.com/mcp",
+			undefined,
+			"https://gateway.example.com/.well-known/oauth-protected-resource",
+			{ fetch: fetchImpl },
+		);
+
+		// `mcp.admin` and `openid` stay out; only the refresh-enabling scope rides along.
+		expect(oauth?.scopes).toBe("mcp.read offline_access");
+	});
+
 	it("follows resource_metadata URL to discover authorization servers", async () => {
 		const calls: string[] = [];
 		const fetchImpl = mockFetch((input: FetchInput) => {
