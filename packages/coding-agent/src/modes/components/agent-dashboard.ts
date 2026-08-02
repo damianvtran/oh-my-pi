@@ -661,7 +661,9 @@ export class AgentDashboard extends Container {
 		this.#createError = null;
 		this.#createSpec = null;
 		this.#createDescription = "";
-		const editor = new Editor(getEditorTheme());
+		// The dashboard is a floating overlay (selector-controller.ts), so this
+		// editor's selection lands on `overlayBg`, not the composer's panel.
+		const editor = new Editor(getEditorTheme("overlay"));
 		editor.setBorderVisible(false);
 		editor.setPromptGutter("> ");
 		editor.setMaxHeight(Math.max(3, Math.min(8, this.#terminalRows() - 12)));
