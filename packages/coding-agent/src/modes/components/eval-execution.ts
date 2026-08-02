@@ -120,9 +120,8 @@ export class EvalExecutionComponent extends Container {
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
 		this.#card.publishSelectionInset(sink, this.#cardRows);
-		// Children publish rows local to the container; the card's top pad sits
-		// above all of them.
-		sink.withOffset(this.#card.topRows, () => super.publishHitZones(sink));
+		// Descendant rows are rendered inside the card's top and left padding.
+		this.#card.publishContentGeometry(sink, () => super.publishHitZones(sink));
 		this.#header.publish(sink, 0, this.#cardRows);
 	}
 
