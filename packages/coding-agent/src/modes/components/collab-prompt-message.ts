@@ -3,7 +3,7 @@ import { Container, type HitZoneSink, Markdown, Text } from "@oh-my-pi/pi-tui";
 import type { CollabPromptDetails } from "../../collab/protocol";
 import type { CustomMessage } from "../../session/messages";
 import { getMarkdownTheme, theme } from "../theme/theme";
-import { BlockCard } from "./collapsible-block";
+import { BlockCard, BlockCopyTarget } from "./collapsible-block";
 
 /**
  * Renders a collab guest prompt on every participant's transcript: a
@@ -16,8 +16,12 @@ import { BlockCard } from "./collapsible-block";
  * full content width, which overruns the card's inset and puts a band of a
  * second colour where every neighbouring block shows the shared panel fill.
  */
+let collabPromptInstanceSeq = 0;
+
 export class CollabPromptMessageComponent extends Container {
 	readonly #card = new BlockCard();
+	readonly #copyTarget = new BlockCopyTarget(`collab-prompt:${++collabPromptInstanceSeq}`, () => this.#copySource());
+	readonly #authorName: string;
 	readonly #author: string;
 	readonly #text: string;
 	// `Text` and `Markdown` bake their padding in at construction and expose no
@@ -32,6 +36,7 @@ export class CollabPromptMessageComponent extends Container {
 	constructor(message: CustomMessage<CollabPromptDetails>) {
 		super();
 		const from = message.details?.from?.trim() || "guest";
+		this.#authorName = from;
 		this.#author = theme.fg("accent", `\x1b[1m«${from}»\x1b[22m ›`);
 		const authorText = new Text(this.#author, 1, 0);
 		authorText.setIgnoreTight(true);
@@ -87,5 +92,11 @@ export class CollabPromptMessageComponent extends Container {
 	override publishHitZones(sink: HitZoneSink): void {
 		this.#card.publishSelectionInset(sink, this.#renderedRows);
 		this.#card.publishContentGeometry(sink, () => super.publishHitZones(sink));
+		this.#copyTarget.publish(sink, 0, this.#renderedRows);
+	}
+
+	/** Stable attribution plus the guest's original, unwrapped prompt text. */
+	#copySource(): string {
+		return `From ${this.#authorName}:\n\n${this.#text}`;
 	}
 }

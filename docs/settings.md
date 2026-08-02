@@ -660,7 +660,7 @@ images:
   blockImages: false
 tui:
   hyperlinks: auto # off, auto, always
-  viewport: append # append, fullscreen
+  viewport: fullscreen # append, fullscreen
 ```
 
 | Key                         | Type    | Default          | Values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
