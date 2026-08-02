@@ -371,6 +371,15 @@ export class TranscriptContainer
 			// Blocks the frame cannot show own no reachable zone, and publishing
 			// them is the whole per-frame cost of a long transcript: the walk
 			// descends every card and allocates a zone per header.
+			//
+			// The interval tested here is deliberately wider than the rows the
+			// block paints: `rowCount` is `sep + contribution.length`, so it
+			// leads with the separator row and the test is a strict superset of
+			// the painted span. That is what makes it safe to test one interval
+			// and publish at another (`localRowZero` below) — it can over-include
+			// but never under-include a painted row. Redefining `rowCount` as the
+			// contribution alone would turn this into an off-by-one at the bottom
+			// window edge and silently drop the last row's click target.
 			if (!sink.intersectsWindow(segment.startRow, segment.rowCount)) continue;
 			// The block's local row 0 is its raw render row 0, which assembly
 			// placed after the separator and after the rows it trimmed off the head.

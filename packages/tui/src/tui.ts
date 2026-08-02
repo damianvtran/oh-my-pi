@@ -5959,14 +5959,19 @@ export class TUI extends Container {
 	 *
 	 * A block's span runs from the previous block's end to the next block's
 	 * start, so it opens with the separator row assembly placed above the block
-	 * and closes with the one below: leading blanks are skipped and the tail is
-	 * never sampled. A blank first column is not a rail — a card without one
-	 * pads with spaces, which the caller already reads as decoration.
+	 * and closes with the one below: a bounded run of leading blanks is skipped
+	 * and the tail is never sampled. The bound matters — this runs per clipped
+	 * edge block per frame, and an expanded tool card opens every one of its
+	 * rows with a space, so scanning to `end` turned a fixed probe into a walk
+	 * of the whole card on every frame it touched a window edge. A blank first
+	 * column is not a rail either way: a card without one pads with spaces,
+	 * which the caller already reads as decoration.
 	 */
 	#blockRailGlyph(lines: readonly string[], start: number, end: number): string {
+		const probeEnd = Math.min(end, start + TUI.#RAIL_PROBE_ROWS);
 		let head = start;
 		let first = "";
-		while (head < end && (first === "" || first === " ")) {
+		while (head < probeEnd && (first === "" || first === " ")) {
 			first = this.#firstColumn(Bun.stripANSI(lines[head] ?? ""));
 			head++;
 		}
@@ -6036,6 +6041,15 @@ export class TUI extends Container {
 
 	/** Minimum transcript rows the pinned chrome may never take. */
 	static readonly #MIN_FULLSCREEN_SCROLL_ROWS = 3;
+
+	/**
+	 * Rows from a block's head {@link #blockRailGlyph} may look at.
+	 *
+	 * Four covers the shapes that exist: the separator row above the block, the
+	 * glyph row, and the two rows that have to corroborate it. Anything more is
+	 * a walk of the block, which is what this bound exists to prevent.
+	 */
+	static readonly #RAIL_PROBE_ROWS = 4;
 
 	/**
 	 * Rebuild the pointer zone list for this frame, normalized to SCREEN

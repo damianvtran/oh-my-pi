@@ -103,11 +103,14 @@ export interface MouseRoutable {
 	/**
 	 * `line`/`col` are 0-based within the component's rendered output.
 	 *
-	 * Return `false` to decline the report, which DROPS it: while an overlay is
-	 * up the engine routes no pointer input, so a declined report reaches only
-	 * the focused component's `handleInput`. A declining overlay must therefore
-	 * ignore `\x1b[<` there itself. Anything else (including `undefined`)
-	 * consumes it.
+	 * Return `false` to decline the report; anything else (including
+	 * `undefined`) consumes it. What declining buys you is the host's business,
+	 * and hosts differ: the engine's overlay router routes no pointer input at
+	 * all while an overlay is up, so a report it declines is not re-routed —
+	 * it reaches only the focused component's own `handleInput`, and a
+	 * declining overlay must ignore `\x1b[<` there itself. Every other host
+	 * (`routeSelectListMouse`, `SettingsList`, the setup wizard, the model hub)
+	 * discards the return value, so declining there does nothing at all.
 	 */
 	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean | undefined | void;
 }
