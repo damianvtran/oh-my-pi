@@ -24,6 +24,9 @@ describe("parseSgrMouse", () => {
 			wheel: null,
 			wheelX: null,
 			motion: false,
+			shift: false,
+			alt: false,
+			ctrl: false,
 			leftClick: true,
 		});
 	});
@@ -94,6 +97,9 @@ describe("routeSelectListMouse", () => {
 		wheel: null,
 		wheelX: null,
 		motion: false,
+		shift: false,
+		alt: false,
+		ctrl: false,
 		leftClick: false,
 	};
 

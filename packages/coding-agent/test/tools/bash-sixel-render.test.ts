@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { bashToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { previewWindowRows } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
@@ -16,6 +17,16 @@ const terminal = TERMINAL as unknown as MutableTerminalInfo;
 
 describe("bashToolRenderer", () => {
 	const originalProtocol = TERMINAL.imageProtocol;
+
+	beforeAll(async () => {
+		resetSettingsForTest();
+		// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+		await Settings.init({ inMemory: true, cwd: process.cwd(), overrides: { "tui.viewport": "append" } } as never);
+	});
+
+	afterAll(() => {
+		resetSettingsForTest();
+	});
 
 	afterEach(() => {
 		terminal.imageProtocol = originalProtocol;

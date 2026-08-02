@@ -29,6 +29,48 @@ const RAISED_FILL = (text: string): string => theme.elementBg(text);
 /** A block whose card is empty keeps this identity so Box's memo stays warm. */
 const NO_ROWS: readonly string[] = [];
 
+/**
+ * A block's own source text, for the pointer gesture that copies it.
+ *
+ * Returning the SOURCE and not the painted rows is the whole point: a rendered
+ * card has been wrapped to the viewport, indented by {@link CARD_PADDING_X},
+ * and often truncated behind a "+12 lines" marker. Copying that gives you the
+ * layout. Drag-selection already covers "exactly these glyphs"; this covers
+ * "that message", which is the one a reader actually wants to paste.
+ *
+ * Undefined means the block has nothing worth copying and declines the
+ * gesture, which then falls through to an ordinary click.
+ */
+export type BlockCopySource = () => string | undefined;
+
+/**
+ * Zone target for a block that can be copied but has nothing to activate:
+ * a user message, a plain assistant reply.
+ *
+ * Collapsible blocks do not need this — {@link CollapsibleBlockHeader} already
+ * owns their rows, and a zone dispatch resolves to exactly one target, so a
+ * second copy zone underneath would simply never be reached.
+ */
+export class BlockCopyTarget implements MouseZoneTarget {
+	constructor(
+		readonly zoneKey: string,
+		private readonly source: BlockCopySource,
+	) {}
+
+	/** Text, because the card is prose: there is nothing here to activate. */
+	readonly pointerShape = "text" as const;
+
+	onZoneCopy(): string | undefined {
+		return this.source();
+	}
+
+	/** Publish over the block's own rows, local to the owning component. */
+	publish(sink: HitZoneSink, rowStart: number, rowCount: number): void {
+		if (!isFullscreenViewport() || rowStart < 0 || rowCount <= 0) return;
+		sink.zone(this, rowStart, rowCount);
+	}
+}
+
 export class CollapsibleBlockHeader implements MouseZoneTarget {
 	#hovered = false;
 	// Latched, because a block that has been expanded no longer hides anything
@@ -42,14 +84,23 @@ export class CollapsibleBlockHeader implements MouseZoneTarget {
 	 *   a positional key would hand a block its neighbour's hover state as soon
 	 *   as anything above it was removed.
 	 * @param onToggle Flips the block's expansion and rebuilds its display.
+	 * @param copySource Optional source text for a copy gesture. Supplying it
+	 *   also makes the block publish a zone when it has nothing to expand, so
+	 *   an unremarkable one-line tool card is still copyable.
 	 */
 	constructor(
 		readonly zoneKey: string,
 		private readonly onToggle: () => void,
+		private readonly copySource?: BlockCopySource,
 	) {}
 
-	/** Expand/collapse is an activation, so the pointer reads as a hand. */
-	readonly pointerShape = "pointer" as const;
+	/**
+	 * Expand/collapse is an activation, so an expandable block reads as a hand.
+	 * One that is only copyable is prose, and reads as text.
+	 */
+	get pointerShape(): "pointer" | "text" {
+		return this.interactive ? "pointer" : "text";
+	}
 
 	/**
 	 * Whether the block is worth pointing at. A block whose collapsed form
@@ -66,6 +117,18 @@ export class CollapsibleBlockHeader implements MouseZoneTarget {
 		return this.interactive && this.#hovered;
 	}
 
+	onZoneClick(): boolean {
+		// A block that hides nothing publishes a zone only to be copyable, so a
+		// plain click on it must do nothing rather than toggle it invisibly.
+		if (!this.interactive) return false;
+		this.onToggle();
+		return true;
+	}
+
+	onZoneCopy(): string | undefined {
+		return this.copySource?.();
+	}
+
 	/** Whether a render has ever reported hidden content, ignoring the viewport. */
 	get everOverflowed(): boolean {
 		return this.#everOverflowed;
@@ -76,20 +139,22 @@ export class CollapsibleBlockHeader implements MouseZoneTarget {
 		if (overflow) this.#everOverflowed = true;
 	}
 
-	onZoneClick(): boolean {
-		this.onToggle();
-		return true;
-	}
-
 	onZoneHover(hovered: boolean): boolean {
 		if (this.#hovered === hovered) return false;
 		this.#hovered = hovered;
 		return this.interactive;
 	}
 
-	/** Publish the header zone at a row local to the owning component. */
+	/**
+	 * Publish the block's zone at a row local to the owning component.
+	 *
+	 * A block with nothing to expand still publishes when it can be copied:
+	 * the zone is how the copy gesture finds the block at all, and a card that
+	 * happens to fit on screen is no less worth copying than one that does not.
+	 */
 	publish(sink: HitZoneSink, rowStart: number, rowCount = 1): void {
-		if (!this.interactive || rowStart < 0 || rowCount <= 0) return;
+		if (!this.interactive && this.copySource === undefined) return;
+		if (!isFullscreenViewport() || rowStart < 0 || rowCount <= 0) return;
 		sink.zone(this, rowStart, rowCount);
 	}
 

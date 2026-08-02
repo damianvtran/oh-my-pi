@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildLogCopyPayload,
 	DebugLogViewerComponent,
@@ -9,6 +10,10 @@ import {
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 beforeAll(async () => {
+	resetSettingsForTest();
+	// Asserts append-mode rendering: rows sit flush against the terminal's own
+	// scrollback, so mouse coordinates map straight onto the viewer's rows.
+	await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 	const theme = await getThemeByName("dark");
 	if (!theme) throw new Error("Expected dark theme");
 	setThemeInstance(theme);

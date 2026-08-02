@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HookEditorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/hook-editor";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -7,6 +8,10 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { CURSOR_MARKER, isFocusable, setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
+	resetSettingsForTest();
+	// Asserts append-mode rendering: the editor draws its own legacy ask chrome
+	// straight into the terminal's scrollback, with no fullscreen card around it.
+	await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 	const theme = await getThemeByName("dark");
 	if (!theme) {
 		throw new Error("Failed to load dark theme for tests");

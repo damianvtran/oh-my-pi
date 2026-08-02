@@ -12,7 +12,9 @@ import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
 
 beforeAll(async () => {
 	resetSettingsForTest();
-	await Settings.init({ inMemory: true });
+	// Asserts append-mode rendering: the transcript is the terminal's own scrollback,
+	// with no card chrome, so collapsed tool output stays fully visible.
+	await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 	await initTheme(false, undefined, undefined, "dark", "light");
 });
 

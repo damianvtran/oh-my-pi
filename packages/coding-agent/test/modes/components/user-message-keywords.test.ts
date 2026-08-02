@@ -12,7 +12,10 @@ import { Container } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
 	resetSettingsForTest();
-	await Settings.init({ inMemory: true });
+	// Asserts append-mode rendering: the transcript is the terminal's own scrollback,
+	// so a user turn is bracketed by real OSC 133 prompt zones. The fullscreen
+	// viewport repaints a window and emits none.
+	await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 	Settings.instance.set("tui.hyperlinks", "always");
 	await initTheme(false);
 });

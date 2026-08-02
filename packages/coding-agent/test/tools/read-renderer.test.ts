@@ -20,7 +20,8 @@ function extractLinkTexts(text: string): string[] {
 beforeAll(async () => {
 	await initTheme();
 	resetSettingsForTest();
-	await Settings.init({ inMemory: true });
+	// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+	await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 });
 
 afterEach(() => {

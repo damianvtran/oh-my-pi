@@ -26,7 +26,7 @@ import { convertImageToPng } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
-import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
+import { BlockCopyTarget, CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 
 /**
  * Max lines of a turn-ending provider error rendered inline in the transcript.
@@ -287,6 +287,14 @@ export class AssistantMessageComponent extends Container {
 		this.setExpanded(!this.#errorExpanded),
 	);
 	readonly #errorHeaderPainter = new HeaderRowPainter();
+	/**
+	 * Copy target over the whole reply. Published before the error header and
+	 * before any child zone, so a click on something more specific still wins:
+	 * the reverse hit-test resolves to the last zone published over a cell.
+	 */
+	readonly #copyTarget = new BlockCopyTarget(`assistant:${assistantMessageInstanceSeq}`, () => this.#copySource());
+	/** Rows the last render produced, which the copy zone spans. */
+	#renderedRows = 0;
 	/** Index of the `Error: …` child inside `#contentContainer`; -1 when absent. */
 	#errorHeaderChildIndex = -1;
 	/** Local row the `Error: …` line landed on in the last render; -1 when absent. */
@@ -352,6 +360,7 @@ export class AssistantMessageComponent extends Container {
 	override render(width: number): readonly string[] {
 		this.#lastRenderWidth = width;
 		const lines = super.render(width);
+		this.#renderedRows = lines.length;
 		this.#errorHeaderRow = this.#resolveErrorHeaderRow(width);
 		return this.#errorHeaderPainter.paint(lines, this.#errorHeaderRow, this.#errorHeader, this.#errorExpanded);
 	}
@@ -377,8 +386,30 @@ export class AssistantMessageComponent extends Container {
 	 * outside it so it remains drag-selectable.
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
+		this.#copyTarget.publish(sink, 0, this.#renderedRows);
 		super.publishHitZones(sink);
 		this.#errorHeader.publish(sink, this.#errorHeaderRow);
+	}
+
+	/**
+	 * The reply's own markdown, for a copy gesture.
+	 *
+	 * Text blocks only: thinking is deliberately excluded. It is collapsed in
+	 * the card the reader is pointing at, it is not what "copy this reply"
+	 * means, and it is frequently longer than the answer itself.
+	 */
+	#copySource(): string | undefined {
+		const blocks = this.#lastMessage?.content;
+		if (!Array.isArray(blocks)) return undefined;
+		const text = blocks
+			.filter(
+				(block): block is { type: "text"; text: string } =>
+					block?.type === "text" && typeof block.text === "string",
+			)
+			.map(block => block.text)
+			.join("\n\n")
+			.trim();
+		return text.length > 0 ? text : undefined;
 	}
 
 	setHideThinkingBlock(hide: boolean): void {

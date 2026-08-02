@@ -1370,16 +1370,21 @@ export class CommandController {
 
 			compactingLoader.stop();
 			this.ctx.statusContainer.disposeChildren();
-			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 
-			this.ctx.statusLine.invalidate();
-			// Same as the auto-compaction rebuild: a collapsed transcript is an
-			// intentional replacement, so drop the stale pre-compaction scrollback
-			// instead of repainting the shrunken frame below it. With collapse
-			// disabled the full history stays inline and scrollback is kept.
+			// Same as the auto-compaction path: a collapsed transcript is an
+			// intentional replacement, so rebuild it and drop the stale
+			// pre-compaction scrollback instead of repainting the shrunken frame
+			// below it. With collapse disabled nothing is elided from the display
+			// — only the LLM context shrinks — so every card on screen is still
+			// current and rebuilding would only cost the reader their expand
+			// state and scroll position. Append the new divider instead.
 			if (this.ctx.settings.get("display.collapseCompacted")) {
+				this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
+				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 			} else {
+				this.ctx.appendCompactionDivider();
+				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
 			}
 		} catch (error) {

@@ -1,10 +1,10 @@
-import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
+import { type Component, Container, type HitZoneSink, Markdown } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { paintFirstColumn } from "../../tools/render-utils";
 import { imageReferenceHyperlink, renderPlaceholders } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";
-import { BlockCard } from "./collapsible-block";
+import { BlockCard, BlockCopyTarget } from "./collapsible-block";
 
 // OSC 133 shell integration: marks prompt zones for terminal multiplexers
 // Do not emit OSC 133 C ("command start") here: the transcript has no matching
@@ -67,6 +67,16 @@ export class UserMessageComponent extends Container {
 	#carded: Markdown | undefined;
 	readonly #text: string;
 	readonly #color: (value: string) => string;
+	/**
+	 * Copy target over the whole card. A user message has nothing to expand, so
+	 * this is the only zone it publishes and the only reason it publishes one.
+	 * Keyed off instance identity, never transcript position, so the key stays
+	 * stable as blocks above it come and go.
+	 */
+	static #instances = 0;
+	readonly #copyTarget = new BlockCopyTarget(`user:${++UserMessageComponent.#instances}`, () => this.#text);
+	/** Rows the last render produced, which the copy zone spans. */
+	#renderedRows = 0;
 
 	constructor(text: string, synthetic = false, imageLinks?: readonly (string | undefined)[]) {
 		super();
@@ -126,6 +136,10 @@ export class UserMessageComponent extends Container {
 		const lines = this.#card.active
 			? this.#card.paint(this.renderBody(this.#card.contentWidth(width)), width, false)
 			: super.render(width);
+		// The copy zone spans whatever this render produced, so it is recorded
+		// here rather than derived later: the memoized return below skips the
+		// paint entirely and would otherwise leave the zone on a stale height.
+		this.#renderedRows = lines.length;
 		if (lines.length === 0) {
 			return lines;
 		}
@@ -146,6 +160,11 @@ export class UserMessageComponent extends Container {
 		this.#zoneSource = lines;
 		this.#zoneLines = wrapped;
 		return wrapped;
+	}
+
+	override publishHitZones(sink: HitZoneSink): void {
+		super.publishHitZones(sink);
+		this.#copyTarget.publish(sink, 0, this.#renderedRows);
 	}
 }
 

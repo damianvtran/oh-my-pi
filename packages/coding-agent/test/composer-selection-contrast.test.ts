@@ -73,10 +73,13 @@ function dragSelect(editor: Editor, width: number, toCol: number): { frame: stri
 		wheel: null,
 		wheelX: null,
 		motion: false,
+		shift: false,
+		alt: false,
+		ctrl: false,
 		leftClick: true,
 	} as const;
-	editor.onZoneDrag("start", { raw, localRow: 0, localCol: 0 });
-	editor.onZoneDrag("move", { raw, localRow: 0, localCol: toCol });
+	editor.onZoneDrag("start", { raw, localRow: 0, localCol: 0, clickCount: 1 });
+	editor.onZoneDrag("move", { raw, localRow: 0, localCol: toCol, clickCount: 1 });
 	return { frame: editor.render(width).join("\n"), selected: editor.getSelectedText() };
 }
 

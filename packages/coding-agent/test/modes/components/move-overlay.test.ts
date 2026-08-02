@@ -63,7 +63,9 @@ describe("MoveOverlay", () => {
 	let uiTheme: Theme;
 
 	beforeAll(async () => {
-		await Settings.init({ inMemory: true });
+		// Asserts append-mode rendering: the overlay draws its own rounded box, where
+		// the fullscreen viewport renders it borderless inside the surrounding card.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		const loaded = await getThemeByName("dark");
 		if (!loaded) throw new Error("theme unavailable");
 		uiTheme = loaded;
