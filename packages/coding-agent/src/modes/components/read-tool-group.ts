@@ -8,7 +8,7 @@ import { parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tool
 import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
 import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
-import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
+import { BlockCard, CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "./usage-row";
 
@@ -356,6 +356,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.setExpanded(!this.#expanded),
 	);
 	readonly #headerPainter = new HeaderRowPainter();
+	readonly #card = new BlockCard();
+	/** Rows the last render produced, which the card's click target spans. */
+	#cardRows = 0;
 
 	constructor(options: ReadToolGroupOptions = {}) {
 		super();
@@ -522,20 +525,24 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	override render(width: number): readonly string[] {
-		const lines = super.render(width);
+		const lines = super.render(this.#card.contentWidth(width));
+		const rows = this.#card.paint(lines, width, this.#header.hovered);
+		this.#cardRows = rows.length;
 		// The summary line is always this group's first row, whether it is the
 		// `Read <path>` one-liner, the `Read (N)` tree head, or the title row of
-		// a single entry's code preview.
-		return this.#headerPainter.paint(lines, 0, this.#header, this.#expanded);
+		// a single entry's code preview; the card's top pad sits above it.
+		return this.#headerPainter.paint(rows, this.#card.topRows, this.#header, this.#expanded, this.#card.active);
 	}
 
 	/**
-	 * One zone over the summary row. Preview code below stays outside it so it
-	 * remains drag-selectable.
+	 * One zone over the whole card, in both states. Anything smaller is fussy
+	 * to hit: the fill is what the pointer sees, so the fill is the target. A
+	 * press that moves never reaches `onZoneClick` (the engine turns it into a
+	 * selection), so preview code stays drag-selectable underneath.
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
-		super.publishHitZones(sink);
-		this.#header.publish(sink, 0);
+		sink.withOffset(this.#card.topRows, () => super.publishHitZones(sink));
+		this.#header.publish(sink, 0, this.#cardRows);
 	}
 
 	/**

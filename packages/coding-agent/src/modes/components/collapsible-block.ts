@@ -1,17 +1,33 @@
 /**
- * Shared click target for a collapsible transcript block.
+ * Shared click target and card surface for a collapsible transcript block.
  *
  * Every collapsible block behaves the same under the pointer: one hit zone
- * over its header row, a hover wash on that row, and a disclosure marker in
- * its gutter. What differs is where the header row sits, which only the block
- * itself can know, and whether the collapsed form is hiding anything, which
- * only the block can measure. Those two stay with the block; everything else
- * lives here so five components do not each grow their own copy.
+ * over its header row, a disclosure marker in its gutter, and in the
+ * fullscreen viewport a filled card that lights up while hovered. What differs
+ * is where the header row sits, which only the block itself can know, and
+ * whether the collapsed form is hiding anything, which only the block can
+ * measure. Those two stay with the block; everything else lives here so five
+ * components do not each grow their own copy.
  */
 
-import type { HitZoneSink, MouseZoneTarget } from "@oh-my-pi/pi-tui";
+import { Box, type Component, type HitZoneSink, type MouseZoneTarget } from "@oh-my-pi/pi-tui";
 import { decorateBlockHeader, isFullscreenViewport } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
+
+/**
+ * Columns a card insets its content by, and filled rows it draws above and
+ * below it. Matches opencode's transcript block: two columns in, one blank
+ * filled row top and bottom, with the canvas row the transcript already
+ * inserts between blocks doing the separating.
+ */
+export const CARD_PADDING_X = 2;
+export const CARD_PADDING_Y = 1;
+
+const PANEL_FILL = (text: string): string => theme.panelBg(text);
+const RAISED_FILL = (text: string): string => theme.elementBg(text);
+
+/** A block whose card is empty keeps this identity so Box's memo stays warm. */
+const NO_ROWS: readonly string[] = [];
 
 export class CollapsibleBlockHeader implements MouseZoneTarget {
 	#hovered = false;
@@ -78,10 +94,77 @@ export class CollapsibleBlockHeader implements MouseZoneTarget {
 	 * Repaint one already-rendered row as this block's header. Returns the row
 	 * unchanged when the block is not interactive, so a block that hides
 	 * nothing stays visually inert.
+	 *
+	 * `cardFilled` says the block already painted the hover state across its
+	 * whole card, which is what the pointer is meant to light up; washing the
+	 * header again would nest a second background inside the first and the
+	 * inner reset would punch a hole in the rest of the row.
 	 */
-	decorate(row: string, expanded: boolean): string {
+	decorate(row: string, expanded: boolean, cardFilled = false): string {
 		if (!this.interactive) return row;
-		return decorateBlockHeader(row, { expanded, hovered: this.#hovered }, theme);
+		return decorateBlockHeader(row, { expanded, hovered: this.#hovered, wash: !cardFilled }, theme);
+	}
+}
+
+/**
+ * Filled card surface a transcript block paints around its own rendered rows.
+ *
+ * Boundaries in the fullscreen transcript are fills, never rules, so a block
+ * is a background plus two columns of inset plus a filled row above and below;
+ * the transcript container already puts one bare canvas row between blocks,
+ * which completes the separation. Hover repaints the whole card rather than
+ * its header row alone, so pointing at a block lights the block up.
+ *
+ * Append mode has no fill to draw with and must stay byte-identical, so every
+ * method there is a passthrough.
+ *
+ * `Box` supplies the padding, the per-row width pad and the background, so the
+ * card holds pre-composed rows in a passthrough child rather than assembling
+ * rows itself.
+ */
+export class BlockCard {
+	#rows: readonly string[] = NO_ROWS;
+	#filled: boolean | undefined;
+	readonly #box = new Box(CARD_PADDING_X, CARD_PADDING_Y);
+
+	constructor() {
+		// Tool cards keep their inset when the user enables tight layout: the
+		// inset is the card, not decoration.
+		this.#box.setIgnoreTight(true);
+		const passthrough: Component = { render: () => this.#rows, invalidate: () => {} };
+		this.#box.addChild(passthrough);
+	}
+
+	/** Whether the card draws anything at all in the current viewport. */
+	get active(): boolean {
+		return isFullscreenViewport();
+	}
+
+	/** Rows the card draws above its content, which shift a block's hit zones. */
+	get topRows(): number {
+		return this.active ? CARD_PADDING_Y : 0;
+	}
+
+	/** Width left for the block's own rows once the card takes its inset. */
+	contentWidth(width: number): number {
+		return this.active ? Math.max(1, width - CARD_PADDING_X * 2) : width;
+	}
+
+	paint(rows: readonly string[], width: number, hovered: boolean): readonly string[] {
+		if (!this.active) return rows;
+		// `setBgFn` drops Box's memo, so only touch it when the fill actually
+		// changes; otherwise resting the pointer anywhere would re-derive every
+		// card in the transcript on every frame.
+		if (this.#filled !== hovered) {
+			this.#filled = hovered;
+			this.#box.setBgFn(hovered ? RAISED_FILL : PANEL_FILL);
+		}
+		this.#rows = rows;
+		return this.#box.render(width);
+	}
+
+	invalidate(): void {
+		this.#box.invalidate();
 	}
 }
 
@@ -98,13 +181,19 @@ export class HeaderRowPainter {
 	#hovered = false;
 	#expanded = false;
 
-	paint(lines: readonly string[], row: number, header: CollapsibleBlockHeader, expanded: boolean): readonly string[] {
+	paint(
+		lines: readonly string[],
+		row: number,
+		header: CollapsibleBlockHeader,
+		expanded: boolean,
+		cardFilled = false,
+	): readonly string[] {
 		if (!header.interactive || row < 0 || row >= lines.length) return lines;
 		if (this.#source === lines && this.#hovered === header.hovered && this.#expanded === expanded) {
 			return this.#painted!;
 		}
 		const painted = lines.slice();
-		painted[row] = header.decorate(painted[row]!, expanded);
+		painted[row] = header.decorate(painted[row]!, expanded, cardFilled);
 		this.#source = lines;
 		this.#painted = painted;
 		this.#hovered = header.hovered;

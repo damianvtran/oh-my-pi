@@ -14,6 +14,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	isFullscreenViewport,
 	replaceTabs,
 	shortenPath,
 	TRUNCATE_LENGTHS,
@@ -222,22 +223,26 @@ function renderHover(
 	const icon = theme.styledSymbol("status.info", "accent");
 	const langLabel = lang ? theme.fg("mdCodeBlockBorder", ` ${lang}`) : "";
 
+	// Without a rail the snippet is set apart by its indent and highlighting, the
+	// way a card's content is set apart from its header.
+	const flat = isFullscreenViewport();
+	const h = theme.boxRound.horizontal;
+	const rail = flat ? "" : theme.fg("mdCodeBlockBorder", theme.boxRound.vertical);
+	const openRail = flat ? undefined : `${theme.boxRound.topLeft}${h.repeat(3)}`;
+	const closeRail = flat ? undefined : `${theme.boxRound.bottomLeft}${h.repeat(3)}`;
+
 	if (expanded) {
-		const h = theme.boxRound.horizontal;
-		const v = theme.boxRound.vertical;
-		const top = `${theme.boxRound.topLeft}${h.repeat(3)}`;
-		const bottom = `${theme.boxRound.bottomLeft}${h.repeat(3)}`;
 		let output = `${icon}${langLabel}`;
 		if (beforeCode) {
 			for (const line of beforeCode.split("\n")) {
 				output += `\n ${theme.fg("muted", line)}`;
 			}
 		}
-		output += `\n ${theme.fg("mdCodeBlockBorder", top)}`;
+		if (openRail) output += `\n ${theme.fg("mdCodeBlockBorder", openRail)}`;
 		for (const line of codeLines) {
-			output += `\n ${theme.fg("mdCodeBlockBorder", v)} ${line}`;
+			output += `\n ${rail} ${line}`;
 		}
-		output += `\n ${theme.fg("mdCodeBlockBorder", bottom)}`;
+		if (closeRail) output += `\n ${theme.fg("mdCodeBlockBorder", closeRail)}`;
 		if (afterCode) {
 			output += `\n ${theme.fg("muted", afterCode)}`;
 		}
@@ -254,20 +259,17 @@ function renderHover(
 		const preview = truncateToWidth(beforeCode, TRUNCATE_LENGTHS.TITLE);
 		output += `\n ${theme.fg("dim", theme.tree.branch)} ${theme.fg("muted", preview)}`;
 	}
-	const h = theme.boxRound.horizontal;
-	const v = theme.boxRound.vertical;
-	const bottom = `${theme.boxRound.bottomLeft}${h.repeat(3)}`;
-	output += `\n ${theme.fg("mdCodeBlockBorder", v)} ${firstCodeLine}`;
+	output += `\n ${rail} ${firstCodeLine}`;
 
 	if (codeLines.length > 1) {
-		output += `\n ${theme.fg("mdCodeBlockBorder", v)} ${theme.fg("muted", `… ${codeLines.length - 1} more lines`)}`;
+		output += `\n ${rail} ${theme.fg("muted", `… ${codeLines.length - 1} more lines`)}`;
 	}
 
 	if (afterCode) {
 		const docPreview = truncateToWidth(afterCode, TRUNCATE_LENGTHS.TITLE);
 		output += `\n ${theme.fg("dim", theme.tree.last)} ${theme.fg("muted", docPreview)}`;
-	} else {
-		output += `\n ${theme.fg("mdCodeBlockBorder", bottom)}`;
+	} else if (closeRail) {
+		output += `\n ${theme.fg("mdCodeBlockBorder", closeRail)}`;
 	}
 
 	return output.split("\n");

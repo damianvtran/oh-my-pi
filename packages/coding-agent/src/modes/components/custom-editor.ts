@@ -4,7 +4,9 @@ import {
 	addKeyAliases,
 	canonicalKeyId,
 	Editor,
+	type EditorPanelSurface,
 	type EditorTheme,
+	type HitZoneSink,
 	type KeyId,
 	parseKey,
 	parseKittySequence,
@@ -13,6 +15,8 @@ import {
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
 import type { AppKeybinding } from "../../config/keybindings";
 import { isSettingsInitialized, settings } from "../../config/settings";
+import { isFullscreenViewport } from "../../tools/render-utils";
+import { copyToClipboard } from "../../utils/clipboard";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
@@ -386,6 +390,24 @@ function isEditorTheme(value: unknown): value is EditorTheme {
 }
 
 /**
+ * The fullscreen composer surface: a lighter fill than the canvas with two
+ * columns of inset, matching the transcript cards above it so the prompt text
+ * shares their left edge. `theme` is read inside `fill` rather than captured so
+ * a `/theme` switch repaints against the new palette.
+ *
+ * The right inset is one column wider than the left. The status strip that
+ * opens the panel starts with a wide glyph, so an equal inset reads as heavier
+ * on the left; the extra column squares it up optically. Two blank rows close
+ * the panel so the caret is not sitting on its bottom edge.
+ */
+const COMPOSER_PANEL: EditorPanelSurface = {
+	fill: (line, width) => theme.panelBg(line, width),
+	paddingLeft: 2,
+	paddingRight: 3,
+	paddingBottom: 2,
+};
+
+/**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
  */
 export class CustomEditor extends Editor {
@@ -423,6 +445,25 @@ export class CustomEditor extends Editor {
 	constructor(...args: readonly unknown[]) {
 		super(pickEditorTheme(args));
 		if (args[0] instanceof TUI) this.tui = args[0];
+		// Resolved per frame, not once: the viewport mode is a live setting that
+		// `toggleViewportMode` flips under a running composer. `theme` can be
+		// undefined when this module is loaded through a second module graph
+		// (issue #5366), and the box frame is the safe thing to fall back to.
+		this.setPanelSurface(() => (typeof theme !== "undefined" && isFullscreenViewport() ? COMPOSER_PANEL : undefined));
+		// Owning a pointer drag suppresses the engine's copy-on-release, so the
+		// composer puts its own selection on the clipboard the same way the
+		// transcript does. A host that wants a status toast reassigns this.
+		this.onCopy = text => void copyToClipboard(text);
+	}
+
+	/**
+	 * Append mode has no mouse reporting and no panel to click into, so the
+	 * composer publishes no pointer targets there and keeps its append-mode
+	 * rendering untouched.
+	 */
+	override publishHitZones(sink: HitZoneSink): void {
+		if (!isFullscreenViewport()) return;
+		super.publishHitZones(sink);
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then

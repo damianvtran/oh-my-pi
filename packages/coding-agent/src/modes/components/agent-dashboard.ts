@@ -52,7 +52,7 @@ import { refreshAgentDiscovery } from "../../task";
 import { discoverAgents } from "../../task/discovery";
 import { resolveAgentPrewalkDefault } from "../../task/prewalk";
 import type { AgentDefinition, AgentSource } from "../../task/types";
-import { shortenPath } from "../../tools/render-utils";
+import { isFullscreenViewport, shortenPath } from "../../tools/render-utils";
 import { getEditorTheme, theme } from "../theme/theme";
 import {
 	matchesAppFollowUp,
@@ -351,7 +351,9 @@ class TwoColumnBody implements Component {
 		const rightLines = this.rightPane.render(rightWidth);
 		const lineCount = this.maxHeight;
 		const out: string[] = [];
-		const separator = theme.fg("dim", ` ${theme.boxRound.vertical} `);
+		// Three columns either way, so the panes never shift: a rule on a frame, a
+		// gap on a fill.
+		const separator = isFullscreenViewport() ? padding(3) : theme.fg("dim", ` ${theme.boxRound.vertical} `);
 
 		for (let i = 0; i < lineCount; i++) {
 			const left = truncateToWidth(leftLines[i] ?? "", leftWidth);

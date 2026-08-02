@@ -48,6 +48,7 @@ import {
 	formatExpandHint,
 	formatToolWorkingDirectory,
 	previewWindowRows,
+	recordBlockSummary,
 	replaceTabs,
 } from "./render-utils";
 import { extractLeadingCdTarget, tokenizeShellSegments } from "./shell-tokenize";
@@ -1638,6 +1639,24 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 									},
 							uiTheme,
 						);
+			if (header === undefined && renderArgs.command) {
+				// This frame deliberately draws no title bar, so nothing upstream
+				// reports what the block is. The command is its identity, and the
+				// collapsed one-line card has nothing else to show. Reported from the
+				// raw command rather than the highlighted lines so the status line's
+				// own colouring is not fighting the syntax highlighting.
+				recordBlockSummary(
+					renderStatusLine(
+						{
+							iconOverride: success ? uiTheme.styledSymbol("tool.bash", "accent") : undefined,
+							icon: success ? undefined : isPartial ? "pending" : isTimeout ? "warning" : "error",
+							title: config.resolveTitle(args, options),
+							description: renderArgs.command,
+						},
+						uiTheme,
+					),
+				);
+			}
 			const outputBlock = new CachedOutputBlock();
 
 			// Per-instance cache for the expensive inner lines computation. Mirrors

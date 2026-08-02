@@ -38,8 +38,10 @@ export interface SelectListTheme {
 	scrollInfo: (text: string) => string;
 	noMatch: (text: string) => string;
 	symbols: SymbolTheme;
-	/** Hover band applied to the full row under the mouse pointer. */
+	/** Surface wash applied to the full row under the mouse pointer. */
 	hovered?: (text: string) => string;
+	/** Surface wash applied to the full keyboard-selected row. */
+	selectedRow?: (text: string) => string;
 }
 
 export interface SelectListTruncatePrimaryContext {
@@ -210,12 +212,17 @@ export class SelectList implements Component, MouseRoutable {
 		for (let i = startIndex; i < endIndex && rows.length < visualBudget; i++) {
 			const item = this.#filteredItems[i];
 			if (!item) continue;
-			const hovered = this.theme.hovered !== undefined && i === this.#hoveredIndex && i !== this.#selectedIndex;
-			const itemRows = this.#renderItem(item, i === this.#selectedIndex, rowWidth, primaryColumnWidth);
+			const selected = i === this.#selectedIndex;
+			// A wash is a surface, so it has to reach the row's right edge; washing
+			// only as far as the last glyph leaves a ragged band. Selection wins
+			// over hover: they can be the same surface, and re-washing a washed row
+			// would just stack two opens.
+			const wash = selected ? this.theme.selectedRow : i === this.#hoveredIndex ? this.theme.hovered : undefined;
+			const itemRows = this.#renderItem(item, selected, rowWidth, primaryColumnWidth);
 			for (const row of itemRows) {
 				if (rows.length >= visualBudget) break;
 				this.#hitRows[rows.length] = i;
-				rows.push(hovered && this.theme.hovered ? this.theme.hovered(row) : row);
+				rows.push(wash ? wash(row + padding(Math.max(0, rowWidth - visibleWidth(row)))) : row);
 			}
 		}
 

@@ -10,7 +10,7 @@
 import { type Component, Container, Loader, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import { formatTruncationMetaNotice, type TruncationMeta } from "../../tools/output-meta";
-import { formatExpandHint } from "../../tools/render-utils";
+import { formatExpandHint, isFullscreenViewport } from "../../tools/render-utils";
 import { DynamicBorder } from "./dynamic-border";
 import { truncateToVisualLines } from "./visual-truncate";
 
@@ -19,11 +19,20 @@ export type ExecutionStatus = "running" | "complete" | "cancelled" | "error";
 /** Theme color keys valid for an execution frame. */
 export type ExecutionColorKey = "dim" | "bashMode" | "pythonMode";
 
+/** Stable identity so a suppressed rule keeps its parent container's memo warm. */
+const NO_ROWS: readonly string[] = [];
+
 /**
- * Build the spacer + top border + content container + bottom border scaffold
- * that bash and eval execution components share. The caller appends the
- * header (command vs `>>>` prompt) and the returned loader to
- * `contentContainer` so per-mode order is preserved.
+ * Build the rule + content container + rule scaffold that bash and eval
+ * execution components share. The caller appends the header (command vs `>>>`
+ * prompt) and the returned loader to `contentContainer` so per-mode order is
+ * preserved.
+ *
+ * The rules are append-mode chrome. In fullscreen the block is a filled card
+ * and its fill IS its boundary, so a rule would be a second one drawn on top;
+ * the rule components stay in the child list and render nothing, which keeps
+ * the caller's header-row arithmetic (rows drawn above the content) correct in
+ * both modes and lets a runtime viewport switch take effect on the next frame.
  */
 export function buildExecutionFrame(
 	parent: Container,
@@ -31,8 +40,15 @@ export function buildExecutionFrame(
 	colorKey: ExecutionColorKey,
 ): { contentContainer: Container; loader: Loader } {
 	const borderColor = (str: string) => theme.fg(colorKey, str);
+	const rule = (): Component => {
+		const border = new DynamicBorder(borderColor);
+		return {
+			render: (width: number) => (isFullscreenViewport() ? NO_ROWS : border.render(width)),
+			invalidate: () => border.invalidate(),
+		};
+	};
 
-	parent.addChild(new DynamicBorder(borderColor));
+	parent.addChild(rule());
 
 	const contentContainer = new Container();
 	parent.addChild(contentContainer);
@@ -45,17 +61,26 @@ export function buildExecutionFrame(
 		getSymbolTheme().spinnerFrames,
 	);
 
-	parent.addChild(new DynamicBorder(borderColor));
+	parent.addChild(rule());
 	return { contentContainer, loader };
+}
+
+/**
+ * Horizontal inset for an execution block's own rows. A fullscreen block sits
+ * inside a card that already supplies the inset, so its rows sit flush against
+ * the fill and every card in the transcript aligns on the same column.
+ */
+export function executionContentPaddingX(): number {
+	return isFullscreenViewport() ? 0 : 1;
 }
 
 /**
  * Wrap a styled preview block in a render-time visual-line truncator.
  * Recomputed per render width so wrapping stays in sync with terminal size.
  */
-export function createCollapsedPreview(previewText: string, previewLines: number): Component {
+export function createCollapsedPreview(previewText: string, previewLines: number, paddingX: number): Component {
 	return {
-		render: (width: number) => truncateToVisualLines(previewText, previewLines, width, 1).visualLines,
+		render: (width: number) => truncateToVisualLines(previewText, previewLines, width, paddingX).visualLines,
 		invalidate: () => {},
 	};
 }
@@ -77,6 +102,8 @@ export function buildStatusFooter(opts: {
 	 * afford a separator that is as tall as the content it separates.
 	 */
 	compact?: boolean;
+	/** Horizontal inset, see {@link executionContentPaddingX}. */
+	paddingX: number;
 }): Text | undefined {
 	const parts: string[] = [];
 
@@ -95,7 +122,7 @@ export function buildStatusFooter(opts: {
 		parts.push(theme.fg("warning", formatTruncationMetaNotice(opts.truncation)));
 	}
 	if (parts.length === 0) return undefined;
-	return new Text(opts.compact ? parts.join("\n") : `\n${parts.join("\n")}`, 1, 0);
+	return new Text(opts.compact ? parts.join("\n") : `\n${parts.join("\n")}`, opts.paddingX, 0);
 }
 
 /**

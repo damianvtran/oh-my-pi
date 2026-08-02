@@ -15,7 +15,13 @@ import { formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
-import { expandKeyHint, getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import {
+	expandKeyHint,
+	getPreviewLines,
+	isFullscreenViewport,
+	resolveImageOptions,
+	TRUNCATE_LENGTHS,
+} from "../../tools/render-utils";
 import { convertImageToPng } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
@@ -930,7 +936,14 @@ export class AssistantMessageComponent extends Container {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
 				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
-				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme(), mdOptions, 0);
+				// Prose sits on the canvas between filled cards, so its indent is the
+				// only thing holding the transcript's left edge together. Cards inset
+				// their content by CARD_PADDING_X, so fullscreen matches that and
+				// every block starts on one column; append keeps its single column.
+				// Markdown fixes padding at construction, so a block built before a
+				// `/viewport` flip keeps the indent it was built with until the
+				// transcript is rebuilt.
+				const md = new Markdown(trimmed, isFullscreenViewport() ? 2 : 1, 0, getMarkdownTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
 				hasRenderedContent = true;

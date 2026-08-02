@@ -30,7 +30,8 @@ import { setMcpServerEnabled } from "../../../mcp/config-writer";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
-import { bottomBorder, divider, row, topBorder } from "../overlay-box";
+import { isFullscreenViewport } from "../../../tools/render-utils";
+import { bottomBorder, divider, row, topBorder, topChromeRows } from "../overlay-box";
 import { ExtensionList } from "./extension-list";
 import { InspectorPanel } from "./inspector-panel";
 import {
@@ -153,8 +154,8 @@ export class ExtensionDashboard implements Component {
 		const innerWidth = Math.max(1, width - 4);
 
 		const tabLines = this.#tabBar.render(innerWidth);
-		// Fixed chrome: top border + tab rows + divider + divider + footer + bottom border.
-		const fixedRows = 1 + tabLines.length + 1 + 1 + 1 + 1;
+		// Fixed chrome: top chrome + tab rows + divider + divider + footer + bottom border.
+		const fixedRows = topChromeRows() + tabLines.length + 1 + 1 + 1 + 1;
 		const contentRows = Math.max(5, height - fixedRows);
 
 		this.#mainList.setMaxVisible(Math.max(3, contentRows - 2));
@@ -162,7 +163,7 @@ export class ExtensionDashboard implements Component {
 		const bodyLines = this.#body.render(innerWidth);
 
 		const out: string[] = [];
-		out.push(topBorder(width, "Extension Control Center"));
+		out.push(...topBorder(width, "Extension Control Center"));
 		this.#tabRowStart = out.length;
 		this.#tabRowCount = tabLines.length;
 		for (const line of tabLines) out.push(row(line, width));
@@ -474,7 +475,9 @@ class TwoColumnBody implements Component {
 		const rightRendered = rightView.render(rightWidth);
 
 		const combined: string[] = [];
-		const separator = theme.fg("dim", ` ${theme.boxRound.vertical} `);
+		// Three columns either way, so the panes never shift: a rule on a frame, a
+		// gap on a fill.
+		const separator = isFullscreenViewport() ? padding(3) : theme.fg("dim", ` ${theme.boxRound.vertical} `);
 		for (let i = 0; i < numLines; i++) {
 			const left = truncateToWidth(leftLines[i] ?? "", leftWidth);
 			const leftPadded = left + padding(Math.max(0, leftWidth - visibleWidth(left)));

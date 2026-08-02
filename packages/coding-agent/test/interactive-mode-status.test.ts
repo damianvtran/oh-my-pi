@@ -32,6 +32,14 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 			for (const item of items) ctx.chatContainer.addChild(item);
 			ctx.ui.requestRender();
 		},
+		// With no home screen mounted, notices are the transcript — the same
+		// aliasing `InteractiveMode.noticeContainer` / `presentNotice` do.
+		get noticeContainer() {
+			return ctx.chatContainer;
+		},
+		presentNotice: (content: readonly Component[]) => {
+			ctx.present(content);
+		},
 		sessionManager: {
 			buildSessionContext: () => buildSessionContext([]),
 			getEntries: () => [],
@@ -82,6 +90,12 @@ describe("InteractiveMode.showStatus", () => {
 				for (const item of items) ctx.chatContainer.addChild(item);
 				ctx.ui.requestRender();
 			},
+			get noticeContainer() {
+				return ctx.chatContainer;
+			},
+			presentNotice: (content: readonly Component[]) => {
+				ctx.present(content);
+			},
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,
 		} as unknown as InteractiveModeContext;
@@ -106,6 +120,12 @@ describe("InteractiveMode.showStatus", () => {
 				const items = Array.isArray(content) ? content : [content];
 				for (const item of items) ctx.chatContainer.addChild(item);
 				ctx.ui.requestRender();
+			},
+			get noticeContainer() {
+				return ctx.chatContainer;
+			},
+			presentNotice: (content: readonly Component[]) => {
+				ctx.present(content);
 			},
 			lastStatusSpacer: undefined,
 			lastStatusText: undefined,

@@ -19,12 +19,13 @@ import { theme } from "../../modes/theme/theme";
 import type { TruncationMeta } from "../../tools/output-meta";
 import { isFullscreenViewport, PREVIEW_LIMITS } from "../../tools/render-utils";
 import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
-import { CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
+import { BlockCard, CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import {
 	buildExecutionFrame,
 	buildStatusFooter,
 	createCollapsedPreview,
 	type ExecutionStatus,
+	executionContentPaddingX,
 	resolveExecutionStatus,
 } from "./execution-shared";
 
@@ -52,13 +53,15 @@ export class BashExecutionComponent extends Container {
 	#contentContainer: Container;
 	#headerText: Text;
 	#headerRow = 0;
-	#headerRowCount = 1;
+	/** Rows the last render produced, which the card's click target spans. */
+	#cardRows = 0;
 	// The engine repaints after a consumed click, so the toggle only has to
 	// rebuild this block's display.
 	readonly #header = new CollapsibleBlockHeader(`bash:${++bashExecutionInstanceSeq}`, () =>
 		this.setExpanded(!this.#expanded),
 	);
 	readonly #headerPainter = new HeaderRowPainter();
+	readonly #card = new BlockCard();
 
 	constructor(
 		private readonly command: string,
@@ -98,6 +101,7 @@ export class BashExecutionComponent extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.#card.invalidate();
 		this.#displayDirty = false;
 		this.#updateDisplay();
 	}
@@ -155,26 +159,36 @@ export class BashExecutionComponent extends Container {
 			this.#displayDirty = false;
 			this.#updateDisplay();
 		}
-		const lines = super.render(width);
+		const innerWidth = this.#card.contentWidth(width);
+		const lines = super.render(innerWidth);
 		// The header is the command, which sits immediately below the frame's
-		// top border. Both are children rendered at this same width, so their
-		// memoized line counts give the header's row without re-rendering.
-		this.#headerRow = this.children[0]?.render(width).length ?? 0;
-		this.#headerRowCount = Math.max(1, this.#headerText.render(width).length);
-		return this.#headerPainter.paint(lines, this.#headerRow, this.#header, this.#expanded);
+		// top rule (nothing at all in fullscreen, where the card's own top pad
+		// takes its place). Both are children rendered at this same width, so
+		// their memoized line counts give the header's row without re-rendering.
+		this.#headerRow = this.#card.topRows + (this.children[0]?.render(innerWidth).length ?? 0);
+		const rows = this.#card.paint(lines, width, this.#header.hovered);
+		this.#cardRows = rows.length;
+		return this.#headerPainter.paint(rows, this.#headerRow, this.#header, this.#expanded, this.#card.active);
 	}
 
 	/**
-	 * One zone over the command rows only. The output below stays outside it so
-	 * it remains drag-selectable.
+	 * One zone over the whole card, in both states. Anything smaller is fussy
+	 * to hit: the fill is what the pointer sees, so the fill is the target. A
+	 * press that moves never reaches `onZoneClick` (the engine turns it into a
+	 * selection), so the output stays drag-selectable underneath.
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
-		super.publishHitZones(sink);
-		this.#header.publish(sink, this.#headerRow, this.#headerRowCount);
+		// Children publish rows local to the container; the card's top pad sits
+		// above all of them.
+		sink.withOffset(this.#card.topRows, () => super.publishHitZones(sink));
+		this.#header.publish(sink, 0, this.#cardRows);
 	}
 
 	#updateDisplay(): void {
 		const availableLines = this.#outputLines;
+		const paddingX = executionContentPaddingX();
+		this.#headerText.setPadding(paddingX, 0);
+		this.#loader.setPadding(paddingX, 0);
 
 		// A finished command's output is reference material, not something the
 		// reader is watching, so once it settles the collapsed form shrinks to a
@@ -221,13 +235,13 @@ export class BashExecutionComponent extends Container {
 				const displayText = availableLines
 					.map((line, index) => (sixelLineMask?.[index] ? line : theme.fg("muted", line)))
 					.join("\n");
-				this.#contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
+				this.#contentContainer.addChild(new Text(`\n${displayText}`, paddingX, 0));
 			} else {
 				// The blank separator costs a row, which a one-row preview cannot
 				// spare, so the compact form sits directly under the command.
 				const styledOutput = previewLogicalLines.map(line => theme.fg("muted", line)).join("\n");
 				const body = compact ? styledOutput : `\n${styledOutput}`;
-				this.#contentContainer.addChild(createCollapsedPreview(body, previewLines));
+				this.#contentContainer.addChild(createCollapsedPreview(body, previewLines, paddingX));
 			}
 		}
 
@@ -242,6 +256,7 @@ export class BashExecutionComponent extends Container {
 				hiddenLineCount,
 				suppressHiddenCount: hasSixelOutput,
 				compact,
+				paddingX,
 			});
 			if (footer) this.#contentContainer.addChild(footer);
 		}
