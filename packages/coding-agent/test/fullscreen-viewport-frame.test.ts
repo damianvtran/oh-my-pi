@@ -35,7 +35,7 @@ function applyChrome(tui: TUI, active: Theme): void {
 		padTop: 0,
 		padBottom: 1,
 		fill: (line, width) => active.surfaceBg(line, width),
-		overlayFill: (line, width) => active.panelBg(line, width),
+		overlayFill: (line, width) => active.overlayBg(line, width),
 	});
 }
 
