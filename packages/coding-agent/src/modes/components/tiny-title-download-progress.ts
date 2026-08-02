@@ -1,4 +1,4 @@
-import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { type Component, type HitZoneSink, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { getTinyTitleModelSpec, type TinyTitleLocalModelKey } from "../../tiny/models";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
@@ -56,6 +56,7 @@ export class TinyTitleDownloadProgressComponent implements Component {
 	#modelKey: TinyTitleLocalModelKey;
 	#event: TinyTitleProgressEvent | undefined;
 	readonly #card = new BlockCard();
+	#renderedRows = 0;
 
 	constructor(modelKey: TinyTitleLocalModelKey) {
 		this.#modelKey = modelKey;
@@ -89,10 +90,19 @@ export class TinyTitleDownloadProgressComponent implements Component {
 
 		// A card's fill and blank rows are its boundary in fullscreen; the rules
 		// only exist because append mode has no surface to contrast against.
-		if (!this.#card.active) {
-			const border = theme.fg("border", theme.boxRound.horizontal.repeat(width));
-			return [border, padLine(` ${title}`, width), padLine(` ${details}`, width), border];
-		}
-		return this.#card.paint([padLine(title, inner), padLine(details, inner)], width, false);
+		const lines = !this.#card.active
+			? [
+					theme.fg("border", theme.boxRound.horizontal.repeat(width)),
+					padLine(` ${title}`, width),
+					padLine(` ${details}`, width),
+					theme.fg("border", theme.boxRound.horizontal.repeat(width)),
+				]
+			: this.#card.paint([padLine(title, inner), padLine(details, inner)], width, false);
+		this.#renderedRows = lines.length;
+		return lines;
+	}
+
+	publishHitZones(sink: HitZoneSink): void {
+		this.#card.publishSelectionInset(sink, this.#renderedRows);
 	}
 }

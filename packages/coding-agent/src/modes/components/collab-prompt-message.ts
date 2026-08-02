@@ -1,5 +1,5 @@
 import type { TextContent } from "@oh-my-pi/pi-ai";
-import { Container, Markdown, Text } from "@oh-my-pi/pi-tui";
+import { Container, type HitZoneSink, Markdown, Text } from "@oh-my-pi/pi-tui";
 import type { CollabPromptDetails } from "../../collab/protocol";
 import type { CustomMessage } from "../../session/messages";
 import { getMarkdownTheme, theme } from "../theme/theme";
@@ -27,6 +27,7 @@ export class CollabPromptMessageComponent extends Container {
 	// forms have to be reachable from one component; the one the current
 	// viewport never asks for is never built.
 	#carded: Container | undefined;
+	#renderedRows = 0;
 
 	constructor(message: CustomMessage<CollabPromptDetails>) {
 		super();
@@ -76,7 +77,15 @@ export class CollabPromptMessageComponent extends Container {
 	}
 
 	override render(width: number): readonly string[] {
-		if (!this.#card.active) return super.render(width);
-		return this.#card.paint(this.#renderBody(this.#card.contentWidth(width)), width, false);
+		const lines = this.#card.active
+			? this.#card.paint(this.#renderBody(this.#card.contentWidth(width)), width, false)
+			: super.render(width);
+		this.#renderedRows = lines.length;
+		return lines;
+	}
+
+	override publishHitZones(sink: HitZoneSink): void {
+		this.#card.publishSelectionInset(sink, this.#renderedRows);
+		super.publishHitZones(sink);
 	}
 }

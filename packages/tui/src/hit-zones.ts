@@ -93,6 +93,15 @@ export interface MouseZoneTarget {
 	readonly pointerShape?: PointerShape;
 
 	/**
+	 * Whether a second click may invoke {@link onZoneCopy}.
+	 *
+	 * Copy-only prose blocks opt in. Activatable cards do not: their first click
+	 * can expand/collapse and reflow the transcript before the second lands, so
+	 * Alt+click is their unambiguous whole-block copy gesture.
+	 */
+	readonly doubleClickCopies?: boolean;
+
+	/**
 	 * Primary activation. Fired on mouse **up** inside the zone when the press
 	 * that started it also landed inside the same zone, and only when no text
 	 * selection was made in between — a drag that happens to end on a button
@@ -111,12 +120,13 @@ export interface MouseZoneTarget {
 	/**
 	 * Hand back this block's own source text, for a pointer gesture that means
 	 * "copy this" rather than "activate this" (alt+click, or the second click
-	 * of a double click).
+	 * of a double click on targets that opt into {@link doubleClickCopies}).
 	 *
-	 * Returning text CONSUMES the gesture: {@link onZoneClick} is not called,
-	 * so a card whose ordinary click toggles expansion does not also toggle on
-	 * the click that copied it. Return `undefined` to decline, and the gesture
-	 * falls through to the ordinary click path.
+	 * Returning any string, including an empty one, CONSUMES the gesture:
+	 * {@link onZoneClick} is not called, so a card whose ordinary click toggles
+	 * expansion does not also toggle on the click that copied it. Return
+	 * `undefined` to decline, and the gesture falls through to the ordinary
+	 * click path.
 	 *
 	 * This returns the block's *source* — the markdown a user typed, a tool's
 	 * real output — not the rows on screen. A rendered row has been wrapped to
@@ -171,13 +181,31 @@ export interface HitZone {
 }
 
 /**
+ * Left chrome inset for a span of rendered rows.
+ *
+ * This is separate from {@link HitZone}: text can own selection geometry
+ * without becoming clickable, hoverable, or eligible to intercept a pointer
+ * event. Insets compose as containers add horizontal padding.
+ */
+export interface SelectionInsetBand {
+	/** First frame row covered. */
+	readonly row: number;
+	/** Number of rows covered (>= 1). */
+	readonly rowCount: number;
+	/** Number of leading cells that are chrome rather than selectable text. */
+	readonly inset: number;
+}
+
+/**
  * Collector handed to {@link HitZoneProvider.publishHitZones}. Rows passed in
  * are LOCAL to the publishing component; the sink adds the accumulated offset.
  */
 export class HitZoneSink {
 	#zones: HitZone[] = [];
+	#selectionInsets: SelectionInsetBand[] = [];
 	#offset = 0;
 	#colOffset = 0;
+	#selectionInsetOffset = 0;
 	#windowStart = Number.NEGATIVE_INFINITY;
 	#windowEnd = Number.POSITIVE_INFINITY;
 
@@ -257,6 +285,23 @@ export class HitZoneSink {
 	}
 
 	/**
+	 * Run `fn` with `delta` added to descendant selection insets.
+	 *
+	 * Unlike {@link withColumnOffset}, this does not move pointer zones. A Box's
+	 * padding is selectable chrome, while its full row may still be the click
+	 * target.
+	 */
+	withSelectionInset(delta: number, fn: () => void): void {
+		const previous = this.#selectionInsetOffset;
+		this.#selectionInsetOffset = previous + delta;
+		try {
+			fn();
+		} finally {
+			this.#selectionInsetOffset = previous;
+		}
+	}
+
+	/**
 	 * Publish a zone. `rowStart` is local to the publishing component; columns
 	 * are relative to the content area, and the frame's gutter is added here.
 	 * A full-width zone leaves `colEnd` infinite and is unaffected.
@@ -278,15 +323,37 @@ export class HitZoneSink {
 		});
 	}
 
+	/**
+	 * Publish row-local selection geometry without creating a pointer target.
+	 *
+	 * Overlapping bands are intentional: a container publishes its own padding,
+	 * then a child can add a deeper inset for only the rows it rendered.
+	 */
+	selectionInset(rowStart: number, rowCount: number, inset = 0): void {
+		if (rowCount <= 0) return;
+		this.#selectionInsets.push({
+			row: this.#offset + rowStart,
+			rowCount,
+			inset: this.#selectionInsetOffset + inset,
+		});
+	}
+
 	/** The collected zones, in tree order. */
 	get zones(): readonly HitZone[] {
 		return this.#zones;
 	}
 
+	/** The collected row-local selection insets, in tree order. */
+	get selectionInsets(): readonly SelectionInsetBand[] {
+		return this.#selectionInsets;
+	}
+
 	reset(): void {
 		this.#zones = [];
+		this.#selectionInsets = [];
 		this.#offset = 0;
 		this.#colOffset = 0;
+		this.#selectionInsetOffset = 0;
 		this.#windowStart = Number.NEGATIVE_INFINITY;
 		this.#windowEnd = Number.POSITIVE_INFINITY;
 	}
