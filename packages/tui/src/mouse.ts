@@ -100,6 +100,10 @@ export function routeSelectListMouse(target: SelectListMouseTarget, event: SgrMo
  * rendered lines before forwarding.
  */
 export interface MouseRoutable {
-	/** `line`/`col` are 0-based within the component's rendered output. */
-	routeMouse(event: SgrMouseEvent, line: number, col: number): void;
+	/**
+	 * `line`/`col` are 0-based within the component's rendered output.
+	 * Return `false` to decline the event so the host can route it elsewhere;
+	 * anything else (including `undefined`) consumes it.
+	 */
+	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean | undefined | void;
 }

@@ -144,6 +144,63 @@ is clamped down rather than being left pointing past the end.
 `scrollTo` returns `false` and does nothing in `append` mode. There is no
 engine-owned scroll offset there, and inventing one would fight the emulator.
 
+### The gap above the first block is content, not chrome
+
+`ViewportChrome` deliberately sets no `padTop`. The blank row above the first
+transcript block is the scroll region's own leading row, prepended during
+compose (`#fullscreenScrollLead`), so it is present at rest and scrolls away
+with everything else.
+
+As chrome it stayed welded to the top of the window, and content scrolled *behind*
+it — a row vanished early on the way up and appeared late on the way down, which
+reads as the viewport losing a row. opencode reaches the same result by making
+its top spacer the first child of the scroll box rather than padding on it.
+
+Because the row is part of the composed frame, every consumer of frame
+coordinates shifts with it: zone collection adds `#fullscreenScrollLead` to the
+scroll-region base offset, and selection maps through `#fullscreenScrollFrame`,
+which contains the row.
+
+### Blocks, and why the window needs to know where they are
+
+The composed frame is a flat `string[]`; windowing it by index alone cannot tell
+a whole block from the remains of a clipped one. That matters because a card
+paints its inset rows: an offset that leaves only a card's blank top padding on
+screen leaves a coloured band with no visible cause.
+
+So compose also records `#blockStarts`, and `#orphanBlockRows` drops a clipped
+block whose visible rows carry no content. Boundaries come from the child:
+
+- a child implementing `BlockRowSpans` reports its own ledger — `TranscriptContainer`
+  must, because it inserts separator rows and trims blank edges, so it is not the
+  concatenation of its children;
+- a plain `Container` exposes `memoizedChildRowCounts()`, used only when the counts
+  actually sum to the rows it returned;
+- anything else is one opaque block, which is always safe: an opaque block is
+  never suppressed.
+
+A block may paint a one-column left rail down every row it owns, padding
+included. Column 0 is therefore discounted — but only when the clipped-away part
+of the same block carries the same glyph there, which is what separates a rail
+from a row whose only content happens to sit in the first column.
+
+### Cost
+
+Per frame the engine renders every root child (`render()` is the invalidation
+point and carries side effects, so it is never skipped) and concatenates the
+result. The concatenation is **not** cached across frames: the only available key
+is each child's rendered array identity, and the transcript returns one
+persistent array it mutates in place, so a cache keyed that way cannot see a
+change and freezes the viewport.
+
+What is bounded instead is the work that actually scales. Hit-zone collection
+takes a row window (`HitZoneSink.setRowWindow`) and both `Container.publishHitZones`
+and `TranscriptContainer.publishHitZones` skip blocks outside it, so a 3000-block
+transcript publishes a viewport's worth of zones rather than 3000. And blocks
+memoize their own rows: a settled collapsed tool card that rebuilt its summary
+string per frame defeated every memo below it, because they all key on array
+identity.
+
 ---
 
 ## 4. Hit zones

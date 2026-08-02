@@ -17,6 +17,8 @@
  */
 import { beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { Container, TUI } from "@oh-my-pi/pi-tui";
@@ -58,17 +60,23 @@ class StaticRows extends Container {
 interface Harness {
 	term: VirtualTerminal;
 	tui: TUI;
-	transcript: Container;
+	transcript: TranscriptContainer;
 	settle: () => Promise<void>;
 }
 
+/**
+ * The real `TranscriptContainer`, not a plain `Container`: it assembles its own
+ * rows, inserts a separator between blocks and never populates the base render
+ * memo, so a stand-in would exercise a block-boundary path the product never
+ * takes — which is exactly how the defect under test survived its first fix.
+ */
 function mount(active: Theme): Harness {
 	const term = new VirtualTerminal(WIDTH, HEIGHT, 500);
 	const scheduler = new StressRenderScheduler();
 	const tui = new TUI(term, undefined, { renderScheduler: scheduler });
 	tui.setViewportMode("fullscreen");
 	applyChrome(tui, active);
-	const transcript = new Container();
+	const transcript = new TranscriptContainer();
 	tui.addChild(transcript);
 	const pinned = new PinnedRow();
 	pinned.addChild(new StaticRows(["composer"]));
@@ -198,6 +206,59 @@ describe("fullscreen viewport frame", () => {
 			}
 			// Guard against the assertion silently never running.
 			expect(paddingRowsSeen).toBeGreaterThan(0);
+		} finally {
+			tui.stop();
+		}
+	});
+	it("keeps a clipped block's content row whose only glyph sits in the first column", async () => {
+		const { term, tui, transcript, settle } = mount(active);
+		try {
+			// A closing brace alone on the last row is the shape that a naive
+			// "ignore column 0" rule would mistake for a card's left rail.
+			transcript.addChild(new StaticRows(["a0", "a1", "a2"]));
+			transcript.addChild(new StaticRows([...Array.from({ length: 20 }, (_v, i) => `b${i}`), "}"]));
+			transcript.addChild(new StaticRows(Array.from({ length: 30 }, (_v, i) => `c${i}`)));
+			tui.requestRender();
+			await settle();
+
+			// Scroll until the brace is the topmost visible row. Its block is then
+			// clipped at the top and the brace is its only visible content, which
+			// is precisely the shape a blanket "column 0 is decoration" rule
+			// blanks. Asserting on the top row is what makes this bite.
+			let braceOnTopRow = 0;
+			let braceSeen = 0;
+			for (let offset = 0; offset <= tui.maxScrollTop; offset++) {
+				tui.scrollTo(offset);
+				await settle();
+				const rows = text(term);
+				if (rows.includes("}")) braceSeen++;
+				if (rows[0] === "}") braceOnTopRow++;
+			}
+			expect(braceOnTopRow, "the brace never reached the top row; the scenario did not exercise the clip").toBe(1);
+			expect(braceSeen).toBeGreaterThan(1);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("publishes hit zones only for blocks the window can show", async () => {
+		const { tui, transcript, settle } = mount(active);
+		try {
+			for (let i = 0; i < 60; i++) {
+				const tool = new ToolExecutionComponent("bash", { command: `echo ${i}` }, {}, undefined, tui);
+				tool.updateResult({ content: [{ type: "text", text: `out ${i}` }], isError: false }, false);
+				transcript.addChild(tool);
+			}
+			tui.requestRender();
+			await settle();
+
+			tui.scrollTo(Math.floor(tui.maxScrollTop / 2));
+			await settle();
+
+			// Bounded by the viewport, not by the transcript: 60 blocks would
+			// otherwise publish 60 header zones on every frame of every scroll.
+			expect(tui.hitZoneCount).toBeGreaterThan(0);
+			expect(tui.hitZoneCount).toBeLessThanOrEqual(HEIGHT);
 		} finally {
 			tui.stop();
 		}

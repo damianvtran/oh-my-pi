@@ -235,6 +235,34 @@ export interface FullscreenPinned {
 }
 
 /**
+ * Implemented by a scroll-region child that assembles its own rows and can say
+ * where each block it holds begins.
+ *
+ * The fullscreen viewport windows a flat array of composed rows; without block
+ * boundaries it cannot tell whether the rows it is about to clip are a whole
+ * block or the leftover decoration of one. `Container` can be asked for its
+ * children's row counts, but a container that reshapes its output — inserting
+ * separators, trimming blank edges — is not the concatenation of its children
+ * and must report its own ledger instead.
+ *
+ * Rows are local: row 0 is the first row this component returned from
+ * `render()`. Returning `undefined` means "no reliable boundaries this frame",
+ * which the engine treats as one opaque block.
+ */
+export interface BlockRowSpans {
+	blockStartRows(): readonly number[] | undefined;
+}
+
+export function hasBlockRowSpans(value: unknown): value is BlockRowSpans {
+	return typeof (value as Partial<BlockRowSpans>)?.blockStartRows === "function";
+}
+
+/** No block at all (a child that drew nothing). */
+const NO_BLOCK_STARTS: readonly number[] = Object.freeze([]);
+/** One opaque block covering the whole child, the always-safe fallback. */
+const ZERO_BLOCK_START: readonly number[] = Object.freeze([0]);
+
+/**
  * Window chrome for `fullscreen` mode: the gutter around the content and the
  * base surface painted behind every row.
  *
@@ -1593,24 +1621,14 @@ export class TUI extends Container {
 	// selection extraction both address frame rows, not screen rows.
 	#fullscreenScrollFrame: string[] = [];
 	#fullscreenScrollViewportRows = 0;
-	// Composed-frame cache. Scrolling changes no component's output, so the
-	// expensive part of a fullscreen frame — concatenating every root child's
-	// rows into one flat array — must not be redone per wheel notch. Children
-	// already return a stable array reference while their content is unchanged
-	// (see Container.render's memo), so the whole concat can be reused whenever
-	// every reference and the compose width match the previous frame. Without
-	// this every notch is O(total transcript rows), which the adaptive render
-	// backpressure then multiplies into visibly coarse scrolling.
-	#composeCacheWidth = -1;
-	#composeCachePinnedFrom = -1;
 	// Rows the scroll region prepends before its first child (the leading gap).
 	// Zone and selection mapping both address composed frame rows, so this has
 	// to shift every scroll-region child by the same amount.
 	#fullscreenScrollLead = 0;
-	#composeCacheRefs: readonly (readonly string[])[] = [];
-	#composeCacheBlockStarts: number[] = [];
-	#composeCacheRowCounts: number[] = [];
-	#composeCachePinnedLines: string[] = [];
+	// Start row of every block in the scroll region, ascending, terminated by
+	// the total row count. Recorded during compose because the composed frame
+	// is otherwise a flat array with no record of where a block begins.
+	#blockStarts: number[] = [];
 	// Gutter and top inset actually applied this frame, after clamping to the
 	// terminal size. Pointer coordinates are screen-absolute, so hit testing and
 	// selection both have to subtract these to reach content coordinates.
@@ -2279,6 +2297,14 @@ export class TUI extends Container {
 		return this.scrollTo(this.#scrollTop + delta);
 	}
 
+	/**
+	 * Zones the last frame published. Exposed so a test can assert the cost is
+	 * bounded by the viewport rather than by the length of the transcript.
+	 */
+	get hitZoneCount(): number {
+		return this.#zones.length;
+	}
+
 	scrollTo(row: number): boolean {
 		if (this.#viewportMode !== "fullscreen") return false;
 		const max = this.maxScrollTop;
@@ -2346,7 +2372,12 @@ export class TUI extends Container {
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
 		component.setIgnoreTight?.(true);
-		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false };
+		const entry: (typeof this.overlayStack)[number] = {
+			component,
+			options,
+			preFocus: this.#focusedComponent,
+			hidden: false,
+		};
 		this.overlayStack.push(entry);
 		// Only focus if overlay is actually visible
 		if (this.#isOverlayVisible(entry)) {
@@ -2377,6 +2408,10 @@ export class TUI extends Container {
 			setHidden: (hidden: boolean) => {
 				if (entry.hidden === hidden) return;
 				entry.hidden = hidden;
+				// A rect describes where the LAST frame painted this overlay. A
+				// hidden entry paints no frame, so keeping it would hit-test the
+				// first report after it reappears against pre-hide geometry.
+				if (hidden) entry.rect = undefined;
 				// Update focus when hiding/showing
 				if (hidden) {
 					// If this overlay or one of its owned targets had focus, move focus to next visible or preFocus
@@ -3429,8 +3464,7 @@ export class TUI extends Container {
 		if (!event) return false;
 		if (event.row < rect.row || event.row >= rect.row + rect.height) return false;
 		if (event.col < rect.col || event.col >= rect.col + rect.width) return false;
-		routable.routeMouse(event, event.row - rect.row, event.col - rect.col);
-		return true;
+		return routable.routeMouse(event, event.row - rect.row, event.col - rect.col) !== false;
 	}
 
 	/**
@@ -3813,7 +3847,13 @@ export class TUI extends Container {
 		const boundsWidth = Math.max(1, termWidth - padX * 2);
 		const boundsHeight = Math.max(1, termHeight - padTop - (inset ? this.#viewportChrome.padBottom : 0));
 		for (const entry of this.overlayStack) {
-			if (!this.#isOverlayVisible(entry)) continue;
+			if (!this.#isOverlayVisible(entry)) {
+				// Never let a rectangle outlive the frame that produced it: an
+				// overlay hidden by a `visible()` predicate or a resize must not
+				// keep claiming pointer reports at its old coordinates.
+				entry.rect = undefined;
+				continue;
+			}
 			const { component, options } = entry;
 			// Get layout with height=0 first to determine width and maxHeight
 			// (width and maxHeight don't depend on overlay height).
@@ -5726,73 +5766,38 @@ export class TUI extends Container {
 		}
 
 		// Row counts are captured here so zone collection can map each child to
-		// its screen rows without a second render pass.
+		// its screen rows without a second render pass, and block starts so the
+		// window can tell a whole block from the remains of a clipped one.
 		//
-		// Every child is rendered every frame (render() is the invalidation
-		// point and must not be skipped), but the CONCATENATION below is reused
-		// whenever every child handed back the same array reference at the same
-		// width — the common case while scrolling, where nothing changed except
-		// which slice of the composed frame is shown.
-		const refs: (readonly string[])[] = new Array(children.length);
-		let unchanged =
-			this.#composeCacheWidth === contentWidth &&
-			this.#composeCachePinnedFrom === pinnedFrom &&
-			this.#composeCacheRefs.length === children.length;
+		// The concatenation is deliberately NOT cached across frames. Caching it
+		// would have to key on each child's rendered array identity, and the
+		// transcript returns one persistent array it mutates in place — so the
+		// key cannot see a change and the viewport would freeze. The cost this
+		// would save is small anyway: the expensive part of a frame is the
+		// children's own render work, which they memoize themselves.
+		const rowCounts: number[] = new Array(children.length);
+		const scrollLines: string[] = [];
+		const pinnedLines: string[] = [];
+		const blockStarts: number[] = [];
 		for (let i = 0; i < children.length; i++) {
-			const rows = children[i]!.render(contentWidth);
-			refs[i] = rows;
-			if (unchanged && this.#composeCacheRefs[i] !== rows) unchanged = false;
-		}
-
-		let rowCounts: number[];
-		let scrollLines: string[];
-		let pinnedLines: string[];
-		if (unchanged) {
-			rowCounts = this.#composeCacheRowCounts;
-			scrollLines = this.#fullscreenScrollFrame;
-			pinnedLines = this.#composeCachePinnedLines;
-		} else {
-			rowCounts = new Array(children.length);
-			scrollLines = [];
-			pinnedLines = [];
-			// Start of every scroll-region block, ascending, terminated by the
-			// total row count. Blocks are one level below the scroll children,
-			// because a transcript is a single child holding one block per turn.
-			const blockStarts: number[] = [];
-			for (let i = 0; i < children.length; i++) {
-				const rows = refs[i]!;
-				rowCounts[i] = rows.length;
-				if (i < pinnedFrom) {
-					// One blank leading row, once the scroll region has content.
-					// Emitting it as content rather than as chrome is what makes
-					// it disappear on the first notch of an upward scroll.
-					if (scrollLines.length === 0 && rows.length > 0) scrollLines.push("");
-					const childStart = scrollLines.length;
-					const child = children[i]!;
-					const inner = child instanceof Container ? child.memoizedChildRowCounts() : undefined;
-					if (inner === undefined) {
-						if (rows.length > 0) blockStarts.push(childStart);
-					} else {
-						let at = childStart;
-						for (const count of inner) {
-							if (count > 0) blockStarts.push(at);
-							at += count;
-						}
-					}
-					for (let j = 0; j < rows.length; j++) scrollLines.push(rows[j]!);
-				} else {
-					for (let j = 0; j < rows.length; j++) pinnedLines.push(rows[j]!);
-				}
+			const child = children[i]!;
+			const rows = child.render(contentWidth);
+			rowCounts[i] = rows.length;
+			if (i < pinnedFrom) {
+				// One blank leading row, once the scroll region has content.
+				// Emitting it as content rather than as chrome is what makes it
+				// disappear on the first notch of an upward scroll.
+				if (scrollLines.length === 0 && rows.length > 0) scrollLines.push("");
+				const childStart = scrollLines.length;
+				for (const local of this.#localBlockStarts(child, rows.length)) blockStarts.push(childStart + local);
+				for (let j = 0; j < rows.length; j++) scrollLines.push(rows[j]!);
+			} else {
+				for (let j = 0; j < rows.length; j++) pinnedLines.push(rows[j]!);
 			}
-			blockStarts.push(scrollLines.length);
-			this.#fullscreenScrollLead = scrollLines.length > 0 ? 1 : 0;
-			this.#composeCacheWidth = contentWidth;
-			this.#composeCachePinnedFrom = pinnedFrom;
-			this.#composeCacheRefs = refs;
-			this.#composeCacheRowCounts = rowCounts;
-			this.#composeCachePinnedLines = pinnedLines;
-			this.#composeCacheBlockStarts = blockStarts;
 		}
+		blockStarts.push(scrollLines.length);
+		this.#fullscreenScrollLead = scrollLines.length > 0 ? 1 : 0;
+		this.#blockStarts = blockStarts;
 
 		// Bottom chrome gets the rows it asks for, but never the whole screen:
 		// a composer expanded to twenty lines must not squeeze the transcript to
@@ -5877,14 +5882,15 @@ export class TUI extends Container {
 	 * carry no content: a card whose padding row is on screen together with its
 	 * body is drawing its own top edge and must be left alone.
 	 *
-	 * "Content" deliberately excludes the first content column, which a block
-	 * reserves for a left rail (see the user card's accent rail). The rail is
-	 * painted down every row a card owns, padding included, so counting it as
-	 * content would make an all-padding remnant look occupied.
+	 * A block may draw a one-column left rail down every row it owns, padding
+	 * included (see the user card's accent rail), so column 0 is discounted —
+	 * but only when the clipped-away part of the same block carries the same
+	 * glyph there, which is what distinguishes a rail from a row whose only
+	 * content happens to sit in the first column.
 	 */
 	#orphanBlockRows(scrollTop: number, viewportRows: number): ((frameRow: number) => boolean) | undefined {
 		if (viewportRows <= 0) return undefined;
-		const starts = this.#composeCacheBlockStarts;
+		const starts = this.#blockStarts;
 		if (starts.length < 2) return undefined;
 		const windowEnd = scrollTop + viewportRows;
 		const lines = this.#fullscreenScrollFrame;
@@ -5901,12 +5907,16 @@ export class TUI extends Container {
 			const to = Math.min(end, windowEnd);
 			// A window narrow enough to sit inside one block hits it from both edges.
 			if (ranges.some(range => range.start === from && range.end === to)) continue;
+			// A clipped block always has a row just outside the window on the
+			// clipped side; its first column is the rail reference.
+			const probe = from > start ? from - 1 : to < end ? to : -1;
+			const rail = probe >= 0 ? this.#firstColumn(Bun.stripANSI(lines[probe] ?? "")) : "";
 			let hasText = false;
 			for (let row = from; row < to && !hasText; row++) {
-				hasText =
-					Bun.stripANSI(lines[row] ?? "")
-						.slice(1)
-						.trim().length > 0;
+				const stripped = Bun.stripANSI(lines[row] ?? "");
+				const head = this.#firstColumn(stripped);
+				const decorative = head === " " || head === "" || (rail !== "" && head === rail);
+				hasText = decorative ? stripped.slice(head.length).trim().length > 0 : stripped.trim().length > 0;
 			}
 			if (hasText) continue;
 			ranges.push({ start: from, end: to });
@@ -5926,6 +5936,46 @@ export class TUI extends Container {
 			else return mid;
 		}
 		return -1;
+	}
+
+	/**
+	 * First display column of an already-stripped row, as a whole code point so
+	 * an astral glyph is not split. Empty when the row is empty.
+	 */
+	#firstColumn(line: string | undefined): string {
+		if (!line) return "";
+		return String.fromCodePoint(line.codePointAt(0)!);
+	}
+
+	/**
+	 * Block starts within one scroll-region child, in that child's own rows.
+	 *
+	 * A child that assembles its own rows reports its ledger directly. A plain
+	 * `Container` is the concatenation of its children, so its memoized child
+	 * row counts are the boundaries — but only when they actually add up to the
+	 * rows it returned, which a subclass that inserts separators or trims blank
+	 * edges breaks. Anything unverifiable degrades to one opaque block, which
+	 * is always safe: an opaque block is never suppressed.
+	 */
+	#localBlockStarts(child: Component, rowCount: number): readonly number[] {
+		if (rowCount <= 0) return NO_BLOCK_STARTS;
+		if (hasBlockRowSpans(child)) {
+			const declared = child.blockStartRows();
+			if (declared !== undefined) return declared;
+		}
+		if (child instanceof Container) {
+			const counts = child.memoizedChildRowCounts();
+			if (counts !== undefined) {
+				const starts: number[] = [];
+				let at = 0;
+				for (const count of counts) {
+					if (count > 0) starts.push(at);
+					at += count;
+				}
+				if (at === rowCount) return starts;
+			}
+		}
+		return ZERO_BLOCK_START;
 	}
 
 	/** Minimum transcript rows the pinned chrome may never take. */

@@ -321,6 +321,30 @@ export class TranscriptContainer
 	}
 
 	/**
+	 * Start row of every block that drew this frame, ascending, in this
+	 * container's own render coordinates.
+	 *
+	 * The fullscreen viewport uses these to tell a whole block from the
+	 * leftover decoration of one it had to clip. The base class's child-row
+	 * memo cannot answer that here: this container assembles `#lines` itself,
+	 * never populates that memo, and inserts a separator row between blocks —
+	 * so its rows are not the concatenation of its children's. The segment
+	 * ledger is the same record {@link publishHitZones} already trusts.
+	 */
+	blockStartRows(): readonly number[] | undefined {
+		const segments = this.#segments;
+		if (segments.length !== this.children.length) return undefined;
+		const starts: number[] = [];
+		for (let i = 0; i < this.children.length; i++) {
+			const segment = segments[i];
+			if (segment === undefined || segment.component !== this.children[i]) return undefined;
+			if (segment.rowCount <= 0) continue;
+			starts.push(segment.startRow);
+		}
+		return starts;
+	}
+
+	/**
 	 * Publish each block's hit zones at the frame rows its content actually
 	 * landed on.
 	 *
@@ -342,6 +366,10 @@ export class TranscriptContainer
 			// Publishing at a guessed row would hand its neighbour's rows away.
 			if (segment === undefined || segment.component !== child || segment.rowCount <= 0) continue;
 			if (!isHitZoneProvider(child)) continue;
+			// Blocks the frame cannot show own no reachable zone, and publishing
+			// them is the whole per-frame cost of a long transcript: the walk
+			// descends every card and allocates a zone per header.
+			if (!sink.intersectsWindow(segment.startRow, segment.rowCount)) continue;
 			// The block's local row 0 is its raw render row 0, which assembly
 			// placed after the separator and after the rows it trimmed off the head.
 			const localRowZero = segment.startRow + segment.sep - leadingTrimmedRows(segment.rawRef);

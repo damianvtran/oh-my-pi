@@ -13,7 +13,7 @@ import { bottomBorder, row, topBorder, topChromeRows } from "./overlay-box";
 const MIN_BODY_ROWS = 5;
 /** Keep the usage modal subordinate to the conversation behind it. */
 const HEIGHT_FRACTION = 0.65;
-const FOOTER_HINT = "↑/↓ scroll · PgUp/PgDn page · Home/End · Esc/q close";
+const FOOTER_HINT = "↑/↓ or wheel scroll · PgUp/PgDn page · Home/End jump · Esc/q close";
 /** Rows a wheel notch moves inside the panel, matching the transcript's step. */
 const WHEEL_SCROLL_ROWS = 3;
 
@@ -56,12 +56,14 @@ export class UsageOverlayComponent implements Component, MouseRoutable {
 	/**
 	 * Wheel over the panel scrolls the panel. The engine only calls this for
 	 * reports that landed inside the overlay's own rectangle, so there is no
-	 * position test to repeat here.
+	 * position test to repeat here. Everything else is declined so the engine
+	 * stays free to route it — this panel owns no clickable regions.
 	 */
-	routeMouse(event: SgrMouseEvent): void {
-		if (event.wheel === null) return;
+	routeMouse(event: SgrMouseEvent): boolean {
+		if (event.wheel === null) return false;
 		this.#scrollView.scroll(event.wheel * WHEEL_SCROLL_ROWS);
 		this.#tui.requestRender();
+		return true;
 	}
 
 	handleInput(data: string): void {
@@ -93,7 +95,7 @@ export class UsageOverlayComponent implements Component, MouseRoutable {
 			// `renderUsageReports` carries its own plain-text heading for CLI and
 			// transcript callers. The floating panel already owns a titled chrome
 			// row, so keeping both would render “Usage” twice.
-			if (lines[0] && /^Usage(?:\\s|$)/.test(Bun.stripANSI(lines[0]))) lines.shift();
+			if (lines[0] && /^Usage(?:\s|$)/.test(Bun.stripANSI(lines[0]))) lines.shift();
 			this.#scrollView.setLines(lines);
 			this.#lineCount = lines.length;
 			this.#renderedWidth = innerWidth;

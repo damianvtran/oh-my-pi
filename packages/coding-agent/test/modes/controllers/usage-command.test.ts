@@ -82,7 +82,14 @@ describe("CommandController /usage", () => {
 		expect(showOverlay).toHaveBeenCalledTimes(1);
 		const overlay = showOverlay.mock.calls[0]?.[0];
 		const output = renderPresentedBlocks(overlay);
-		expect(output).toContain("Usage");
+		// The panel owns a titled chrome row, so the report body's own "Usage"
+		// heading is dropped. That heading always carries an age, which a broken
+		// escape in the matcher silently failed to match — printing the title
+		// twice on every open.
+		expect(output.match(/Usage/g)).toHaveLength(1);
+		expect(output).not.toMatch(/Usage \(/);
+		// The wheel is the affordance a reader cannot otherwise discover.
+		expect(output).toContain("wheel scroll");
 		expect(output).toContain("Esc/q close");
 		overlay.handleInput("\x1b");
 		expect(hideOverlay).toHaveBeenCalledTimes(1);
