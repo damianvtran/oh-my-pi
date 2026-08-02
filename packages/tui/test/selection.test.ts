@@ -12,6 +12,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import { bandForLine, extractSelectionText, highlightLineSpan, Selection, textEndColumn } from "../src/selection";
+import { encodeTextSized } from "../src/utils";
 
 const WIDTH = 20;
 /** A card row: two columns of inset, the text, then fill out to the width. */
@@ -37,6 +38,10 @@ describe("textEndColumn", () => {
 
 	it("does not count SGR runs as content", () => {
 		expect(textEndColumn(`\x1b[48;5;236m${CARD_ROW}\x1b[0m`)).toBe(7);
+	});
+
+	it("counts the visible cells in a scaled OSC 66 span", () => {
+		expect(textEndColumn(encodeTextSized("Hi", { scale: 2 }))).toBe(4);
 	});
 
 	it("reports zero for a row that is only fill", () => {
@@ -142,5 +147,11 @@ describe("extractSelectionText", () => {
 		const rows = [CARD_ROW, "assistant".padEnd(WIDTH, " ")];
 		const multi = { start: { row: 0, col: 0 }, end: { row: 1, col: WIDTH - 1 } };
 		expect(extractSelectionText(rows, multi, WIDTH, row => (row === 0 ? 2 : 0))).toBe("hello\nassistant");
+	});
+
+	it("keeps the visible payload of a complete OSC 66 span", () => {
+		const heading = encodeTextSized("Hi", { scale: 2 });
+		const scaledRange = { start: { row: 0, col: 0 }, end: { row: 0, col: 3 } };
+		expect(extractSelectionText([heading], scaledRange, 4)).toBe("Hi");
 	});
 });

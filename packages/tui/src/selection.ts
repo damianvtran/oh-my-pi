@@ -67,7 +67,26 @@ export interface TextBand {
  * `utils.ts` is authoritative.
  */
 const ANSI_PATTERN =
-	/[\x1b\x9b][[\]()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]|\x1b\][\s\S]*?(?:\x07|\x1b\\)/g;
+	/\x1b\][\s\S]*?(?:\x07|\x1b\\)|[\x1b\x9b][[\]()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]/g;
+
+const OSC66_SPAN_PATTERN = /^\x1b\]66;[^;]*;([\s\S]*?)(?:\x07|\x1b\\)$/;
+
+/**
+ * Remove terminal control sequences while retaining Kitty OSC 66's visible
+ * payload. `Bun.stripANSI` and the generic matcher both remove the entire span,
+ * even though the terminal paints its payload.
+ */
+function stripAnsiForClipboard(text: string): string {
+	return text.replace(ANSI_PATTERN, sequence => OSC66_SPAN_PATTERN.exec(sequence)?.[1] ?? "");
+}
+
+/**
+ * Remove non-printing controls but leave complete OSC 66 spans intact so
+ * `visibleWidth()` can account for their scale and explicit cell width.
+ */
+function stripInvisibleAnsi(text: string): string {
+	return text.replace(ANSI_PATTERN, sequence => (OSC66_SPAN_PATTERN.test(sequence) ? sequence : ""));
+}
 
 /**
  * Column after the last non-blank cell of a rendered row.
@@ -76,9 +95,8 @@ const ANSI_PATTERN =
  * the whole row) do not count as content.
  */
 export function textEndColumn(line: string): number {
-	const stripped = line.replace(ANSI_PATTERN, "");
-	const trimmed = stripped.replace(/\s+$/, "");
-	return trimmed.length === 0 ? 0 : visibleWidth(trimmed);
+	const visible = stripInvisibleAnsi(line).trimEnd();
+	return visible.length === 0 ? 0 : visibleWidth(visible);
 }
 
 /**
@@ -303,7 +321,7 @@ export function extractSelectionText(
 			continue;
 		}
 		const slice = sliceWithWidth(line, span.start, span.end - span.start, true);
-		rows.push(slice.text.replace(ANSI_PATTERN, "").replace(/\s+$/, ""));
+		rows.push(stripAnsiForClipboard(slice.text).replace(/\s+$/, ""));
 	}
 	// A single-row selection is an inline fragment; a multi-row one is lines.
 	return rows.join("\n");
