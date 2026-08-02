@@ -15,10 +15,12 @@
  * the chrome, and the copy click did not exist.
  */
 import { beforeEach, describe, expect, it } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { BashExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/bash-execution";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
 import { CollabPromptMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/collab-prompt-message";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/eval-execution";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
@@ -29,6 +31,8 @@ import {
 	UserMessageComponent,
 } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "../../tui/test/render-stress-scheduler";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
@@ -93,6 +97,65 @@ async function mountWith(
 		return rows.findIndex(line => line.includes(needle));
 	};
 	return { tui, term, copied, settle, rowOf };
+}
+
+const retainedExecutions: AgentMessage[] = [
+	{
+		role: "bashExecution",
+		command: "printf retained",
+		output: LONG_OUTPUT,
+		exitCode: 0,
+		cancelled: false,
+		truncated: false,
+		timestamp: 0,
+	},
+	{
+		role: "pythonExecution",
+		code: "print('retained')",
+		output: LONG_OUTPUT,
+		exitCode: 0,
+		cancelled: false,
+		timestamp: 0,
+		truncated: false,
+	},
+];
+
+function populateRetainedViaUiHelpers(
+	transcript: TranscriptContainer,
+	tui: TUI,
+	messages: readonly AgentMessage[],
+): void {
+	const helpers = new UiHelpers({
+		chatContainer: transcript,
+		transcriptMessageComponents: new WeakMap(),
+		viewSession: { extensionRunner: undefined, sessionManager: { putBlobSync: () => "unused" } },
+		ui: tui,
+		settings: { get: () => false },
+		toolOutputExpanded: false,
+	} as unknown as InteractiveModeContext);
+	for (const message of messages) helpers.addMessageToChat(message);
+}
+
+function populateRetainedViaTranscriptBuilder(
+	transcript: TranscriptContainer,
+	tui: TUI,
+	messages: readonly AgentMessage[],
+): void {
+	const builder = new ChatTranscriptBuilder({
+		ui: tui,
+		cwd: "/tmp",
+		requestRender: () => tui.requestRender(),
+	});
+	builder.rebuild(
+		messages.map((message, index) => ({
+			type: "message",
+			id: `retained-${index}`,
+			parentId: index === 0 ? null : `retained-${index - 1}`,
+			timestamp: new Date(index).toISOString(),
+			message,
+		})),
+	);
+	transcript.addChild(builder.container);
 }
 
 async function mount(active: Theme): Promise<Harness> {
@@ -314,6 +377,81 @@ describe("transcript copy gesture", () => {
 
 		expect(harness.copied).toEqual([`Eval (python):\n\nprint('long')\n\nOutput:\n${LONG_OUTPUT}`]);
 	});
+
+	it("copies a failed bash execution's complete streamed output", async () => {
+		let bash: BashExecutionComponent;
+		const harness = await mountWith(active, (transcript, tui) => {
+			bash = new BashExecutionComponent("printf failed", tui);
+			bash.appendOutput(LONG_OUTPUT);
+			// This second chunk lands inside the display throttle window. It is
+			// absent from getOutput(), but a failed execution must still copy it.
+			bash.appendOutput("\nlate tail");
+			bash.setComplete(undefined, false);
+			transcript.addChild(bash);
+		});
+		const rendered = Bun.stripANSI(harness.term.getViewport().join("\n"));
+		expect(rendered).toContain("visible columns omitted");
+		expect(rendered).not.toContain(LONG_OUTPUT);
+		expect(bash!.getOutput()).toContain("visible columns omitted");
+		expect(bash!.getOutput()).not.toContain("late tail");
+
+		harness.tui.scrollTo(0);
+		await harness.settle();
+		const row = harness.rowOf("$ printf failed");
+		expect(row).toBeGreaterThanOrEqual(0);
+		click(harness.term, row, 10, 8);
+
+		expect(harness.copied).toEqual([`Bash:\n\nprintf failed\n\nOutput:\n${LONG_OUTPUT}\nlate tail`]);
+	});
+
+	it("copies a failed eval execution's complete streamed output", async () => {
+		let evalBlock: EvalExecutionComponent;
+		const harness = await mountWith(active, (transcript, tui) => {
+			evalBlock = new EvalExecutionComponent("print('failed')", tui);
+			evalBlock.appendOutput(LONG_OUTPUT);
+			evalBlock.setComplete(undefined, false);
+			transcript.addChild(evalBlock);
+		});
+		const rendered = Bun.stripANSI(harness.term.getViewport().join("\n"));
+		expect(rendered).toContain("chars omitted");
+		expect(rendered).not.toContain(LONG_OUTPUT);
+		expect(evalBlock!.getOutput()).toContain("chars omitted");
+
+		harness.tui.scrollTo(0);
+		await harness.settle();
+		const row = harness.rowOf(">>>");
+		expect(row).toBeGreaterThanOrEqual(0);
+		click(harness.term, row, 10, 8);
+
+		expect(harness.copied).toEqual([`Eval (python):\n\nprint('failed')\n\nOutput:\n${LONG_OUTPUT}`]);
+	});
+
+	for (const [path, populate] of [
+		["interactive rebuild", populateRetainedViaUiHelpers],
+		["parked transcript builder", populateRetainedViaTranscriptBuilder],
+	] as const) {
+		for (const message of retainedExecutions) {
+			it(`copies complete retained ${message.role} output through the ${path}`, async () => {
+				const harness = await mountWith(active, (transcript, tui) => populate(transcript, tui, [message]));
+				const rendered = Bun.stripANSI(harness.term.getViewport().join("\n"));
+				const isBash = message.role === "bashExecution";
+				expect(rendered).toContain(isBash ? "visible columns omitted" : "chars omitted");
+				expect(rendered).not.toContain(LONG_OUTPUT);
+
+				harness.tui.scrollTo(0);
+				await harness.settle();
+				const row = harness.rowOf(isBash ? "$ printf retained" : ">>>");
+				expect(row).toBeGreaterThanOrEqual(0);
+				click(harness.term, row, 10, 8);
+
+				expect(harness.copied).toEqual([
+					isBash
+						? `Bash:\n\nprintf retained\n\nOutput:\n${LONG_OUTPUT}`
+						: `Eval (python):\n\nprint('retained')\n\nOutput:\n${LONG_OUTPUT}`,
+				]);
+			});
+		}
+	}
 
 	it("copies a collab guest's attribution and original prose", async () => {
 		const harness = await mountWith(active, transcript => {

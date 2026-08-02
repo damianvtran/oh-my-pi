@@ -6,6 +6,7 @@
 import { Container, type HitZoneSink, type Loader, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { highlightCode, theme } from "../../modes/theme/theme";
+import { DEFAULT_MAX_BYTES, TailBuffer } from "../../session/streaming-output";
 import type { TruncationMeta } from "../../tools/output-meta";
 import { BlockCard, CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import {
@@ -31,6 +32,8 @@ export class EvalExecutionComponent extends Container {
 	#outputLines: string[] = [];
 	/** Sanitized final output retained independently of display-line clamping. */
 	#copyOutput = "";
+	/** Bounded source for exceptional completions that never return a final OutputSink summary. */
+	#streamCopyOutput = new TailBuffer(DEFAULT_MAX_BYTES);
 	#status: ExecutionStatus = "running";
 	#exitCode: number | undefined = undefined;
 	#loader: Loader;
@@ -130,8 +133,11 @@ export class EvalExecutionComponent extends Container {
 	}
 
 	appendOutput(chunk: string): void {
-		// Chunk is pre-sanitized by OutputSink.push() — no need to sanitize again.
-		const newLines = chunk.split("\n").map(line => this.#clampDisplayLine(line));
+		const clean = sanitizeText(chunk);
+		this.#streamCopyOutput.append(clean);
+		// Normalize defensively because component callers outside the executor may
+		// provide raw terminal controls.
+		const newLines = clean.split("\n").map(line => this.#clampDisplayLine(line));
 		if (this.#outputLines.length > 0 && newLines.length > 0) {
 			this.#outputLines[this.#outputLines.length - 1] = this.#clampDisplayLine(
 				`${this.#outputLines[this.#outputLines.length - 1]}${newLines[0]}`,
@@ -211,12 +217,13 @@ export class EvalExecutionComponent extends Container {
 	#setOutput(output: string): void {
 		const clean = sanitizeText(output);
 		this.#copyOutput = clean;
+		this.#streamCopyOutput = new TailBuffer(DEFAULT_MAX_BYTES);
 		this.#outputLines = clean ? clean.split("\n").map(line => this.#clampDisplayLine(line)) : [];
 	}
 
 	/** Cell source and complete retained output, independent of the collapsed preview. */
 	#copySource(): string {
-		const output = (this.#copyOutput || this.getOutput()).trimEnd();
+		const output = (this.#copyOutput || this.#streamCopyOutput.text() || this.getOutput()).trimEnd();
 		const code = `Eval (${this.language}):\n\n${this.code}`;
 		return output.length > 0 ? `${code}\n\nOutput:\n${output}` : code;
 	}
