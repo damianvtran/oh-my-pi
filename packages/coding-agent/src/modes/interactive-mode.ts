@@ -158,11 +158,12 @@ import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
 import { CodexResetFireworksController } from "./components/codex-reset-fireworks";
+import { CARD_PADDING_X } from "./components/collapsible-block";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import { ErrorBannerComponent } from "./components/error-banner";
 import type { EvalExecutionComponent } from "./components/eval-execution";
-import { HomeComposer, HomeScreen } from "./components/home-screen";
+import { HomeColumn, HomeScreen } from "./components/home-screen";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
@@ -534,7 +535,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	modelCycleContainer: Container;
 	deferredCommandContainer: Container;
 	editor: CustomEditor;
-	editorContainer: HomeComposer;
+	editorContainer: HomeColumn;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
@@ -637,7 +638,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * The fullscreen toast row. Pinned above the composer, holding at most one
 	 * {@link Text}; see {@link showTransientStatus}.
 	 */
-	readonly #transientStatusContainer = new Container();
+	readonly #transientStatusContainer = new HomeColumn();
 	#transientStatusText: Text | undefined = undefined;
 	#transientStatusTimer: NodeJS.Timeout | undefined = undefined;
 	fileSlashCommands: Set<string> = new Set();
@@ -864,7 +865,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hookWidgetContainerAbove = new Container();
 		this.hookWidgetContainerAbove.addChild(new Spacer(1));
 		this.hookWidgetContainerBelow = new Container();
-		this.editorContainer = new HomeComposer();
+		this.editorContainer = new HomeColumn();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
@@ -1019,8 +1020,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * Take the home screen down, once. Runs from the transcript's first block,
 	 * before the frame that paints it, so a centred composer and a transcript
 	 * are never on screen together.
+	 *
+	 * `fileNotices` is false when the transcript is being reset rather than
+	 * written to: the parked run describes the startup of the session being
+	 * thrown away, and filing it would replay the update banner and the MCP
+	 * summary into a brand-new conversation as its first content.
 	 */
-	#dismissHomeScreen(): void {
+	#dismissHomeScreen(options?: { fileNotices?: boolean }): void {
 		const home = this.#homeScreen;
 		if (!home) return;
 		this.#homeScreen = undefined;
@@ -1030,9 +1036,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		// still reads before the message that ended the home screen.
 		const parked = [...home.notices.children];
 		home.notices.clear();
-		if (parked.length > 0) this.present(parked);
+		if (options?.fileNotices !== false && parked.length > 0) this.present(parked);
 		home.dismiss(this.ui, this.editorContainer);
+		// The toast shares the home column while the home screen is up, so a
+		// status and the notice above it line up; once the transcript owns the
+		// window it goes back to full width with everything else pinned there.
+		this.#transientStatusContainer.setCentered(false);
 		this.ui.requestRender();
+	}
+
+	/** Drop the pinned toast and its pending expiry, if either is live. */
+	#clearTransientStatus(): void {
+		clearTimeout(this.#transientStatusTimer);
+		this.#transientStatusTimer = undefined;
+		this.#transientStatusText = undefined;
+		this.#transientStatusContainer.disposeChildren();
 	}
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
@@ -1128,6 +1146,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.chatContainer.removeChild(parked);
 				this.#homeScreen.notices.addChild(parked);
 			}
+			this.#transientStatusContainer.setCentered(true);
 			// Every path into the transcript ends here, which is the only condition
 			// that covers a submitted message, a resumed session, a slash command's
 			// output and a deferred startup notice alike.
@@ -4615,6 +4634,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	resetTranscript(): void {
 		this.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
+		// The home screen and the toast are pinned chrome, so clearing the
+		// transcript alone leaves them on screen: `/new` from a session that never
+		// got past the home screen used to strand its update banner and MCP
+		// summary at the top of the fresh conversation, because the confirmation
+		// line is itself a first block and dismissal filed the parked run behind
+		// it. Take them down first, and discard rather than file.
+		this.#dismissHomeScreen({ fileNotices: false });
+		this.#clearTransientStatus();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
 	}
@@ -4641,13 +4668,19 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#transientStatusText.setStyleFn(styleFn);
 			this.#transientStatusText.setText(message);
 		} else {
-			this.#transientStatusText = new Text(message, 1, 0).setStyleFn(styleFn);
+			// CARD_PADDING_X, not 1: the toast is the only pinned row that is not a
+			// card, and a single column of inset would leave it one short of the
+			// column every card, the hint row and the composer text share.
+			//
+			// `setIgnoreTight` for the same reason `BlockCard` sets it — tight
+			// layout shaves a column off decorative padding, but this inset is the
+			// shared column itself, and losing it puts the toast out of line with
+			// everything above it.
+			this.#transientStatusText = new Text(message, CARD_PADDING_X, 0).setIgnoreTight(true).setStyleFn(styleFn);
 			this.#transientStatusContainer.addChild(this.#transientStatusText);
 		}
 		this.#transientStatusTimer = setTimeout(() => {
-			this.#transientStatusTimer = undefined;
-			this.#transientStatusText = undefined;
-			this.#transientStatusContainer.disposeChildren();
+			this.#clearTransientStatus();
 			this.ui.requestRender();
 		}, TRANSIENT_STATUS_MS);
 		this.#transientStatusTimer.unref?.();

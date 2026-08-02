@@ -15,7 +15,7 @@
  *
  * The vertical half of the centring belongs to the engine
  * ({@link TUI.setCenterPinned}, which self-disables as soon as the scroll
- * region has rows); the horizontal half is {@link HomeComposer}.
+ * region has rows); the horizontal half is {@link HomeColumn}.
  *
  * Everything here renders zero rows outside the fullscreen viewport, where the
  * welcome box is still the startup surface and must stay byte-identical.
@@ -155,6 +155,11 @@ export class HomeHeader implements Component {
 /**
  * Affordance run: the hint row and the session tip, below the composer.
  *
+ * Rendered inside a {@link HomeColumn}, so `width` here is already the column,
+ * not the window: the only inset this adds is the card padding every other
+ * surface on the column adds. It previously re-derived the gutter itself, which
+ * is how it drifted a column away from the notices beside it.
+ *
  * The hints are left-aligned on the composer's own text column rather than
  * centred, which is what stops the block reading as a poster; the tip is
  * centred under it the way opencode's is.
@@ -175,12 +180,11 @@ export class HomeHints implements Component {
 	render(width: number): readonly string[] {
 		if (!isFullscreenViewport()) return NO_ROWS;
 		if (this.#cachedLines && this.#cachedWidth === width) return this.#cachedLines;
-		const panelWidth = homeComposerWidth(width);
 		// The composer's text starts one panel padding in from the panel edge;
 		// the hint row lines up with it, not with the panel's left edge.
-		const textColumn = composerInset(width) + CARD_PADDING_X;
+		const textColumn = CARD_PADDING_X;
 		const lines = ["", padding(textColumn) + this.#hintRow(Math.max(0, width - textColumn))];
-		const tip = this.#tip ? renderWelcomeTip(this.#tip, panelWidth) : [];
+		const tip = this.#tip ? renderWelcomeTip(this.#tip, width) : [];
 		if (tip.length > 0) lines.push("", ...centerBlock(tip, width));
 		this.#cachedLines = lines;
 		this.#cachedWidth = width;
@@ -202,16 +206,20 @@ export class HomeHints implements Component {
 }
 
 /**
- * The composer's root container, which narrows and centres its child while the
- * home screen is up.
+ * A container that narrows and centres its children onto the home screen's
+ * column while the home screen is up, and is a plain passthrough otherwise.
  *
- * The editor is rendered at the narrow width and then shifted right, so the
- * panel fill it paints is exactly the panel the user sees, and the canvas shows
+ * Used for both the composer and the parked notices, so an update banner sits
+ * on exactly the same columns as the prompt beneath it instead of running the
+ * full width of the window while everything around it is centred.
+ *
+ * Children are rendered at the narrow width and then shifted right, so a panel
+ * fill they paint is exactly the panel the user sees and the canvas shows
  * through on both sides. Published columns are shifted by the same gutter,
  * which is what keeps click-to-caret landing on the character under the
  * pointer; the engine adds the window gutter on top of that.
  */
-export class HomeComposer extends Container {
+export class HomeColumn extends Container {
 	#centered = false;
 	// The inset the current rows were rendered with, so zones cannot be
 	// published against a width the frame was not painted at.
@@ -269,12 +277,25 @@ export class HomeScreen {
 	 * chrome for as long as there is no conversation to file them under; the
 	 * host moves them into the transcript when the home screen comes down, so
 	 * nothing an MCP server or an update check reported is lost.
+	 *
+	 * On the home column, not full width: an update banner is a card, and a card
+	 * stretched across the whole window above a two-thirds composer reads as a
+	 * different kind of object. Once filed into the transcript it goes back to
+	 * full width with every other block, which is correct there.
 	 */
-	readonly notices = new Container();
-	readonly hints = new HomeHints();
+	readonly notices = new HomeColumn();
+	/**
+	 * Hint row and tip, on the same column as the notices and the composer. The
+	 * column is applied here rather than inside {@link HomeHints} so there is one
+	 * place that knows the gutter.
+	 */
+	readonly hints = new HomeColumn();
 
 	constructor(version: string, modelName: string, providerName: string) {
 		this.header = new HomeHeader(version, modelName, providerName);
+		this.notices.setCentered(true);
+		this.hints.setCentered(true);
+		this.hints.addChild(new HomeHints());
 	}
 
 	/**
@@ -286,7 +307,7 @@ export class HomeScreen {
 	 * visible; coming down has no order to get wrong, and doing it in one place
 	 * is what stops a half-dismissed home screen from being reachable.
 	 */
-	dismiss(ui: TUI, composer: HomeComposer): void {
+	dismiss(ui: TUI, composer: HomeColumn): void {
 		ui.setCenterPinned(false);
 		composer.setCentered(false);
 		ui.removeChild(this.header);
