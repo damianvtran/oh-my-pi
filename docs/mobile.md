@@ -474,12 +474,22 @@ hosting a room nothing aggregates.
 So every interactive launch, when `collab.autoStart` is on, probes both health
 endpoints and heals what is down. It:
 
-- **never blocks the agent** — it runs unawaited and stays silent on failure,
-  because a relay that will not start costs phone access, not your session;
+- **never blocks the agent** — nothing on the way to the prompt awaits it, and
+  it stays silent on failure, because a relay that will not start costs phone
+  access, not your session;
 - **is safe with many terminals at once** — a job that is merely still starting
   is left alone, and only a loaded-but-dead job is kicked. (An earlier version
   kickstarted anything not yet answering, and eight simultaneous launches spent
-  seconds restarting each other's instance.)
+  seconds restarting each other's instance.) A job launchd already reports as
+  `running` gets a much longer grace than a merely loaded one: at login the
+  stack pages in cold and the relay can take the better part of twenty seconds
+  to bind.
+- **gates auto-start hosting** — the host attempt is sequenced behind the heal
+  rather than racing it. A session launched at login (a restored terminal
+  workspace, a window macOS reopened) otherwise beats launchd to the relay, and
+  a first connect that fails is terminal: the host reconnects a connection it
+  *lost*, never one that never opened, so the room is silently never published.
+  The whole chain stays unawaited, so the prompt is not delayed;
 - **respects `omp mobile stop`** — that clears `enabled` in the install record,
   and the healer honours it. Use `omp mobile start` to bring them back.
 
@@ -508,8 +518,10 @@ something does not answer, so it works as a monitor check.
 **No sessions listed.** Sessions only publish rooms with `collab.autoStart` set
 to `full` or `view` and `collab.publishLink` on — `omp mobile status` prints
 both, and flags a `collab.relayUrl` that points somewhere other than the relay it
-installed. Sessions started before the relay came up do not retroactively host;
-restart them.
+installed. A session started while the relay was still coming up now waits for
+the healer before it hosts, so the login race no longer leaves one silently
+unpublished; a session that predates the relay's *install*, or that failed to
+host anyway, does not retroactively host. Restart it, or type `/collab` in it.
 
 **`omp mobile status` shows the services running but nothing reachable.** Read
 the service log: `omp mobile logs --service portal`. The most common cause is a
