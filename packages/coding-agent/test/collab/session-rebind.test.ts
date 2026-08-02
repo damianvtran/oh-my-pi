@@ -59,12 +59,24 @@ function makeEntry(id: string, text: string): SessionEntry {
 }
 
 /**
+ * Test seam the real `SessionManager` does not need: production code fires the
+ * subscribers from `#setSessionId`, and the double has no id writes to hang that
+ * off, so the harness drives them directly.
+ */
+interface SessionIdTap {
+	notifySessionIdChanged: (sessionId: string) => void;
+	sessionIdListenerCount: () => number;
+}
+
+/**
  * Minimal InteractiveModeContext double: only the members `CollabHost` touches.
  * `sessionManager` reads through `loaded`, so {@link switchSession} reproduces
  * what a resume does to the real manager — adopt a new id/cwd/transcript, then
- * fire the `onSessionIdChanged` tap the manager funnels every id write through.
+ * notify the `onSessionIdChanged` subscribers the manager funnels every id write
+ * through.
  */
 function makeHostContext(loaded: LoadedSession): InteractiveModeContext {
+	const sessionIdListeners = new Set<(sessionId: string) => void>();
 	return {
 		settings: { get: () => "" },
 		sessionManager: {
@@ -75,7 +87,16 @@ function makeHostContext(loaded: LoadedSession): InteractiveModeContext {
 				entries: loaded.entries,
 			}),
 			onEntryAppended: undefined,
-			onSessionIdChanged: undefined,
+			onSessionIdChanged: (listener: (sessionId: string) => void) => {
+				sessionIdListeners.add(listener);
+				return () => {
+					sessionIdListeners.delete(listener);
+				};
+			},
+			notifySessionIdChanged: (sessionId: string) => {
+				for (const listener of sessionIdListeners) listener(sessionId);
+			},
+			sessionIdListenerCount: () => sessionIdListeners.size,
 		},
 		session: {
 			isStreaming: false,
@@ -99,7 +120,7 @@ function makeHostContext(loaded: LoadedSession): InteractiveModeContext {
 
 function switchSession(ctx: InteractiveModeContext, loaded: LoadedSession, next: Partial<LoadedSession>): void {
 	Object.assign(loaded, next);
-	ctx.sessionManager.onSessionIdChanged?.(loaded.id);
+	(ctx.sessionManager as unknown as SessionIdTap).notifySessionIdChanged(loaded.id);
 }
 
 /** One `welcome` plus the `snapshot-chunk` train that followed it. */
@@ -291,7 +312,7 @@ describe("collab host session rebind", () => {
 		try {
 			expect(await guest.next()).toEqual({ sessionId: "sess-a", entryIds: ["a1"] });
 			// No session tap: a room that does not follow the session must not install one.
-			expect(ctx.sessionManager.onSessionIdChanged).toBeUndefined();
+			expect((ctx.sessionManager as unknown as SessionIdTap).sessionIdListenerCount()).toBe(0);
 
 			switchSession(ctx, loaded, { id: "sess-b", entries: [makeEntry("b1", "resumed")] });
 			// The stop is lazy: it fires on the first frame that would describe the

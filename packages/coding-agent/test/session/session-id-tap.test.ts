@@ -46,7 +46,7 @@ describe("SessionManager.onSessionIdChanged", () => {
 
 			const manager = SessionManager.create(cwd, sessionDir);
 			const observed: string[] = [];
-			manager.onSessionIdChanged = sessionId => observed.push(sessionId);
+			manager.onSessionIdChanged(sessionId => observed.push(sessionId));
 
 			// `/new`: a minted id the tap must report.
 			await manager.newSession();
@@ -93,13 +93,50 @@ describe("SessionManager.onSessionIdChanged", () => {
 			const resumable = await writeSession(sessionDir, "target-session", cwd);
 
 			const manager = SessionManager.create(cwd, sessionDir);
-			manager.onSessionIdChanged = () => {
+			manager.onSessionIdChanged(() => {
 				throw new Error("observer exploded");
-			};
+			});
 
 			await manager.setSessionFile(resumable);
 			expect(manager.getSessionId()).toBe("target-session");
 			expect(manager.getSessionFile()).toBe(resumable);
+		} finally {
+			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("notifies every subscriber, survives a broken one, and stops after unsubscribe", async () => {
+		// Two features subscribe in a real session — the collab room and the cmux
+		// resume binding — so a single-slot tap would silently unhook whichever
+		// registered first, and one throwing observer must not cost the other its
+		// notification.
+		using tempDir = TempDir.createSync("@omp-session-id-tap-multi-");
+		const previousAgentDir = getAgentDir();
+		setAgentDir(path.join(tempDir.path(), "agent"));
+		try {
+			const cwd = path.join(tempDir.path(), "project");
+			const sessionDir = path.join(tempDir.path(), "sessions");
+			await fs.mkdir(sessionDir, { recursive: true });
+			const first = await writeSession(sessionDir, "first-session", cwd);
+			const second = await writeSession(sessionDir, "second-session", cwd);
+
+			const manager = SessionManager.create(cwd, sessionDir);
+			const quiet: string[] = [];
+			const noisy: string[] = [];
+			manager.onSessionIdChanged(sessionId => {
+				noisy.push(sessionId);
+				throw new Error("observer exploded");
+			});
+			const unsubscribe = manager.onSessionIdChanged(sessionId => quiet.push(sessionId));
+
+			await manager.setSessionFile(first);
+			expect(noisy).toEqual(["first-session"]);
+			expect(quiet).toEqual(["first-session"]);
+
+			unsubscribe();
+			await manager.setSessionFile(second);
+			expect(noisy).toEqual(["first-session", "second-session"]);
+			expect(quiet).toEqual(["first-session"]);
 		} finally {
 			setAgentDir(previousAgentDir);
 		}

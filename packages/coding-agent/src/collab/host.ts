@@ -180,6 +180,8 @@ export class CollabHost {
 	#agentsDebounce: Timer | null = null;
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
+	/** Detaches the session-id tap; set only while `#followSession` is on. */
+	#sessionIdUnsubscribe?: () => void;
 	#stopped = false;
 	/** Unregisters the postmortem cleanup; set only while a link file is published. */
 	#unregisterLinkFileCleanup?: () => void;
@@ -385,7 +387,7 @@ export class CollabHost {
 		// started on. Installed alongside the entry tap so a single `#teardown`
 		// detaches both.
 		if (this.#followSession) {
-			this.#ctx.sessionManager.onSessionIdChanged = () => this.#scheduleSessionRebind();
+			this.#sessionIdUnsubscribe = this.#ctx.sessionManager.onSessionIdChanged(() => this.#scheduleSessionRebind());
 		}
 		this.#updateStatusSegment();
 		if (this.#publishLink) await this.#publishLinkFile();
@@ -445,7 +447,8 @@ export class CollabHost {
 		// early-returns once `#stopped` is set.
 		this.#abortStart?.(new Error("collab stopped before the relay handshake completed"));
 		this.#ctx.sessionManager.onEntryAppended = undefined;
-		if (this.#followSession) this.#ctx.sessionManager.onSessionIdChanged = undefined;
+		this.#sessionIdUnsubscribe?.();
+		this.#sessionIdUnsubscribe = undefined;
 		clearTimeout(this.#rebindDebounce ?? undefined);
 		this.#rebindDebounce = null;
 		this.#unsubscribe?.();
