@@ -1071,6 +1071,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
+	/**
+	 * Take the startup chrome down, once, when the transcript gets its first
+	 * block. Fullscreen only — see the mount site in `init`.
+	 *
+	 * Unmounted rather than hidden: `setStartupChromeHidden(false)` runs on the
+	 * way back out of a subagent drill-down and would resurrect a banner the
+	 * conversation has long since moved past.
+	 */
+	#dismissStartupChrome(): void {
+		this.chatContainer.onFirstBlock = undefined;
+		this.ui.removeChild(this.#startupChrome);
+		this.#welcomeComponent = undefined;
+		this.ui.requestRender();
+	}
+
 	/** Drop the pinned toast and its pending expiry, if either is live. */
 	#clearTransientStatus(): void {
 		clearTimeout(this.#transientStatusTimer);
@@ -1179,7 +1194,19 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.chatContainer.onFirstBlock = () => this.#dismissHomeScreen();
 		}
 
-		if (!startupQuiet && !showHomeScreen) {
+		// In the fullscreen viewport the startup chrome is not chrome at all. It
+		// is mounted above the transcript inside the viewport's own scroll
+		// region, and nothing ever clears it, so instead of scrolling away into
+		// terminal scrollback the way it does in append mode it becomes a
+		// permanent first block of the history: above a resumed session's own
+		// messages forever, and after a full repaint (compaction) the only thing
+		// left on screen. A session that resumes with content therefore never
+		// builds it, and one that starts empty gives it up when the conversation
+		// begins, the same deal the home screen gets. Config warnings are
+		// mounted directly on `ui` above rather than in this run, so none of
+		// this can swallow one.
+		const fullscreenResumed = isFullscreenViewport() && this.session.messages.length > 0;
+		if (!startupQuiet && !showHomeScreen && !fullscreenResumed) {
 			// Add welcome header
 			this.#welcomeComponent = new WelcomeComponent(
 				this.#version,
@@ -1216,6 +1243,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 				this.#startupChrome.addChild(new Spacer(1));
 				this.#startupChrome.addChild(new DynamicBorder());
+			}
+			if (isFullscreenViewport()) {
+				// Mutually exclusive with the home screen's claim on the hook: the
+				// two paths never both run.
+				this.chatContainer.onFirstBlock = () => this.#dismissStartupChrome();
 			}
 		}
 		this.ui.addChild(this.#startupChrome);
@@ -1520,6 +1552,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			padX: 2,
 			padTop: 0,
 			padBottom: 1,
+			// Every transcript card insets its body by CARD_PADDING_X, and once a
+			// row is painted that inset is indistinguishable from indented code.
+			// Declaring it here is what lets drag-select and copy stop at the text
+			// instead of cutting a rectangle through the card's padding and rail.
+			textInset: CARD_PADDING_X,
 			// Arrows, not bare method references: these read private state off the
 			// Theme instance, and `theme` is rebound when the user switches theme,
 			// so a captured reference would keep painting the old palette.
@@ -2251,6 +2288,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		// signature is cleared by `EventController`, so this replay is a no-op
 		// post-streaming and cannot duplicate.
 		this.#replayOptimisticUserMessage();
+	}
+
+	/**
+	 * Append the divider for the compaction that just landed.
+	 *
+	 * With `display.collapseCompacted` off the visible transcript does not
+	 * shrink when a compaction fires — only the LLM context does — so every card
+	 * already on screen stays valid and the only new content is the divider.
+	 * Rebuilding instead would recreate all of them, dropping their expand state
+	 * and the reader's scroll position for no visible gain.
+	 *
+	 * The summary is synthesized by the context builder from the `compaction`
+	 * session entry rather than persisted as a message, so no live event carries
+	 * it and there is nothing to render off the normal message flow. Take the
+	 * newest one out of a transcript context so the divider is byte-identical to
+	 * the one a rebuild would have produced (superseded-summary elision and
+	 * re-attached snapcompact frames included).
+	 */
+	appendCompactionDivider(): void {
+		const { messages } = this.viewSession.buildTranscriptSessionContext({ collapseCompactedHistory: false });
+		const summary = messages.findLast(message => message.role === "compactionSummary");
+		if (summary) this.addMessageToChat(summary);
 	}
 
 	#replayOptimisticUserMessage(): void {

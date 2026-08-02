@@ -65,7 +65,8 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 		file = path.join(tmpDir, "mod.ts");
 		await fs.writeFile(file, fileContent);
 		resetSettingsForTest();
-		await Settings.init({ inMemory: true, cwd: tmpDir });
+		// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+		await Settings.init({ inMemory: true, cwd: tmpDir, overrides: { "tui.viewport": "append" } } as never);
 	});
 
 	afterEach(async () => {
@@ -381,12 +382,15 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 
 describe("streaming tool call preview height (bounded across renderers)", () => {
 	beforeAll(async () => {
-		// `evalToolRenderer.renderCall` walks the theme during highlighting; the
-		// bash/eval pending previews exercised below DO NOT read
-		// `settings.*`, so the global Settings singleton is intentionally left
-		// untouched here. Resetting/initialising it in `beforeEach` raced with
-		// parallel test files that do the same dance (issue #2582), flipping the
-		// proxy under us and timing the eval test out.
+		// `evalToolRenderer.renderCall` walks the theme during highlighting. The
+		// pending previews below only read `tui.viewport`, which is pinned to
+		// append here: these assertions are about box-drawn inline previews, not
+		// fullscreen card chrome. The init stays in `beforeAll` — resetting and
+		// initialising in `beforeEach` raced with parallel test files doing the
+		// same dance (issue #2582), flipping the proxy under us and timing the
+		// eval test out.
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		await initTheme();
 	});
 	function renderPending(toolName: string, args: unknown): { lines: readonly string[]; text: string } {

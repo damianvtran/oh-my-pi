@@ -1901,19 +1901,22 @@ export class EventController {
 			}
 		} else if (event.result) {
 			this.ctx.lastAssistantUsage = undefined;
-			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
-			this.ctx.statusLine.invalidate();
 			// When history collapses behind the summary divider, the frame
 			// shrinks far below the committed row count; without clearing, the
 			// differential renderer's "duplication, never loss" resync repaints
 			// the whole collapsed transcript (welcome box included) BELOW the
 			// stale pre-compaction scrollback. Compaction is an intentional
 			// transcript replacement then — same as auto-handoff below. With
-			// collapse disabled the rebuilt transcript keeps the full history,
-			// so the resync handles it and scrollback stays.
+			// collapse disabled the display keeps every pre-compaction message
+			// (only the LLM context shrinks), so there is nothing to rebuild:
+			// the cards on screen are still current and only the divider is new.
 			if (settings.get("display.collapseCompacted")) {
+				this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
+				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 			} else {
+				this.ctx.appendCompactionDivider();
+				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
 			}
 		} else if (event.errorMessage) {

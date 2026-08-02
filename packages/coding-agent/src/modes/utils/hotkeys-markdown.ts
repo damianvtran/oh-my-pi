@@ -19,7 +19,10 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"|-----|--------|",
 		"| `Arrow keys` | Move cursor / browse history (Up when empty) |",
 		`| \`${alt}+Left/Right\` | Move by word |`,
-		isMac ? `| \`Ctrl+A\` / \`Home\` / \`${cmd}+Left\` | Start of line |` : "| `Ctrl+A` / `Home` | Start of line |",
+		// No `Ctrl+A` here: this fork binds it to `tui.editor.selectAll`, whose
+		// branch runs before the line-start one, so advertising it would document
+		// a chord the editor never routes to line start.
+		isMac ? `| \`Home\` / \`${cmd}+Left\` | Start of line |` : "| `Home` | Start of line |",
 		isMac ? `| \`Ctrl+E\` / \`End\` / \`${cmd}+Right\` | End of line |` : "| `Ctrl+E` / `End` | End of line |",
 		"",
 		"**Editing**",
@@ -27,6 +30,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"|-----|--------|",
 		"| `Enter` | Send message |",
 		`| \`Shift+Enter\` / \`${alt}+Enter\` | New line |`,
+		`| \`Ctrl+A\` / \`${cmd}+A\` | Select all — then Backspace or type to replace the draft |`,
 		`| \`Ctrl+W\` / \`${alt}+Backspace\` | Delete word backwards |`,
 		"| `Ctrl+U` | Delete to start of line |",
 		"| `Ctrl+K` | Delete to end of line |",

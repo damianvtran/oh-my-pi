@@ -29,11 +29,39 @@
  * needing to know any of their colours.
  */
 
-import { extractSegments, sliceWithWidth } from "./utils";
+import { extractSegments, sliceWithWidth, visibleWidth } from "./utils";
 
 const SGR_REVERSE = "\x1b[7m";
 const SGR_REVERSE_OFF = "\x1b[27m";
 const SEGMENT_RESET = "\x1b[0m";
+
+/**
+ * Columns of a composed row that hold content rather than card chrome.
+ *
+ * The transcript is painted, not laid out: by the time a row reaches the
+ * selection layer it is a string of cells in which a card's padding, its
+ * filled background and a user card's accent rail are indistinguishable from
+ * text. A rectangular cut over those cells is what put two leading spaces and
+ * a `▌` on the clipboard.
+ *
+ * The two edges are found differently on purpose:
+ *
+ * - The LEFT edge cannot be recovered from the row. Leading spaces are
+ *   meaningful inside a card (indented code, nested list items) and chrome
+ *   outside it, and the glyphs are identical. So the app declares its inset
+ *   once ({@link TUI.setViewportChrome}) and the engine trusts it.
+ * - The RIGHT edge is recovered per row, because every row is padded out to
+ *   the full width and the padding is unambiguously not content.
+ *
+ * This is what makes the transcript behave like the composer, whose selection
+ * is bounded by the length of the line rather than the width of the terminal.
+ */
+export interface TextBand {
+	/** First content column. */
+	readonly start: number;
+	/** One past the last content column. */
+	readonly end: number;
+}
 
 /**
  * Matches CSI/OSC/simple escape sequences. Used only to recover plain text for
@@ -42,6 +70,29 @@ const SEGMENT_RESET = "\x1b[0m";
  */
 const ANSI_PATTERN =
 	/[\x1b\x9b][[\]()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]|\x1b\][\s\S]*?(?:\x07|\x1b\\)/g;
+
+/**
+ * Column after the last non-blank cell of a rendered row.
+ *
+ * Measured on the stripped text so SGR runs (a card's background fill covers
+ * the whole row) do not count as content.
+ */
+export function textEndColumn(line: string): number {
+	const stripped = line.replace(ANSI_PATTERN, "");
+	const trimmed = stripped.replace(/\s+$/, "");
+	return trimmed.length === 0 ? 0 : visibleWidth(trimmed);
+}
+
+/**
+ * Content columns of `line` given the frame-wide `inset`, or null when the row
+ * holds no content at all (a blank spacer, a card's own padding row).
+ */
+export function bandForLine(line: string | undefined, width: number, inset: number): TextBand | null {
+	if (line === undefined) return null;
+	const start = Math.max(0, Math.min(inset, width));
+	const end = Math.min(width - start, textEndColumn(line));
+	return end > start ? { start, end } : null;
+}
 
 /** A point in the composed frame. */
 export interface SelectionPoint {
@@ -136,11 +187,17 @@ export class Selection {
 	}
 
 	/**
-	 * Column span selected on `row`, or null when the row is outside the
-	 * selection. `width` bounds the final row of a multi-row selection so a
+	 * Column span selected on `row`, or null when the row holds no selected
+	 * content. `width` bounds the final row of a multi-row selection so a
 	 * trailing partial row does not claim the whole terminal width.
+	 *
+	 * `line` and `inset` narrow the span to the row's own content
+	 * ({@link bandForLine}), so a drag across a card highlights the text rather
+	 * than a full-width band over its padding and trailing fill. Pass
+	 * `undefined` for `line` to select geometrically, which is what a surface
+	 * with no chrome wants.
 	 */
-	spanForRow(row: number, width: number): { start: number; end: number } | null {
+	spanForRow(row: number, width: number, line?: string, inset = 0): { start: number; end: number } | null {
 		const range = this.range;
 		if (!range) return null;
 		if (row < range.start.row || row > range.end.row) return null;
@@ -148,8 +205,30 @@ export class Selection {
 		// The head cell is included, matching how terminals select: dragging onto
 		// a character selects it rather than stopping just before it.
 		const end = row === range.end.row ? Math.min(width, range.end.col + 1) : width;
-		return end > start ? { start, end } : null;
+		return clampToBand(start, end, line, width, inset);
 	}
+}
+
+/**
+ * Intersect a geometric span with the row's content band.
+ *
+ * Rows outside the band entirely (a blank line inside a multi-row drag, a
+ * card's padding row) collapse to null rather than to a zero-width span, so
+ * callers can tell "nothing here" from "an empty string here".
+ */
+function clampToBand(
+	start: number,
+	end: number,
+	line: string | undefined,
+	width: number,
+	inset: number,
+): { start: number; end: number } | null {
+	if (end <= start) return null;
+	if (line === undefined) return { start, end };
+	const band = bandForLine(line, width, inset);
+	if (!band) return null;
+	const clamped = { start: Math.max(start, band.start), end: Math.min(end, band.end) };
+	return clamped.end > clamped.start ? clamped : null;
 }
 
 /**
@@ -169,9 +248,10 @@ export function highlightLineSpan(line: string, start: number, end: number, widt
 	const spanWidth = clampedEnd - clampedStart;
 	const segments = extractSegments(line, clampedStart, clampedEnd, width - clampedEnd, true);
 
-	// The selected span itself, padded with spaces when the row is shorter than
-	// the selection: selecting past end-of-line must still show a highlight, or
-	// a multi-row drag looks ragged on every short line it crosses.
+	// The span reaching here is already bounded by the row's own content, so a
+	// short row ends its highlight where the text ends rather than washing the
+	// card padding beyond it. The padding below therefore only ever covers a
+	// wide grapheme straddling the final cell.
 	const middle = sliceWithWidth(line, clampedStart, spanWidth, true);
 	const middlePad = " ".repeat(Math.max(0, spanWidth - middle.width));
 	const beforePad = " ".repeat(Math.max(0, clampedStart - segments.beforeWidth));
@@ -192,23 +272,30 @@ export function highlightLineSpan(line: string, start: number, end: number, widt
 /**
  * Recover the plain text a selection covers, for the clipboard.
  *
- * Trailing whitespace is trimmed per row: the frame pads every row to the
- * terminal width, so without this every copied line would carry a tail of
- * spaces out to column 120.
+ * Every row is narrowed to its own content band first, so the card padding and
+ * the accent rail a rectangular cut would otherwise sweep up never reach the
+ * clipboard. Rows that hold no content inside the selection become empty
+ * lines, preserving the blank line between two paragraphs.
  */
-export function extractSelectionText(frame: readonly string[], range: SelectionRange, width: number): string {
+export function extractSelectionText(
+	frame: readonly string[],
+	range: SelectionRange,
+	width: number,
+	inset = 0,
+): string {
 	const rows: string[] = [];
 	for (let row = range.start.row; row <= range.end.row; row++) {
 		const line = frame[row];
 		if (line === undefined) continue;
 		const start = row === range.start.row ? range.start.col : 0;
 		const end = row === range.end.row ? Math.min(width, range.end.col + 1) : width;
-		if (end <= start) {
+		const span = clampToBand(start, end, line, width, inset);
+		if (!span) {
 			rows.push("");
 			continue;
 		}
-		const span = sliceWithWidth(line, start, end - start, true);
-		rows.push(span.text.replace(ANSI_PATTERN, "").replace(/\s+$/, ""));
+		const slice = sliceWithWidth(line, span.start, span.end - span.start, true);
+		rows.push(slice.text.replace(ANSI_PATTERN, "").replace(/\s+$/, ""));
 	}
 	// A single-row selection is an inline fragment; a multi-row one is lines.
 	return rows.join("\n");

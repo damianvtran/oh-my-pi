@@ -1,11 +1,15 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { renderMarkdownCell } from "@oh-my-pi/pi-coding-agent/tui/code-cell";
 import { renderOutputBlock } from "@oh-my-pi/pi-coding-agent/tui/output-block";
 
 describe("renderOutputBlock", () => {
 	beforeAll(async () => {
+		resetSettingsForTest();
+		// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		await initTheme();
 	});
 

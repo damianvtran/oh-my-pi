@@ -1,13 +1,22 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { resetSettingsForTest, Settings } from "../../../src/config/settings";
 import { DynamicBorder } from "../../../src/modes/components/dynamic-border";
 import { getThemeByName, setThemeInstance, theme } from "../../../src/modes/theme/theme";
 
 const componentPath = path.resolve(import.meta.dir, "../../../src/modes/components/dynamic-border.ts");
+const settingsPath = path.resolve(import.meta.dir, "../../../src/config/settings.ts");
 
 describe("DynamicBorder", () => {
+	// Asserts append-mode rendering: the border IS a rule. In the fullscreen
+	// viewport a boundary is a change of fill, so the same row renders blank.
+	beforeAll(async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
+	});
+
 	// Regression for #5366: extensions importing legacy pi UI components get a
 	// second `src` module graph whose module-level `theme` is never assigned by
 	// host startup. `render()` must degrade to plain glyphs instead of throwing
@@ -18,8 +27,14 @@ describe("DynamicBorder", () => {
 	it("renders plain glyphs when the module-level theme is uninitialized", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dynamic-border-"));
 		try {
+			// The child needs the same append premise as the parent, and settings are
+			// process-global: pinning them here does not reach it. It initialises its
+			// own in-memory Settings — that only touches the config singleton, leaving
+			// the module-level `theme` unassigned, which is the state under test.
 			const script = [
+				`import { Settings } from ${JSON.stringify(settingsPath)};`,
 				`import { DynamicBorder } from ${JSON.stringify(componentPath)};`,
+				`await Settings.init({ inMemory: true, cwd: ${JSON.stringify(dir)}, overrides: { "tui.viewport": "append" } });`,
 				'const custom = new DynamicBorder(str => "<" + str + ">");',
 				`if (JSON.stringify(custom.render(4)) !== JSON.stringify(["<────>"])) process.exit(1);`,
 				"const plain = new DynamicBorder();",

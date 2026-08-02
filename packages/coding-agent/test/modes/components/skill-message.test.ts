@@ -24,7 +24,9 @@ describe("SkillMessageComponent", () => {
 	let uiTheme: Theme;
 
 	beforeAll(async () => {
-		await Settings.init({ inMemory: true });
+		// Asserts append-mode rendering: the skill card is drawn with its own rounded
+		// outline, where the fullscreen viewport gives it a borderless filled card.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		const loaded = await getThemeByName("dark");
 		if (!loaded) throw new Error("theme unavailable");
 		uiTheme = loaded;

@@ -80,7 +80,7 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.spyOn(process.stdout, "write").mockReturnValue(true);
 		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
 		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
@@ -90,6 +90,14 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		}
 
 		tempDir = TempDir.createSync("@pi-issue-6879-");
+		// Asserts append-mode rendering: the bash card writes its `$ <command>` echo
+		// into the transcript, which is how this test counts renders. The fullscreen
+		// viewport collapses the card to a click-to-expand header and shows none.
+		await Settings.init({
+			inMemory: true,
+			cwd: tempDir.path(),
+			overrides: { "tui.viewport": "append" },
+		} as never);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
 

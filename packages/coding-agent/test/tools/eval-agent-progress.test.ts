@@ -15,7 +15,8 @@ describe("eval renderer: agent() progress below the cell box", () => {
 
 	beforeAll(async () => {
 		resetSettingsForTest();
-		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+		await Settings.init({ inMemory: true, cwd: process.cwd(), overrides: { "tui.viewport": "append" } } as never);
 		theme = (await getThemeByName("dark"))!;
 		expect(theme).toBeDefined();
 		setThemeInstance(theme);

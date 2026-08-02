@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
+import { resetSettingsForTest, Settings } from "../../../src/config/settings";
 import { CustomEditor } from "../../../src/modes/components/custom-editor";
 import { getEditorTheme, initTheme } from "../../../src/modes/theme/theme";
 
@@ -12,6 +13,13 @@ import { getEditorTheme, initTheme } from "../../../src/modes/theme/theme";
  * 'this.#theme.symbols.boxRound')`.
  */
 describe("CustomEditor upstream-pi constructor compatibility (#4766)", () => {
+	beforeAll(async () => {
+		// Asserts append-mode rendering: the composer draws its own rounded border,
+		// where the fullscreen viewport gives it a borderless filled background.
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
+	});
+
 	it("renders when constructed as (tui, theme, keybindings)", async () => {
 		await initTheme();
 		const tui = new TUI(new ProcessTerminal());

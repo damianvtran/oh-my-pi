@@ -400,6 +400,9 @@ describe("SelectList.routeMouse", () => {
 		wheel: null,
 		wheelX: null,
 		motion: false,
+		shift: false,
+		alt: false,
+		ctrl: false,
 		leftClick: false,
 	};
 

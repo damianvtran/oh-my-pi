@@ -34,6 +34,23 @@ export interface SgrMouseEvent {
 	wheelX: -1 | 1 | null;
 	/** True when the pointer moved (hover or drag) rather than clicked. */
 	motion: boolean;
+	/**
+	 * Modifier held when the report was generated.
+	 *
+	 * SGR packs these into the same button byte as the button itself (4 shift,
+	 * 8 alt/meta, 16 ctrl), so a modified left click is still a left click and
+	 * reaches every ordinary click path unchanged. They are decoded here rather
+	 * than left to callers picking bits out of `button`, so that intent (alt as
+	 * "copy this, do not activate it") is expressed once.
+	 *
+	 * `shift` is decoded for completeness but is close to unusable as an app
+	 * gesture: terminals conventionally reserve shift+drag to bypass mouse
+	 * reporting and make their OWN selection, so the report never arrives.
+	 * There is no super/cmd bit in SGR at all — the protocol cannot carry it.
+	 */
+	shift: boolean;
+	alt: boolean;
+	ctrl: boolean;
 	/** True for a left-button press (not motion, not release, not wheel). */
 	leftClick: boolean;
 }
@@ -59,7 +76,19 @@ export function parseSgrMouse(data: string): SgrMouseEvent | null {
 	const wheelX = horizontal ? ((towardEnd ? 1 : -1) as 1 | -1) : null;
 	const motion = (button & 32) !== 0 && !isWheel;
 	const leftClick = !release && !isWheel && !motion && (button & 3) === 0;
-	return { button, col, row, release, wheel, wheelX, motion, leftClick };
+	return {
+		button,
+		col,
+		row,
+		release,
+		wheel,
+		wheelX,
+		motion,
+		shift: (button & 4) !== 0,
+		alt: (button & 8) !== 0,
+		ctrl: (button & 16) !== 0,
+		leftClick,
+	};
 }
 
 /** Handler invoked with a decoded SGR event; returning `false` reports unhandled. */

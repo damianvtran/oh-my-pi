@@ -18,7 +18,8 @@ beforeEach(async () => {
 	settingsState = beginSettingsTest();
 	projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-settings-cache-"));
 	setProjectDir(projectDir);
-	await Settings.init({ inMemory: true, cwd: projectDir });
+	// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+	await Settings.init({ inMemory: true, cwd: projectDir, overrides: { "tui.viewport": "append" } } as never);
 	await initTheme();
 });
 

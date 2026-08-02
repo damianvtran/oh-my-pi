@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -68,6 +68,7 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 		flushPendingModelSwitch: vi.fn(async () => {}),
 		flushCompactionQueue: vi.fn(async () => {}),
 		rebuildChatFromMessages: vi.fn(),
+		appendCompactionDivider: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
 		showStatus: vi.fn(),
 		showWarning: vi.fn(),
@@ -176,6 +177,38 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		expect(ctx.loadingAnimation).toBeDefined();
 		expect(statusContainer.children).toContain(ctx.loadingAnimation);
 		expect(workingLoaders).toHaveLength(2);
+	});
+
+	// The auto-compaction path has the same transcript contract as `/compact`
+	// (covered for the command path in compaction-inline-transcript.test.ts), and
+	// nothing else exercised it from an `auto_compaction_end` event.
+	it("appends the divider inline and keeps scrollback when compacted history stays expanded", async () => {
+		const { ctx } = createContext();
+		expect(settings.get("display.collapseCompacted")).toBe(false);
+
+		await new EventController(ctx).handleEvent(COMPACTION_END);
+
+		// The cards on screen are still current — only the LLM context shrank — so
+		// a rebuild would discard live components and clearScrollback would purge
+		// the pre-compaction history the user can still scroll back to.
+		expect(ctx.appendCompactionDivider).toHaveBeenCalledTimes(1);
+		expect(ctx.rebuildChatFromMessages).not.toHaveBeenCalled();
+		expect(ctx.ui.requestRender).toHaveBeenCalledWith();
+		expect(ctx.ui.requestRender).not.toHaveBeenCalledWith(true, { clearScrollback: true });
+	});
+
+	it("replaces the transcript and clears scrollback when compacted history collapses", async () => {
+		const { ctx } = createContext();
+		settings.set("display.collapseCompacted", true);
+
+		await new EventController(ctx).handleEvent(COMPACTION_END);
+
+		// Collapsing shrinks the frame far below the committed row count, so the
+		// replacement has to be explicit or the differential renderer repaints the
+		// collapsed transcript below the stale scrollback.
+		expect(ctx.rebuildChatFromMessages).toHaveBeenCalledWith({ reuseSettledComponents: true });
+		expect(ctx.appendCompactionDivider).not.toHaveBeenCalled();
+		expect(ctx.ui.requestRender).toHaveBeenCalledWith(true, { clearScrollback: true });
 	});
 
 	it("re-shows the Working… loader after an auto-retry resumes the turn", async () => {

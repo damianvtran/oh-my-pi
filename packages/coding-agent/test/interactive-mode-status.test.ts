@@ -80,7 +80,9 @@ describe("InteractiveMode.showStatus", () => {
 		// showStatus uses the global theme instance; renderInitialMessages reads
 		// the global Settings (display.collapseCompacted).
 		resetSettingsForTest();
-		await Settings.init({ inMemory: true });
+		// Asserts append-mode rendering: status lines are appended to the terminal's
+		// own scrollback as spacer + text, with no card chrome.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		await initTheme();
 	});
 
@@ -149,7 +151,7 @@ describe("InteractiveMode.showStatus", () => {
 	});
 
 	test("preserves startup notifications while rendering the initial transcript", async () => {
-		await Settings.init({ inMemory: true });
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		try {
 			const { ctx, helpers } = createInitialRenderHarness();
 

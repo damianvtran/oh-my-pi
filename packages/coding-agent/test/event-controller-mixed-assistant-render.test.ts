@@ -109,7 +109,12 @@ describe("EventController mixed assistant text/tool rendering", () => {
 
 	beforeEach(async () => {
 		resetSettingsForTest();
-		await Settings.init({ inMemory: true, overrides: { "display.smoothStreaming": false } });
+		// Asserts append-mode rendering: the transcript is the terminal's own scrollback,
+		// so text and tool segments land as plain sequential rows with no card chrome.
+		await Settings.init({
+			inMemory: true,
+			overrides: { "display.smoothStreaming": false, "tui.viewport": "append" },
+		} as never);
 	});
 
 	afterEach(() => {

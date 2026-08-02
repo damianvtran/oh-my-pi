@@ -415,7 +415,11 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	 * engine repaints after a consumed click, so the toggle only has to
 	 * rebuild this block's display.
 	 */
-	readonly #header = new CollapsibleBlockHeader(`tool:${this.#instanceId}`, () => this.setExpanded(!this.#expanded));
+	readonly #header = new CollapsibleBlockHeader(
+		`tool:${this.#instanceId}`,
+		() => this.setExpanded(!this.#expanded),
+		() => this.#copySource(),
+	);
 	readonly #headerPainter = new HeaderRowPainter();
 	readonly #card = new BlockCard();
 	/** Local row the header landed on in the last render; -1 when nothing drew. */
@@ -1130,6 +1134,21 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		if (this.#header.everOverflowed) return false;
 		const output = this.#getTextOutput();
 		return output.length > 0 && output.split("\n").length > this.#settledPreviewLines(PREVIEW_LIMITS.OUTPUT_EXPANDED);
+	}
+
+	/**
+	 * Source text for a copy gesture on this card.
+	 *
+	 * The tool's real output, not the card: the reader who alt-clicks a `bash`
+	 * result wants the output to paste somewhere, and the collapsed card they
+	 * are pointing at may be showing three lines of a hundred. Titled with the
+	 * tool label so a copied block still says what produced it, and untitled
+	 * when there is nothing but a title to copy.
+	 */
+	#copySource(): string | undefined {
+		const output = this.#getTextOutput().trimEnd();
+		if (output.length === 0) return undefined;
+		return `${this.#toolLabel}\n\n${output}`;
 	}
 
 	/**

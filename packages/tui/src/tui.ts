@@ -296,6 +296,20 @@ export interface ViewportChrome {
 	/** Blank rows below the pinned chrome. */
 	padBottom: number;
 	/**
+	 * Columns of card chrome inside the content area, on each side.
+	 *
+	 * Purely a selection concern: it tells the engine where a transcript card's
+	 * own padding ends and its text begins, so drag-select and copy can be
+	 * bounded by the text the way the composer's selection is. The engine
+	 * cannot infer it — once a row is painted, a leading space from a card's
+	 * inset is indistinguishable from one in indented code — and it does not
+	 * affect layout, which the app has already done by the time rows arrive.
+	 *
+	 * Zero (the default) selects geometrically, which is right for a surface
+	 * that paints no chrome.
+	 */
+	textInset?: number;
+	/**
 	 * Paints one full-width row onto the app surface. Receives the row already
 	 * inset by `padX` and must return it padded to `width`. Undefined leaves the
 	 * terminal background untouched.
@@ -1667,6 +1681,25 @@ export class TUI extends Container {
 	// selection both have to subtract these to reach content coordinates.
 	#fullscreenPadX = 0;
 	#fullscreenPadTop = 0;
+	// Width the scroll frame was composed at (terminal width less both gutters).
+	// Selection is measured against the frame, never the terminal: clamping a
+	// copy with the raw terminal width overruns every row by 2*padX and drags
+	// the gutter into the clipboard.
+	#fullscreenContentWidth = 0;
+	/**
+	 * The run of clicks the pointer is currently in, latched at press.
+	 *
+	 * `count` is 1 for a single click and grows while clicks keep landing in the
+	 * same cell inside {@link TUI.#CLICK_RUN_MS}; `copyIntent` records that this
+	 * click asked for the target's source text rather than its action.
+	 */
+	#clickRun: { row: number; col: number; at: number; count: number; copyIntent: boolean } = {
+		row: -1,
+		col: -1,
+		at: 0,
+		count: 0,
+		copyIntent: false,
+	};
 	#viewportChrome: ViewportChrome = { padX: 0, padTop: 0, padBottom: 0, fill: undefined };
 	// Home state: the pinned run is centred in the viewport instead of welded to
 	// its base. The empty session floats a wordmark and a narrow composer
@@ -3521,6 +3554,15 @@ export class TUI extends Container {
 	static readonly #WHEEL_SCROLL_ROWS = 3;
 
 	/**
+	 * Longest gap between two presses that still counts as one click run.
+	 *
+	 * Matches the common desktop double-click threshold. Too short and a double
+	 * click has to be hurried; too long and two deliberate clicks on the same
+	 * card get read as one gesture.
+	 */
+	static readonly #CLICK_RUN_MS = 400;
+
+	/**
 	 * Offer a pointer report to the topmost visible overlay that implements
 	 * {@link MouseRoutable}, in coordinates local to its own rendered rows.
 	 *
@@ -3603,6 +3645,13 @@ export class TUI extends Container {
 		if (event.leftClick) {
 			const zone = hitTestZones(this.#zones, row, col);
 			this.#pressedZoneKey = zone?.target.zoneKey ?? null;
+			// Click runs and modifiers are latched at PRESS and read at release.
+			// The click itself fires on release, and a release report is not
+			// required to repeat the modifier bits the press carried — several
+			// terminals send a bare `0` button on the `m` report — so deciding
+			// "was this alt+click" from the release alone silently loses the
+			// gesture on those terminals.
+			this.#clickRun = this.#advanceClickRun(row, col, event);
 			// A fresh press always drops the previous selection, matching every
 			// text surface: click-to-dismiss is how a user cancels a selection.
 			const cleared = this.#selection.clear();
@@ -3651,15 +3700,35 @@ export class TUI extends Container {
 			if (wasSelecting && this.#selection.isActive) {
 				const range = this.#selection.range;
 				if (range && this.onCopy) {
-					this.onCopy(extractSelectionText(this.#fullscreenScrollFrame, range, this.terminal.columns));
+					this.onCopy(
+						extractSelectionText(
+							this.#fullscreenScrollFrame,
+							range,
+							this.#fullscreenContentWidth,
+							this.#textInset,
+						),
+					);
 				}
 				this.requestRender();
 				return true;
 			}
 			const zone = hitTestZones(this.#zones, row, col);
 			const pressed = this.#pressedZoneKey;
+			const run = this.#clickRun;
 			this.#pressedZoneKey = null;
-			if (zone && pressed === zone.target.zoneKey && zone.target.onZoneClick?.(this.#zoneEvent(event, zone))) {
+			if (!zone || pressed !== zone.target.zoneKey) return true;
+			const zoneEvent = this.#zoneEvent(event, zone, run.count);
+			// A copy gesture consumes the click: a card whose ordinary click
+			// toggles it open must not also toggle on the click that copied it.
+			if (run.copyIntent) {
+				const text = zone.target.onZoneCopy?.(zoneEvent);
+				if (text !== undefined && text !== "") {
+					this.onCopy?.(text);
+					this.requestRender();
+					return true;
+				}
+			}
+			if (zone.target.onZoneClick?.(zoneEvent)) {
 				this.requestRender();
 			}
 			return true;
@@ -3677,7 +3746,9 @@ export class TUI extends Container {
 	 * values are how the owner knows the drag left its bounds.
 	 */
 	#capturedZoneEvent(raw: SgrMouseEvent, capture: CapturedZone): ZoneMouseEvent {
-		return { raw, localRow: raw.row - capture.row, localCol: raw.col - capture.colStart };
+		// A captured gesture is a drag, and a drag is never part of a click run:
+		// the composer owns its own double-click word selection.
+		return { raw, localRow: raw.row - capture.row, localCol: raw.col - capture.colStart, clickCount: 1 };
 	}
 
 	/**
@@ -3696,12 +3767,48 @@ export class TUI extends Container {
 		this.#capturedZone = null;
 	}
 
-	#zoneEvent(raw: SgrMouseEvent, zone: HitZone): ZoneMouseEvent {
+	#zoneEvent(raw: SgrMouseEvent, zone: HitZone, clickCount = 1): ZoneMouseEvent {
 		return {
 			raw,
 			localRow: raw.row - zone.row,
 			localCol: raw.col - (Number.isFinite(zone.colStart) ? zone.colStart : 0),
+			clickCount,
 		};
+	}
+
+	/** Card chrome inset the app declared, used to bound selection to text. */
+	get #textInset(): number {
+		return this.#viewportChrome.textInset ?? 0;
+	}
+
+	/**
+	 * Fold a press into the current click run and decide whether it means
+	 * "copy this" rather than "activate this".
+	 *
+	 * Two gestures ask for a copy, because neither works everywhere on its own.
+	 * A double click is what everyone already tries, but it collides with
+	 * single-click-to-expand on a tool card. Alt+click has no such collision but
+	 * is invisible to anyone who has not been told about it. Supporting both
+	 * means the discoverable gesture works and the precise one exists: a double
+	 * click on a card toggles it once and then copies it, while alt+click copies
+	 * without disturbing it at all.
+	 *
+	 * Shift is deliberately not a copy modifier — terminals reserve shift+drag
+	 * for their own selection, so the report frequently never arrives.
+	 */
+	#advanceClickRun(
+		row: number,
+		col: number,
+		event: SgrMouseEvent,
+	): { row: number; col: number; at: number; count: number; copyIntent: boolean } {
+		const now = Date.now();
+		const previous = this.#clickRun;
+		// A run only continues in the same cell. Exactness beats a radius on a
+		// grid: the cell is the unit the user is aiming at, and a second click
+		// one cell over is aimed at something else.
+		const continues = previous.row === row && previous.col === col && now - previous.at <= TUI.#CLICK_RUN_MS;
+		const count = continues ? previous.count + 1 : 1;
+		return { row, col, at: now, count, copyIntent: event.alt || count >= 2 };
 	}
 
 	/**
@@ -5904,6 +6011,7 @@ export class TUI extends Container {
 		this.#fullscreenScrollFrame = scrollLines;
 		this.#fullscreenScrollViewportRows = viewportRows;
 		this.#fullscreenPadX = padX;
+		this.#fullscreenContentWidth = contentWidth;
 		this.#fullscreenPadTop = padTop;
 
 		// Resolve the offset before windowing, so content that arrived this frame
@@ -5947,7 +6055,7 @@ export class TUI extends Container {
 			const frameRow = this.#scrollTop + r;
 			if (orphan?.(frameRow)) continue;
 			let line = scrollLines[frameRow] ?? "";
-			const span = this.#selection.spanForRow(frameRow, contentWidth);
+			const span = this.#selection.spanForRow(frameRow, contentWidth, line, this.#textInset);
 			if (span) line = highlightLineSpan(line, span.start, span.end, contentWidth);
 			screen[padTop + r] = line;
 		}

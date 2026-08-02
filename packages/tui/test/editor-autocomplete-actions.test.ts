@@ -248,7 +248,7 @@ describe("Editor Enter handler sync slash completion", () => {
 		await Promise.resolve();
 		expect(editor.isShowingAutocomplete()).toBe(true);
 
-		editor.handleInput("\x01"); // Ctrl+A: move before the command.
+		editor.handleInput("\x1b[H"); // Home: move before the command.
 		editor.handleInput("fix ");
 		editor.handleInput("\x05"); // Ctrl+E: return to the stale command prefix.
 		expect(editor.getText()).toBe("fix /mo");
@@ -781,7 +781,7 @@ describe("Editor autocomplete invalidation on destructive edits (issue #4295)", 
 
 		// Prime with `/todo start` and move cursor between "/todo " and "start"
 		editor.setText("/todo start");
-		editor.handleInput("\x01"); // Ctrl+A: cursor to line start
+		editor.handleInput("\x1b[H"); // Home: cursor to line start
 		for (const _ of "/todo ") editor.handleInput("\x06"); // Ctrl+F: forward one char
 		editor.handleInput("s"); // trigger autocomplete for "/todo s"
 		await Bun.sleep(0);

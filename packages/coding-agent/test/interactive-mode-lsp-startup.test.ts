@@ -40,7 +40,13 @@ describe("InteractiveMode LSP startup welcome banner", () => {
 
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-interactive-mode-lsp-startup-");
-		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		// Asserts append-mode rendering: the welcome banner is written straight into
+		// the terminal's scrollback, so the LSP rows appear in the rendered output.
+		await Settings.init({
+			inMemory: true,
+			cwd: tempDir.path(),
+			overrides: { "tui.viewport": "append" },
+		} as never);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");

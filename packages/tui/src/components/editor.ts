@@ -532,6 +532,16 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 	 */
 	#selectionAnchor: { line: number; col: number } | undefined;
 
+	/**
+	 * Whether the selection must outlive the key currently being handled.
+	 * Select-all is the one chord that creates a selection instead of ending
+	 * one, so it opts out of the blanket clear in {@link handleInput}. Reset at
+	 * the top of every key, which is what keeps an out-of-band
+	 * {@link selectAll} call from making some later, unrelated keystroke keep a
+	 * wash the caret has already moved out from under.
+	 */
+	#keepSelectionAfterKey = false;
+
 	readonly zoneKey = `editor:${nextEditorZoneId++}`;
 	/** The editor's zone is its text area, so the pointer reads as an I-beam. */
 	readonly pointerShape = "text" as const;
@@ -1396,6 +1406,7 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 	}
 
 	handleInput(data: string): void {
+		this.#keepSelectionAfterKey = false;
 		// Iterative, not recursive: the bytes trailing a completed bracketed
 		// paste (which may themselves contain further pastes) loop back here,
 		// so a fragmented paste stream can never grow the call stack.
@@ -1406,7 +1417,7 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 		// Every keystroke ends a pointer selection. The edit handlers consumed it
 		// already (replace-on-type, delete); anything else moved the caret out
 		// from under it, and leaving a stale wash behind would be a lie.
-		this.#selectionAnchor = undefined;
+		if (!this.#keepSelectionAfterKey) this.#selectionAnchor = undefined;
 	}
 
 	/** Process one input chunk. Returns the unconsumed tail of a completed paste, if any. */
@@ -1658,9 +1669,11 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 		else if (kb.matchesCanonical(canonical, "tui.editor.yankPop")) {
 			this.#yankPop();
 		}
-		// Ctrl+A - Move to start of line
-		else if (matchesKey(data, "ctrl+a")) {
-			this.#moveToLineStart();
+		// Select all. Ctrl+A only reaches us when the emulator forwards it, and
+		// Cmd+A only when the emulator does not claim it first (Ghostty ships
+		// `super+a=select_all` as a default) — see docs/keybindings.md.
+		else if (kb.matchesCanonical(canonical, "tui.editor.selectAll")) {
+			this.selectAll();
 		}
 		// Ctrl+E - Move to end of line
 		else if (matchesKey(data, "ctrl+e")) {
@@ -2021,6 +2034,26 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 		for (let i = range.startLine + 1; i < range.endLine; i++) parts.push(lines[i] ?? "");
 		parts.push((lines[range.endLine] ?? "").slice(0, range.endCol));
 		return parts.join("\n");
+	}
+
+	/**
+	 * Select the whole buffer, expressed as the same anchor/caret pair the
+	 * pointer selection uses: everything downstream (highlight, replace-on-type,
+	 * backspace, forward delete, paste) already reads {@link #selectionRange},
+	 * so this adds no second selection concept and no second delete path.
+	 *
+	 * A no-op on an empty buffer, where anchor and caret would coincide and the
+	 * range would be empty anyway. Painting is left to the caller's frame: the
+	 * editor has no render channel of its own, and the engine repaints after
+	 * every key.
+	 */
+	selectAll(): void {
+		if (this.#isEditorEmpty()) return;
+		this.#resetKillSequence();
+		this.#selectionAnchor = { line: 0, col: 0 };
+		this.#keepSelectionAfterKey = true;
+		this.#state.cursorLine = this.#state.lines.length - 1;
+		this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length ?? 0);
 	}
 
 	/**

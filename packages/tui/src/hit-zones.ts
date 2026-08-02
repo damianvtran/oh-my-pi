@@ -43,6 +43,14 @@ export interface ZoneMouseEvent {
 	readonly localRow: number;
 	/** Column within the zone (0 = the zone's first column). */
 	readonly localCol: number;
+	/**
+	 * How many clicks this one closes, counting a run of clicks landing in the
+	 * same place in quick succession: 1 for a single click, 2 for the second
+	 * click of a double click, and so on.
+	 *
+	 * Only meaningful on click dispatches; hover and drag always report 1.
+	 */
+	readonly clickCount: number;
 }
 
 /**
@@ -99,6 +107,25 @@ export interface MouseZoneTarget {
 	 * repaint is required; returning `false` lets the engine skip a frame.
 	 */
 	onZoneHover?(hovered: boolean): boolean;
+
+	/**
+	 * Hand back this block's own source text, for a pointer gesture that means
+	 * "copy this" rather than "activate this" (alt+click, or the second click
+	 * of a double click).
+	 *
+	 * Returning text CONSUMES the gesture: {@link onZoneClick} is not called,
+	 * so a card whose ordinary click toggles expansion does not also toggle on
+	 * the click that copied it. Return `undefined` to decline, and the gesture
+	 * falls through to the ordinary click path.
+	 *
+	 * This returns the block's *source* — the markdown a user typed, a tool's
+	 * real output — not the rows on screen. A rendered row has been wrapped to
+	 * the viewport, indented into a card and possibly truncated with an
+	 * ellipsis; pasting that back into an editor pastes the layout, not the
+	 * content. Drag-selection is the gesture for "exactly these glyphs"; this
+	 * one is for "that message".
+	 */
+	onZoneCopy?(event: ZoneMouseEvent): string | undefined;
 
 	/**
 	 * Wheel over this zone. Return `true` to consume; returning `false` lets the

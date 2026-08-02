@@ -365,6 +365,12 @@ export interface InteractiveModeContext {
 	syncRunningSubagentBadge(): void;
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
+	/**
+	 * Append the divider for the compaction that just landed, without rebuilding
+	 * the transcript. Used when `display.collapseCompacted` is off and nothing
+	 * was elided from the display.
+	 */
+	appendCompactionDivider(): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(): Promise<void>;
 	toggleTodoExpansion(): void;
