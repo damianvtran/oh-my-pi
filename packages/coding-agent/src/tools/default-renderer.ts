@@ -152,12 +152,18 @@ export function formatDefaultToolExecution(
 /** Render the generic fallback as the state-tinted card used by direct custom tools. */
 export function renderDefaultToolExecution(input: DefaultToolRenderInput, uiTheme: Theme): Component {
 	const component = new WidthAwareText(contentWidth => formatDefaultToolExecution(input, contentWidth, uiTheme), 1, 1);
-	const background = input.options.isPartial
-		? "toolPendingBg"
-		: input.result?.isError
-			? "toolErrorBg"
-			: "toolSuccessBg";
-	component.setCustomBgFn(text => uiTheme.bg(background, text));
+	// Same rule as `renderOutputBlock`: in the fullscreen viewport the enclosing
+	// card owns the surface for every row it draws, padding included, so a tint
+	// applied to the body alone would never reach the card's blank rows and the
+	// block would read as a darker box nested inside a lighter one.
+	if (!isFullscreenViewport()) {
+		const background = input.options.isPartial
+			? "toolPendingBg"
+			: input.result?.isError
+				? "toolErrorBg"
+				: "toolSuccessBg";
+		component.setCustomBgFn(text => uiTheme.bg(background, text));
+	}
 	component.setIgnoreTight(true);
 	return component;
 }

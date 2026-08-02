@@ -115,7 +115,14 @@ export function renderOutputBlock(
 					: "dim");
 	const border = (text: string) => theme.fg(borderColor, text);
 	const bgFn = (() => {
-		if (!state || !applyBg) return undefined;
+		// The card around this block already paints the surface, and it paints
+		// every row including its own padding. A state tint here would cover only
+		// the rows this function emits, so the card's blank rows above and below
+		// would stay panel-coloured while the body went a different shade — the
+		// block reading as a darker box nested inside a lighter one. State is
+		// carried by the status icon, the header colour and the text, exactly as
+		// it already is for a settled block.
+		if (!state || !applyBg || flat) return undefined;
 		const bgAnsi = theme.getBgAnsi(getStateBgColor(state));
 		// Keep block background stable even if inner content contains SGR resets (e.g. "\x1b[0m"),
 		// which would otherwise clear the outer background mid-line.
