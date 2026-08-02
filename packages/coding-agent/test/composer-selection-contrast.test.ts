@@ -184,4 +184,28 @@ describe("floating overlay surface", () => {
 		}
 		expect(checked).toBeGreaterThan(90);
 	});
+
+	it("clears the wash's contrast floor against the overlay it is painted on", async () => {
+		let checked = 0;
+		for (const name of ["dark", "light", ...Object.keys(defaultThemes)]) {
+			const t = await getThemeByName(name);
+			if (!t || t.overlayBgAnsi === "") continue;
+			const overlay = bgOpenToHex(t.overlayBgAnsi);
+			// The floor the panel-anchored wash guarantees is measured against the
+			// panel. Two rungs up it buys nothing: on 95 of the 98 bundled themes
+			// that wash lands on the overlay under 1.5:1, and under 1.2:1 on 16.
+			expect(contrastRatio(overlay, bgOpenToHex(t.selectionOverlayBgAnsi))).toBeGreaterThan(CONTRAST_FLOOR);
+			checked++;
+		}
+		expect(checked).toBeGreaterThan(90);
+	});
+
+	it("hands an overlay-hosted editor the overlay wash and the composer the panel one", async () => {
+		await setTheme("dark");
+		const onPanel = getEditorTheme().selectionWash?.("sel");
+		const onOverlay = getEditorTheme("overlay").selectionWash?.("sel");
+		expect(onPanel).toContain(theme.selectionBgAnsi);
+		expect(onOverlay).toContain(theme.selectionOverlayBgAnsi);
+		expect(onOverlay).not.toBe(onPanel);
+	});
 });

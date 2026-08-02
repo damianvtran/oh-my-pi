@@ -521,6 +521,7 @@
 - Fixed the `/usage` panel printing its title twice. The de-duplication matcher for the report body's own heading contained an escaped backslash rather than a whitespace class, so it matched only a bare `Usage` and never the real `Usage (34s ago)`.
 - Fixed floating overlays in the fullscreen viewport having no visible edge over a transcript card. They draw no rule there, so the fill is the only thing defining the panel, and it was the same `panelBg` rung every card uses. The surface ladder gained a fourth rung for them, one step above `elementBg`: an overlay now sits two steps clear of the transcript behind it, and the `elementBg` a select list paints its own selected row and hover band on stays one step below the panel it is read against, so the overlay gains an edge without swallowing the selection inside it.
 - Fixed composer selection painting nothing on a theme that leaves `statusLineBg` at the terminal default: such a theme derives no surface ladder, so there is no rung to tint. Those themes now get reverse video, which needs no palette.
+- Fixed selected text being invisible in an editor hosted by a floating overlay — the agent dashboard's description field. The composer's selection wash is derived to clear a 1.5:1 floor against the panel rung it is read on, but an overlay sits two rungs above that, where the same wash measures 1.10–1.14:1 on 95 of the 98 bundled themes. The wash is now derived twice, once per surface, and the overlay-anchored one clears the floor on every theme that derives a ladder.
 
 ## [17.2.4] - 2026-08-01
 
