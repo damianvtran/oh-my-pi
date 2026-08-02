@@ -3,16 +3,23 @@
  * builtin) instead of the native scanner, to keep the render loop off the
  * N-API number-boxing path that traps under Bun 1.3.x GC pressure.
  *
- * Correctness contract: the result MUST equal the native engine's width for the
- * same input, because `truncateToWidth` / `sliceWithWidth` / `wrapTextWithAnsi`
- * cut text using that native model — any divergence makes padding / cursor math
- * (`width - visibleWidth(...)`) drift. This guards the two corrections layered
- * on top of `Bun.stringWidth` (tabs, OSC 66 scaling) and catches silent
- * `Bun.stringWidth` width-table drift across Bun upgrades.
+ * Correctness contract: ordinary text MUST equal the native engine's width for
+ * the same input, because `truncateToWidth` / `sliceWithWidth` /
+ * `wrapTextWithAnsi` cut text using that native model. Protocol-defined Kitty
+ * placeholder cells are the exception: the terminal renders each explicit
+ * base+row+column cluster as one cell even when generic Unicode tables count a
+ * later diacritic as spacing. This guards every correction layered on top of
+ * `Bun.stringWidth` and catches silent width-table drift across Bun upgrades.
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import { visibleWidth as nativeVisibleWidth } from "@oh-my-pi/pi-natives";
 import {
+	encodeKittyPlaceholderGrid,
+	KITTY_PLACEHOLDER,
+	renderKittyPlaceholderLines,
+} from "@oh-my-pi/pi-tui/kitty-graphics";
+import {
+	applyBackgroundToLine,
 	DEFAULT_TAB_WIDTH,
 	Ellipsis,
 	resetHangulCompatibilityJamoWidthForTests,
@@ -87,6 +94,115 @@ describe("visibleWidth — parity with the native width engine", () => {
 		expect(visibleWidth(`${ESC}]66;s=2;big${ST}`)).toBe(6); // 2 * width("big")
 		expect(visibleWidth(`${ESC}]66;w=5;Hi${BEL}`)).toBe(5); // explicit width, scale 1
 		expect(visibleWidth(`${ESC}]66;s=3:w=4;X${ST}`)).toBe(12); // 3 * 4
+	});
+});
+
+describe("visibleWidth — Kitty Unicode image placeholders", () => {
+	it("measures a wide placeholder row by image columns, not diacritic code points", () => {
+		const row = encodeKittyPlaceholderGrid({
+			imageId: 1,
+			placementId: 1,
+			columns: 69,
+			rows: 2,
+		})[1]!;
+
+		expect(Bun.stringWidth(row, { countAnsiEscapeCodes: false, ambiguousIsNarrow: true })).toBeGreaterThan(69);
+		expect(visibleWidth(row!)).toBe(69);
+	});
+
+	it("corrects a long unstyled placeholder row on the no-escape fast path", () => {
+		const row = Bun.stripANSI(
+			encodeKittyPlaceholderGrid({
+				imageId: 1,
+				placementId: 1,
+				columns: 69,
+				rows: 2,
+			})[1]!,
+		);
+
+		expect(row.length).toBeGreaterThanOrEqual(128);
+		expect(visibleWidth(row)).toBe(69);
+	});
+
+	it("handles supplementary marker boundaries and the first row's APC prefix", () => {
+		const widest = encodeKittyPlaceholderGrid({
+			imageId: 1,
+			placementId: 1,
+			columns: 297,
+			rows: 1,
+		})[0]!;
+		const tallest = encodeKittyPlaceholderGrid({
+			imageId: 1,
+			placementId: 1,
+			columns: 1,
+			rows: 297,
+		}).at(-1)!;
+		const firstWithPlacement = renderKittyPlaceholderLines({
+			imageId: 1,
+			placementId: 1,
+			columns: 69,
+			rows: 1,
+		})[0]!;
+
+		expect(visibleWidth(widest)).toBe(297);
+		expect(visibleWidth(tallest)).toBe(1);
+		expect(visibleWidth(firstWithPlacement)).toBe(69);
+	});
+
+	it("leaves malformed placeholders and hidden control payloads on their normal width paths", () => {
+		const validRow = encodeKittyPlaceholderGrid({
+			imageId: 1,
+			placementId: 1,
+			columns: 69,
+			rows: 2,
+		})[1]!;
+		const validCell = Bun.stripANSI(
+			encodeKittyPlaceholderGrid({ imageId: 1, placementId: 1, columns: 1, rows: 1 })[0]!,
+		);
+		const malformed = `${KITTY_PLACEHOLDER}ab`;
+		const incompleteAfterValidRun = validRow + KITTY_PLACEHOLDER;
+		const hiddenApc = `A${ESC}_G${validCell}${ST}B`;
+
+		expect(visibleWidth(malformed)).toBe(nativeVisibleWidth(malformed, TAB));
+		expect(visibleWidth(incompleteAfterValidRun)).toBe(nativeVisibleWidth(incompleteAfterValidRun, TAB));
+		expect(visibleWidth(hiddenApc)).toBe(2);
+	});
+
+	it("corrects placeholder payloads at OSC 66 scale", () => {
+		const validCell = Bun.stripANSI(
+			encodeKittyPlaceholderGrid({ imageId: 1, placementId: 1, columns: 1, rows: 1 })[0]!,
+		);
+
+		expect(visibleWidth(`${ESC}]66;s=2;${validCell}${ST}`)).toBe(2);
+	});
+
+	it("measures multiple styled placeholder runs without double-counting", () => {
+		const left = encodeKittyPlaceholderGrid({ imageId: 1, placementId: 1, columns: 35, rows: 2 })[1]!;
+		const right = encodeKittyPlaceholderGrid({ imageId: 2, placementId: 2, columns: 34, rows: 2 })[1]!;
+
+		expect(visibleWidth(left + right)).toBe(69);
+	});
+
+	it("continues correcting valid runs after a malformed placeholder", () => {
+		const left = encodeKittyPlaceholderGrid({ imageId: 1, placementId: 1, columns: 35, rows: 2 })[1]!;
+		const right = encodeKittyPlaceholderGrid({ imageId: 2, placementId: 2, columns: 34, rows: 2 })[1]!;
+		const row = `${left}${KITTY_PLACEHOLDER}ab${right}`;
+
+		expect(visibleWidth(row)).toBe(nativeVisibleWidth(row, TAB));
+	});
+
+	it("pads the background through the complete image row", () => {
+		const row = encodeKittyPlaceholderGrid({
+			imageId: 1,
+			placementId: 1,
+			columns: 69,
+			rows: 2,
+		})[1]!;
+		const filled = applyBackgroundToLine(row!, 100, text => `\x1b[48;2;1;2;3m${text}\x1b[0m`);
+
+		expect(visibleWidth(filled)).toBe(100);
+		expect(filled).toContain(" ".repeat(31));
+		expect([...filled].filter(char => char === KITTY_PLACEHOLDER)).toHaveLength(69);
 	});
 });
 

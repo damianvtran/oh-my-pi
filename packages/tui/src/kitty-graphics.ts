@@ -53,6 +53,20 @@ const ROWCOLUMN_DIACRITICS: readonly number[] = [
 /** Largest row/column index expressible with the diacritic table (one cell each). */
 export const KITTY_PLACEHOLDER_MAX_CELLS = ROWCOLUMN_DIACRITICS.length;
 
+/** Whether a code point is one of Kitty's protocol-defined row/column markers. */
+export function isKittyPlaceholderDiacritic(codePoint: number): boolean {
+	let low = 0;
+	let high = ROWCOLUMN_DIACRITICS.length - 1;
+	while (low <= high) {
+		const middle = (low + high) >>> 1;
+		const candidate = ROWCOLUMN_DIACRITICS[middle]!;
+		if (candidate === codePoint) return true;
+		if (candidate < codePoint) low = middle + 1;
+		else high = middle - 1;
+	}
+	return false;
+}
+
 export interface KittyGraphicsFeatures {
 	/** Display images via Unicode placeholders instead of direct `a=p` placement. */
 	unicodePlaceholders: boolean;
