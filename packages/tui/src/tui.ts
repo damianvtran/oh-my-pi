@@ -31,7 +31,7 @@ import {
 } from "./hit-zones";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
-import { parseSgrMouse, type SgrMouseEvent } from "./mouse";
+import { type MouseRoutable, parseSgrMouse, type SgrMouseEvent } from "./mouse";
 import { extractSelectionText, highlightLineSpan, Selection, type SelectionPoint } from "./selection";
 import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
@@ -692,6 +692,28 @@ export class Container
 		return this;
 	}
 
+	/**
+	 * Row count of each child in the latest render, or `undefined` when the
+	 * memo does not describe the current child list.
+	 *
+	 * The fullscreen viewport windows a flat array of composed rows, which on
+	 * its own cannot tell where one transcript block ends and the next begins —
+	 * and a block whose only surviving row is a painted inset row reads as an
+	 * unexplained coloured band. This is the block boundary it needs, taken
+	 * from work `render()` has already done rather than a second pass.
+	 */
+	memoizedChildRowCounts(): readonly number[] | undefined {
+		const refs = this.#memoChildLines;
+		if (refs.length !== this.children.length) return undefined;
+		const counts: number[] = new Array(refs.length);
+		for (let i = 0; i < refs.length; i++) {
+			const lines = refs[i];
+			if (lines === undefined) return undefined;
+			counts[i] = lines.length;
+		}
+		return counts;
+	}
+
 	addChild(component: Component): void {
 		this.children.push(component);
 		this.#widthEpochRevision++;
@@ -980,7 +1002,10 @@ export class Container
 			const childLines = refs[i];
 			if (childLines === undefined) return;
 			const child = this.children[i]!;
-			if (isHitZoneProvider(child)) {
+			// Skip subtrees the frame cannot show. The walk itself is the cost
+			// here — a scrolled transcript has thousands of rows off-window and
+			// republishes them on every wheel notch otherwise.
+			if (isHitZoneProvider(child) && sink.intersectsWindow(offset, childLines.length)) {
 				sink.withOffset(offset, () => child.publishHitZones(sink));
 			}
 			offset += childLines.length;
@@ -1568,6 +1593,24 @@ export class TUI extends Container {
 	// selection extraction both address frame rows, not screen rows.
 	#fullscreenScrollFrame: string[] = [];
 	#fullscreenScrollViewportRows = 0;
+	// Composed-frame cache. Scrolling changes no component's output, so the
+	// expensive part of a fullscreen frame — concatenating every root child's
+	// rows into one flat array — must not be redone per wheel notch. Children
+	// already return a stable array reference while their content is unchanged
+	// (see Container.render's memo), so the whole concat can be reused whenever
+	// every reference and the compose width match the previous frame. Without
+	// this every notch is O(total transcript rows), which the adaptive render
+	// backpressure then multiplies into visibly coarse scrolling.
+	#composeCacheWidth = -1;
+	#composeCachePinnedFrom = -1;
+	// Rows the scroll region prepends before its first child (the leading gap).
+	// Zone and selection mapping both address composed frame rows, so this has
+	// to shift every scroll-region child by the same amount.
+	#fullscreenScrollLead = 0;
+	#composeCacheRefs: readonly (readonly string[])[] = [];
+	#composeCacheBlockStarts: number[] = [];
+	#composeCacheRowCounts: number[] = [];
+	#composeCachePinnedLines: string[] = [];
 	// Gutter and top inset actually applied this frame, after clamping to the
 	// terminal size. Pointer coordinates are screen-absolute, so hit testing and
 	// selection both have to subtract these to reach content coordinates.
@@ -1658,12 +1701,17 @@ export class TUI extends Container {
 	#preparedMeta: PreparedLine[] = [];
 	#preparedValidRows = 0;
 
-	// Overlay stack for modal components rendered on top of base content
+	// Overlay stack for modal components rendered on top of base content.
+	// `rect` is where the entry was last composited, in screen coordinates; it
+	// is the only way a pointer report can be tested against an overlay, whose
+	// placement is resolved per frame from anchors and percentages rather than
+	// being anything the component itself knows.
 	overlayStack: {
 		component: Component;
 		options?: OverlayOptions;
 		preFocus: Component | null;
 		hidden: boolean;
+		rect?: { row: number; col: number; width: number; height: number };
 	}[] = [];
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean, options?: TUIOptions) {
@@ -3295,9 +3343,17 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Pointer input for the full-screen app. Modal overlays still decode SGR
-		// themselves (they hit-test against their own frame and predate zones),
-		// so this only claims the stream when the app owns the screen.
+		// Pointer input. A modal that opted into routed mouse gets first refusal
+		// on reports landing inside its own composited rectangle — without this a
+		// wheel over a floating panel scrolls the transcript behind it, which is
+		// the one thing a modal must not do. Older modals decode SGR themselves
+		// (they hit-test against their own frame and predate zones) and are
+		// unaffected: they expose no `routeMouse` and keep receiving raw bytes.
+		if (data.startsWith("\x1b[<") && this.#routeOverlayPointerInput(data)) {
+			return;
+		}
+		// Otherwise the full-screen app owns the stream, but only while it owns
+		// the screen: an overlay above it keeps the input.
 		if (
 			this.#viewportMode === "fullscreen" &&
 			data.startsWith("\x1b[<") &&
@@ -3349,6 +3405,33 @@ export class TUI extends Container {
 
 	/** Rows a single wheel notch scrolls. Matches opencode's default feel. */
 	static readonly #WHEEL_SCROLL_ROWS = 3;
+
+	/**
+	 * Offer a pointer report to the topmost visible overlay that implements
+	 * {@link MouseRoutable}, in coordinates local to its own rendered rows.
+	 *
+	 * Hit testing is against `entry.rect`, the rectangle the last frame
+	 * actually composited the overlay into — an overlay's placement comes from
+	 * anchors and percentages resolved per frame, so the component itself has
+	 * no way to know where it landed. A report outside the rectangle is left
+	 * alone rather than swallowed, so clicks on the app behind a small panel
+	 * still work.
+	 *
+	 * Returns true when the overlay consumed the report.
+	 */
+	#routeOverlayPointerInput(data: string): boolean {
+		const entry = this.#getTopmostVisibleOverlay();
+		const rect = entry?.rect;
+		if (!entry || !rect) return false;
+		const routable = entry.component as Component & Partial<MouseRoutable>;
+		if (typeof routable.routeMouse !== "function") return false;
+		const event = parseSgrMouse(data);
+		if (!event) return false;
+		if (event.row < rect.row || event.row >= rect.row + rect.height) return false;
+		if (event.col < rect.col || event.col >= rect.col + rect.width) return false;
+		routable.routeMouse(event, event.row - rect.row, event.col - rect.col);
+		return true;
+	}
 
 	/**
 	 * Dispatch one decoded pointer report against the current frame's zones.
@@ -3746,6 +3829,7 @@ export class TUI extends Container {
 			const placed = this.#resolveOverlayLayout(options, overlayLines.length, boundsWidth, boundsHeight);
 			const row = placed.row + padTop;
 			const col = placed.col + padX;
+			entry.rect = { row, col, width, height: overlayLines.length };
 			// In fullscreen the overlay is a raised panel, and its own surface has
 			// to be painted here: the canvas fill runs before compositing, and the
 			// overlay's inner rows are plain Text/SelectList children that no
@@ -5623,8 +5707,14 @@ export class TUI extends Container {
 		// most of why a filled surface reads as a panel rather than as a wall.
 		const padX = Math.max(0, Math.min(chrome.padX, Math.floor((width - 8) / 2)));
 		const contentWidth = Math.max(1, width - padX * 2);
-		const padTop = height > chrome.padTop + chrome.padBottom + 4 ? chrome.padTop : 0;
-		const padBottom = padTop > 0 ? chrome.padBottom : 0;
+		// `padTop`/`padBottom` are chrome: they never scroll. The gap ABOVE the
+		// first transcript block is deliberately NOT chrome — it is the first
+		// row of the scroll region (see `scrollLead` below), so it is present at
+		// rest and scrolls away like any other row instead of leaving a fixed
+		// blank band pinned over a scrolled transcript.
+		const fits = height > chrome.padTop + chrome.padBottom + 4;
+		const padTop = fits ? chrome.padTop : 0;
+		const padBottom = fits ? chrome.padBottom : 0;
 
 		const children = this.children;
 		let pinnedFrom = children.length;
@@ -5637,18 +5727,71 @@ export class TUI extends Container {
 
 		// Row counts are captured here so zone collection can map each child to
 		// its screen rows without a second render pass.
-		const rowCounts: number[] = new Array(children.length);
-		const scrollLines: string[] = [];
-		for (let i = 0; i < pinnedFrom; i++) {
+		//
+		// Every child is rendered every frame (render() is the invalidation
+		// point and must not be skipped), but the CONCATENATION below is reused
+		// whenever every child handed back the same array reference at the same
+		// width — the common case while scrolling, where nothing changed except
+		// which slice of the composed frame is shown.
+		const refs: (readonly string[])[] = new Array(children.length);
+		let unchanged =
+			this.#composeCacheWidth === contentWidth &&
+			this.#composeCachePinnedFrom === pinnedFrom &&
+			this.#composeCacheRefs.length === children.length;
+		for (let i = 0; i < children.length; i++) {
 			const rows = children[i]!.render(contentWidth);
-			rowCounts[i] = rows.length;
-			for (let j = 0; j < rows.length; j++) scrollLines.push(rows[j]!);
+			refs[i] = rows;
+			if (unchanged && this.#composeCacheRefs[i] !== rows) unchanged = false;
 		}
-		const pinnedLines: string[] = [];
-		for (let i = pinnedFrom; i < children.length; i++) {
-			const rows = children[i]!.render(contentWidth);
-			rowCounts[i] = rows.length;
-			for (let j = 0; j < rows.length; j++) pinnedLines.push(rows[j]!);
+
+		let rowCounts: number[];
+		let scrollLines: string[];
+		let pinnedLines: string[];
+		if (unchanged) {
+			rowCounts = this.#composeCacheRowCounts;
+			scrollLines = this.#fullscreenScrollFrame;
+			pinnedLines = this.#composeCachePinnedLines;
+		} else {
+			rowCounts = new Array(children.length);
+			scrollLines = [];
+			pinnedLines = [];
+			// Start of every scroll-region block, ascending, terminated by the
+			// total row count. Blocks are one level below the scroll children,
+			// because a transcript is a single child holding one block per turn.
+			const blockStarts: number[] = [];
+			for (let i = 0; i < children.length; i++) {
+				const rows = refs[i]!;
+				rowCounts[i] = rows.length;
+				if (i < pinnedFrom) {
+					// One blank leading row, once the scroll region has content.
+					// Emitting it as content rather than as chrome is what makes
+					// it disappear on the first notch of an upward scroll.
+					if (scrollLines.length === 0 && rows.length > 0) scrollLines.push("");
+					const childStart = scrollLines.length;
+					const child = children[i]!;
+					const inner = child instanceof Container ? child.memoizedChildRowCounts() : undefined;
+					if (inner === undefined) {
+						if (rows.length > 0) blockStarts.push(childStart);
+					} else {
+						let at = childStart;
+						for (const count of inner) {
+							if (count > 0) blockStarts.push(at);
+							at += count;
+						}
+					}
+					for (let j = 0; j < rows.length; j++) scrollLines.push(rows[j]!);
+				} else {
+					for (let j = 0; j < rows.length; j++) pinnedLines.push(rows[j]!);
+				}
+			}
+			blockStarts.push(scrollLines.length);
+			this.#fullscreenScrollLead = scrollLines.length > 0 ? 1 : 0;
+			this.#composeCacheWidth = contentWidth;
+			this.#composeCachePinnedFrom = pinnedFrom;
+			this.#composeCacheRefs = refs;
+			this.#composeCacheRowCounts = rowCounts;
+			this.#composeCachePinnedLines = pinnedLines;
+			this.#composeCacheBlockStarts = blockStarts;
 		}
 
 		// Bottom chrome gets the rows it asks for, but never the whole screen:
@@ -5679,10 +5822,18 @@ export class TUI extends Container {
 		if (this.#stickyBottom) this.#scrollTop = maxScroll;
 		else if (this.#scrollTop > maxScroll) this.#scrollTop = maxScroll;
 
+		// Blocks clipped by the window edge can leave nothing on screen but their
+		// own painted inset rows: a card's blank top or bottom padding, in the
+		// panel colour, with the body it belongs to scrolled out of sight. That
+		// reads as an unexplained coloured band, so a clipped block contributing
+		// no text at all contributes nothing.
+		const orphan = this.#orphanBlockRows(this.#scrollTop, viewportRows);
+
 		const screen: string[] = new Array(height);
 		for (let r = 0; r < height; r++) screen[r] = "";
 		for (let r = 0; r < viewportRows; r++) {
 			const frameRow = this.#scrollTop + r;
+			if (orphan?.(frameRow)) continue;
 			let line = scrollLines[frameRow] ?? "";
 			const span = this.#selection.spanForRow(frameRow, contentWidth);
 			if (span) line = highlightLineSpan(line, span.start, span.end, contentWidth);
@@ -5707,11 +5858,74 @@ export class TUI extends Container {
 			}
 		}
 
-		this.#collectFullscreenZones(children, rowCounts, pinnedFrom, pinnedTop, pinnedLines.length - pinnedRows);
+		this.#collectFullscreenZones(children, rowCounts, pinnedFrom, pinnedTop, pinnedLines.length - pinnedRows, height);
 
 		let lines = this.#compositeOverlaysIntoWindow(screen, width, height);
 		lines = this.#prepareLinesArray(lines, width);
 		this.#emitAltFrame(lines, width, height, cursor);
+	}
+
+	/**
+	 * Predicate marking scroll rows that belong to a block the window cut down
+	 * to nothing but decoration, or `undefined` when there are none.
+	 *
+	 * Only the two boundary blocks can be in that state — every block strictly
+	 * inside the window is whole — so this costs two lookups and at most a
+	 * viewport's worth of text checks, never a walk of the transcript.
+	 *
+	 * A block qualifies only when it is genuinely clipped AND its visible rows
+	 * carry no content: a card whose padding row is on screen together with its
+	 * body is drawing its own top edge and must be left alone.
+	 *
+	 * "Content" deliberately excludes the first content column, which a block
+	 * reserves for a left rail (see the user card's accent rail). The rail is
+	 * painted down every row a card owns, padding included, so counting it as
+	 * content would make an all-padding remnant look occupied.
+	 */
+	#orphanBlockRows(scrollTop: number, viewportRows: number): ((frameRow: number) => boolean) | undefined {
+		if (viewportRows <= 0) return undefined;
+		const starts = this.#composeCacheBlockStarts;
+		if (starts.length < 2) return undefined;
+		const windowEnd = scrollTop + viewportRows;
+		const lines = this.#fullscreenScrollFrame;
+		const ranges: { start: number; end: number }[] = [];
+
+		for (const edge of [scrollTop, windowEnd - 1]) {
+			const index = this.#blockIndexAt(starts, edge);
+			if (index < 0) continue;
+			const start = starts[index]!;
+			const end = starts[index + 1]!;
+			// Whole blocks are never orphans, however blank they are.
+			if (start >= scrollTop && end <= windowEnd) continue;
+			const from = Math.max(start, scrollTop);
+			const to = Math.min(end, windowEnd);
+			// A window narrow enough to sit inside one block hits it from both edges.
+			if (ranges.some(range => range.start === from && range.end === to)) continue;
+			let hasText = false;
+			for (let row = from; row < to && !hasText; row++) {
+				hasText =
+					Bun.stripANSI(lines[row] ?? "")
+						.slice(1)
+						.trim().length > 0;
+			}
+			if (hasText) continue;
+			ranges.push({ start: from, end: to });
+		}
+		if (ranges.length === 0) return undefined;
+		return frameRow => ranges.some(range => frameRow >= range.start && frameRow < range.end);
+	}
+
+	/** Index of the block containing `row`, or -1. `starts` is ascending. */
+	#blockIndexAt(starts: readonly number[], row: number): number {
+		let lo = 0;
+		let hi = starts.length - 2;
+		while (lo <= hi) {
+			const mid = (lo + hi) >> 1;
+			if (row < starts[mid]!) hi = mid - 1;
+			else if (row >= starts[mid + 1]!) lo = mid + 1;
+			else return mid;
+		}
+		return -1;
 	}
 
 	/** Minimum transcript rows the pinned chrome may never take. */
@@ -5729,6 +5943,7 @@ export class TUI extends Container {
 		pinnedFrom: number,
 		pinnedTop: number,
 		pinnedClipped: number,
+		height: number,
 	): void {
 		const sink = this.#zoneSink;
 		sink.reset();
@@ -5736,19 +5951,26 @@ export class TUI extends Container {
 		// same for every zone in the frame, so it is applied once here rather than
 		// threaded through the container walk.
 		sink.columnOffset = this.#fullscreenPadX;
-		// Scroll-region children start above the viewport by the scroll offset and
-		// below the window top by the padding; pinned children restart at wherever
-		// the pinned run was actually placed, which is not the bottom in the
-		// centred home state, minus whatever was clipped off its head.
-		let offset = this.#fullscreenPadTop - this.#scrollTop;
+		// Nothing outside the painted window is reachable by the pointer, and
+		// zones are already in screen coordinates here, so the window is simply
+		// the screen. Containers use this to skip scrolled-off subtrees instead
+		// of walking the whole transcript on every frame.
+		sink.setRowWindow(0, height);
+		// Scroll-region children start above the viewport by the scroll offset,
+		// below the window top by the padding, and after the leading gap row the
+		// scroll region prepends; pinned children restart at wherever the pinned
+		// run was actually placed, which is not the bottom in the centred home
+		// state, minus whatever was clipped off its head.
+		let offset = this.#fullscreenPadTop - this.#scrollTop + this.#fullscreenScrollLead;
 		for (let i = 0; i < children.length; i++) {
 			if (i === pinnedFrom) offset = pinnedTop - pinnedClipped;
 			const child = children[i]!;
-			if (isHitZoneProvider(child)) {
+			const rows = rowCounts[i] ?? 0;
+			if (isHitZoneProvider(child) && sink.intersectsWindow(offset, rows)) {
 				const base = offset;
 				sink.withOffset(base, () => child.publishHitZones(sink));
 			}
-			offset += rowCounts[i] ?? 0;
+			offset += rows;
 		}
 		this.#zones = sink.zones;
 		this.#releaseStaleCapture();

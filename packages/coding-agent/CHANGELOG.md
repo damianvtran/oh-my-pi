@@ -495,6 +495,8 @@
 - Added clickable, hover-highlighted subagent rows to both the anchored Subagents HUD and `hub wait` / jobs output. Clicking a row opens that agent's live transcript through the same focus controller as task blocks.
 - Added OSC 22 pointer-shape feedback in Kitty, Ghostty, and WezTerm: interactive rows use a hand, the composer uses a text cursor, and teardown always restores the terminal default.
 - Added a compact, scrollable `/usage` overlay that can be dismissed with `Esc` or `q`, replacing the usage report's permanent transcript block.
+- Added mouse-wheel scrolling inside the `/usage` overlay, and a general path for any modal to claim pointer reports that land inside its own composited rectangle. Reports outside a panel are left to the app underneath, so a small overlay does not swallow clicks on the transcript behind it.
+- Added `Theme.selectionBg()`, a selection wash blended from the panel surface toward the theme's own `accent`. It is derived rather than declared, so all 98 bundled themes and any user theme gain it with no edits.
 
 ### Fixed
 
@@ -510,6 +512,12 @@
 - Fixed fullscreen user-message cards crowding adjacent content by restoring a bare canvas row between cards and aligning the first content row with the card inset.
 - Fixed long transient status messages wrapping into extra pinned rows and making the transcript bounce. The toast now stays one row tall and folds overflow with an ellipsis.
 - Fixed the main session's welcome and changelog chrome remaining above a drilled-in subagent transcript. Agent focus now hides that startup-only chrome and returning to the main session restores it.
+- Fixed the gap above the first transcript block staying pinned to the top of the window while scrolled. It was viewport chrome, so scrolling up pushed content behind a fixed blank row and content appeared to vanish a row early — most obvious scrolling back down toward the newest message. The gap is now the scroll region's own leading row, present at rest and scrolling away with the content, which is what opencode does.
+- Fixed a clipped transcript block leaving nothing on screen but its own painted inset row: a card whose body had scrolled past the window edge left a bare panel-coloured band with no apparent cause, most often just above the composer. A block the window cuts down to decoration alone now contributes nothing.
+- Fixed settled tool cards re-deriving their collapsed summary row on every frame. The rebuilt string arrived in a fresh array, which defeated every memo below it — the card's `Box`, the header painter, and the parent container all key on array identity — so each frame cost O(transcript). On a 1500-call transcript that was 12.0 ms of frame time, above the 60 Hz budget, which the adaptive render backpressure then doubled into visibly coarse scrolling; it is now 3.5 ms.
+- Fixed the fullscreen frame recomposing the whole scroll region on every frame and republishing hit zones for the entire transcript. The composed rows are reused while every child returns the same rows at the same width, and zone collection skips subtrees the window cannot show.
+- Fixed composer text selection being nearly invisible. It borrowed the select-list row wash — one rung of the surface ladder, designed to be read against the canvas and reinforced there by an accent foreground and a cursor glyph — but the composer sits a rung higher and has neither, so a 1.126:1 background carried the whole signal (1.048:1 on light themes). The accent-tinted `Theme.selectionBg()` measures 1.87:1 on the default dark theme and at least 1.50:1 across every bundled theme. It also applies in append mode, where the previous role resolved to a no-op and painted nothing at all.
+- Fixed collab prompt messages painting their own full-width `userMessageBg` bubble in the fullscreen viewport instead of taking the shared card treatment. Append mode is byte-identical.
 
 ## [17.2.4] - 2026-08-01
 

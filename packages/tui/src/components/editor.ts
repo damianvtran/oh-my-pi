@@ -411,6 +411,12 @@ export interface EditorTheme {
 	editorPaddingX?: number;
 	/** Style function for inline hint/ghost text (dim text after cursor) */
 	hintStyle?: (text: string) => string;
+	/**
+	 * Background wash for selected editor text. Optional so an embedder that
+	 * predates it still renders a selection through the {@link selectList}
+	 * fallback below.
+	 */
+	selectionWash?: (text: string) => string;
 }
 
 export interface EditorTopBorder {
@@ -2041,10 +2047,12 @@ export class Editor implements Component, Focusable, HitZoneProvider, MouseZoneT
 	 * escape sequences the wash adds.
 	 */
 	#renderSelectedRow(text: string, start: number, end: number, caret: number, marker: string): string {
-		// The list's selected-row wash is the same rung of the surface ladder a
-		// text selection wants, so a user theme needs no new role for this.
-		// Reverse video is the fallback for hosts that supply no wash at all.
-		const wash = this.#theme.selectList.selectedRow ?? ((body: string) => `\x1b[7m${body}\x1b[0m`);
+		// A dedicated selection wash if the host has one: the list's selected-row
+		// band sits behind an accent label and a prefix glyph, so it is sized to
+		// hint rather than to carry a signal on its own. Falling back to it keeps
+		// older hosts working, and reverse video covers hosts with neither.
+		const wash =
+			this.#theme.selectionWash ?? this.#theme.selectList.selectedRow ?? ((body: string) => `\x1b[7m${body}\x1b[0m`);
 		// Cut points, deduplicated: the caret usually sits on a selection edge.
 		const ordered: number[] = [];
 		for (const cut of [0, start, end, caret, text.length]) {

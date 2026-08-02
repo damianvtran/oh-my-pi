@@ -1500,14 +1500,19 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Gutter and canvas fill for fullscreen mode.
 	 *
-	 * Two columns of gutter and a row top and bottom, matching opencode: the
+	 * Two columns of gutter and a row at the bottom, matching opencode: the
 	 * inset is most of why a filled surface reads as a window rather than as the
 	 * terminal having been painted over.
+	 *
+	 * There is deliberately no `padTop`. The gap above the first block is the
+	 * scroll region's own leading row (see TUI#renderFullscreenFrame), so it
+	 * shows at rest and scrolls away with the content; as chrome it would stay
+	 * pinned over a scrolled transcript and read as a clipped row.
 	 */
 	#applyViewportChrome(): void {
 		this.ui.setViewportChrome({
 			padX: 2,
-			padTop: 1,
+			padTop: 0,
 			padBottom: 1,
 			// Arrows, not bare method references: these read private state off the
 			// Theme instance, and `theme` is rebound when the user switches theme,

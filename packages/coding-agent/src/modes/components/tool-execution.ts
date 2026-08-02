@@ -427,6 +427,21 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	/** Identity line reported while the renderer's component tree was built. */
 	#builtSummary: string | undefined;
 
+	/**
+	 * Last collapsed-summary result, keyed on the rows it was derived from.
+	 *
+	 * A settled collapsed card replaces its renderer's rows with a single
+	 * rebuilt line. Rebuilt per frame it is a fresh string in a fresh array,
+	 * which defeats every memo below it — `BlockCard`'s `Box`, the header
+	 * painter, and the parent `Container` all key on array identity — so a
+	 * transcript of finished tool calls re-derived every card on every frame,
+	 * including every frame of a scroll. Holding the array makes an unchanged
+	 * card free.
+	 */
+	#summarySource: readonly string[] | undefined;
+	#summaryWidth = -1;
+	#summaryLines: readonly string[] | undefined;
+
 	constructor(
 		toolName: string,
 		args: any,
@@ -1057,7 +1072,14 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// Already a one-liner: leave the renderer's own row alone rather than
 		// swapping it for a reconstruction that says the same thing.
 		if (lines.length <= 1) return lines;
-		return [this.#summaryRow(summary, width)];
+		if (this.#summarySource === lines && this.#summaryWidth === width && this.#summaryLines !== undefined) {
+			return this.#summaryLines;
+		}
+		const collapsed = [this.#summaryRow(summary, width)];
+		this.#summarySource = lines;
+		this.#summaryWidth = width;
+		this.#summaryLines = collapsed;
+		return collapsed;
 	}
 
 	/**

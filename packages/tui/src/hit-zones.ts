@@ -151,6 +151,8 @@ export class HitZoneSink {
 	#zones: HitZone[] = [];
 	#offset = 0;
 	#colOffset = 0;
+	#windowStart = Number.NEGATIVE_INFINITY;
+	#windowEnd = Number.POSITIVE_INFINITY;
 
 	/** Absolute frame row of the component currently publishing. */
 	get offset(): number {
@@ -169,6 +171,31 @@ export class HitZoneSink {
 	 */
 	set columnOffset(value: number) {
 		this.#colOffset = value;
+	}
+
+	/**
+	 * Restrict collection to the rows the frame can actually show, in the same
+	 * absolute coordinates {@link zone} publishes.
+	 *
+	 * A zone outside the painted window can never be hit, so collecting it is
+	 * pure cost — and in the fullscreen viewport that cost is O(transcript),
+	 * paid on every wheel notch. Containers consult {@link intersectsWindow} to
+	 * skip whole subtrees; the bound is advisory, so a component that publishes
+	 * without asking still behaves correctly, just less cheaply.
+	 */
+	setRowWindow(start: number, end: number): void {
+		this.#windowStart = start;
+		this.#windowEnd = end;
+	}
+
+	/**
+	 * Whether a child occupying `rowCount` rows starting at local `rowStart`
+	 * can reach the collection window. Half-open against `end`.
+	 */
+	intersectsWindow(rowStart: number, rowCount: number): boolean {
+		if (rowCount <= 0) return false;
+		const start = this.#offset + rowStart;
+		return start < this.#windowEnd && start + rowCount > this.#windowStart;
 	}
 
 	/**
@@ -233,6 +260,8 @@ export class HitZoneSink {
 		this.#zones = [];
 		this.#offset = 0;
 		this.#colOffset = 0;
+		this.#windowStart = Number.NEGATIVE_INFINITY;
+		this.#windowEnd = Number.POSITIVE_INFINITY;
 	}
 }
 
