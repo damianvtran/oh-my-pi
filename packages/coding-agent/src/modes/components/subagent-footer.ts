@@ -59,6 +59,7 @@ export class SubagentFooter implements Component, HitZoneProvider {
 				chip.action,
 				{
 					zoneKey: `subagent-footer:${chip.action}`,
+					pointerShape: "pointer",
 					onZoneClick: () => {
 						this.deps.navigate(chip.action);
 						return true;

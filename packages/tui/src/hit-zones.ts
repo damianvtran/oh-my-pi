@@ -46,6 +46,17 @@ export interface ZoneMouseEvent {
 }
 
 /**
+ * Mouse cursor shapes a zone can request, named after the CSS cursor keywords
+ * that OSC 22 carries (`ESC ] 22 ; <shape> BEL`).
+ *
+ * Deliberately three: the vocabulary a terminal UI can actually justify is
+ * "this activates", "this takes text" and "this is ordinary". Terminals differ
+ * in which CSS names they accept, and these three are the universally
+ * implemented ones.
+ */
+export type PointerShape = "default" | "pointer" | "text";
+
+/**
  * Implemented by anything that wants pointer input. Instances are compared by
  * {@link zoneKey}, never by object identity: a component is free to rebuild its
  * zone objects every frame, and hover state still survives because the key is
@@ -58,6 +69,20 @@ export interface MouseZoneTarget {
 	 * Must be unique within a frame.
 	 */
 	readonly zoneKey: string;
+
+	/**
+	 * Mouse cursor to request while the pointer is inside this zone.
+	 *
+	 * A TUI has no other way to say "this is a control": in a GUI the cursor
+	 * changing to a hand IS the affordance, and without it every clickable row
+	 * has to advertise itself with visible chrome. Terminals that implement
+	 * OSC 22 let the app ask; the engine emits it only where it is supported and
+	 * falls back to leaving the cursor alone, so this is a progressive
+	 * enhancement and never a correctness dependency.
+	 *
+	 * Omit for zones that are not controls; the engine restores the default.
+	 */
+	readonly pointerShape?: PointerShape;
 
 	/**
 	 * Primary activation. Fired on mouse **up** inside the zone when the press

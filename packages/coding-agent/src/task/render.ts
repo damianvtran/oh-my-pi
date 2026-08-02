@@ -1624,6 +1624,7 @@ class TaskAgentBlock implements Component, HitZoneProvider {
 		if (existing) return existing;
 		const target: MouseZoneTarget = {
 			zoneKey: `task-agent:${agentId}`,
+			pointerShape: "pointer",
 			onZoneClick: (_event: ZoneMouseEvent) => {
 				const focus = SessionFocusController.active();
 				if (!focus?.canFocus(agentId)) return false;

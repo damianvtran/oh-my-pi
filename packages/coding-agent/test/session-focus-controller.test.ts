@@ -45,6 +45,7 @@ interface Harness {
 	main: SessionStub;
 	handledEvents: unknown[];
 	setSessionCalls: Array<[AgentSession, string | undefined]>;
+	startupChromeHiddenCalls: boolean[];
 	counts: {
 		clearTransientSessionUi: () => number;
 		resetTranscriptAnchors: () => number;
@@ -57,6 +58,7 @@ function makeHarness(): Harness {
 	const main = makeSessionStub();
 	const handledEvents: unknown[] = [];
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
+	const startupChromeHiddenCalls: boolean[] = [];
 	let clearTransientSessionUi = 0;
 	let resetTranscriptAnchors = 0;
 	let renderInitialMessages = 0;
@@ -88,6 +90,9 @@ function makeHarness(): Harness {
 			renderInitialMessages++;
 		},
 		updateEditorBorderColor() {},
+		setStartupChromeHidden: (hidden: boolean) => {
+			startupChromeHiddenCalls.push(hidden);
+		},
 		ui: { requestRender() {} },
 		showStatus() {},
 		collabGuest: undefined,
@@ -103,6 +108,7 @@ function makeHarness(): Harness {
 		registry,
 		main,
 		handledEvents,
+		startupChromeHiddenCalls,
 		setSessionCalls,
 		counts: {
 			clearTransientSessionUi: () => clearTransientSessionUi,
@@ -137,6 +143,7 @@ describe("SessionFocusController", () => {
 		expect(h.counts.resetTranscriptAnchors()).toBe(1);
 		expect(h.counts.renderInitialMessages()).toBe(1);
 		expect(h.setSessionCalls).toEqual([[worker.session, "Worker"]]);
+		expect(h.startupChromeHiddenCalls).toEqual([true]);
 
 		const event = { type: "message_start", message: { role: "user" } };
 		await worker.emit(event);
@@ -187,6 +194,7 @@ describe("SessionFocusController", () => {
 			[parent.session, "Parent"],
 			[h.main.session, undefined],
 		]);
+		expect(h.startupChromeHiddenCalls).toEqual([true, true, false]);
 	});
 
 	it("parking the focused agent auto-unfocuses back to the main session", async () => {
