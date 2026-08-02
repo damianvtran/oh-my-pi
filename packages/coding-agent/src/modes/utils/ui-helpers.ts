@@ -161,10 +161,8 @@ export class UiHelpers {
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.ctx.ui, message.excludeFromContext);
-				if (message.output) {
-					component.appendOutput(message.output);
-				}
 				component.setComplete(message.exitCode, message.cancelled, {
+					output: message.output,
 					truncation: message.meta?.truncation,
 				});
 				this.ctx.chatContainer.addChild(component);
@@ -172,10 +170,8 @@ export class UiHelpers {
 			}
 			case "pythonExecution": {
 				const component = new EvalExecutionComponent(message.code, this.ctx.ui, message.excludeFromContext);
-				if (message.output) {
-					component.appendOutput(message.output);
-				}
 				component.setComplete(message.exitCode, message.cancelled, {
+					output: message.output,
 					truncation: message.meta?.truncation,
 				});
 				this.ctx.chatContainer.addChild(component);

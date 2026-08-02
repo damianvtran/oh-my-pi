@@ -16,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
+import { DEFAULT_MAX_BYTES, TailBuffer } from "../../session/streaming-output";
 import type { TruncationMeta } from "../../tools/output-meta";
 import { isFullscreenViewport, PREVIEW_LIMITS } from "../../tools/render-utils";
 import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
@@ -45,6 +46,8 @@ export class BashExecutionComponent extends Container {
 	#outputLines: string[] = [];
 	/** Sanitized final output retained independently of display-line clamping. */
 	#copyOutput = "";
+	/** Bounded source for exceptional completions that never return a final OutputSink summary. */
+	#streamCopyOutput = new TailBuffer(DEFAULT_MAX_BYTES);
 	#status: ExecutionStatus = "running";
 	#exitCode: number | undefined = undefined;
 	#loader: Loader;
@@ -111,6 +114,10 @@ export class BashExecutionComponent extends Container {
 	}
 
 	appendOutput(chunk: string): void {
+		const clean = sanitizeWithOptionalSixelPassthrough(chunk, sanitizeText);
+		// Capture before the display throttle: dropped paint chunks must still be
+		// copyable when an executor throws instead of returning its final summary.
+		this.#streamCopyOutput.append(clean);
 		// During high-throughput output (e.g. seq 1 500M), processing every
 		// chunk would saturate the event loop. Instead, accept one chunk per
 		// throttle window and drop the rest — the OutputSink captures everything
@@ -121,7 +128,7 @@ export class BashExecutionComponent extends Container {
 			this.#chunkGate = false;
 		}, CHUNK_THROTTLE_MS);
 
-		const incomingLines = chunk.split("\n");
+		const incomingLines = clean.split("\n");
 		if (this.#outputLines.length > 0 && incomingLines.length > 0) {
 			const lastIndex = this.#outputLines.length - 1;
 			const mergedLines = [`${this.#outputLines[lastIndex]}${incomingLines[0]}`, ...incomingLines.slice(1)];
@@ -287,12 +294,13 @@ export class BashExecutionComponent extends Container {
 	#setOutput(output: string): void {
 		const clean = sanitizeWithOptionalSixelPassthrough(output, sanitizeText);
 		this.#copyOutput = clean;
+		this.#streamCopyOutput = new TailBuffer(DEFAULT_MAX_BYTES);
 		this.#outputLines = clean ? this.#clampLinesPreservingSixel(clean.split("\n")) : [];
 	}
 
 	/** Command and complete retained output, independent of the collapsed preview. */
 	#copySource(): string {
-		const output = (this.#copyOutput || this.getOutput()).trimEnd();
+		const output = (this.#copyOutput || this.#streamCopyOutput.text() || this.getOutput()).trimEnd();
 		const command = `Bash:\n\n${this.command}`;
 		return output.length > 0 ? `${command}\n\nOutput:\n${output}` : command;
 	}
