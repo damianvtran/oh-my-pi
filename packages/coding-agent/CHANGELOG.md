@@ -393,6 +393,12 @@
 - Upgraded the bundled omptype schema engine: intersection and pipe operators, bigint and RegExp literals in the string DSL, Standard Schema V1 interop, JSON Schema import via fromJsonSchema(), and richer union/collection error reporting.
 
 ## [17.2.7] - 2026-08-03
+### Added
+
+- Added the `/credential` slash command (alias `/cred`): hand the agent a secret it can use but never read. `/credential <KEY>` opens a masked prompt that replaces the composer, so the value never enters the editor buffer, its history, or a transcript entry; it is registered with the session's `SecretObfuscator`, so the model only ever sees a keyed `$$KEY_<hash>$$` placeholder while `deobfuscateToolArguments` substitutes the real bytes into a tool call's arguments just before the tool runs (typically a `bash` `env` value). `/credential` lists what is stored, `--forget <KEY>` / `--forget-all` revoke the model's reference while the value stays redacted for the rest of the session. Values are memory-only and never serialized. Works with `secrets.enabled` off — that setting governs *automatic* redaction, while an explicitly handed-over credential is always redacted.
+- Added a `secret: true` mode to the `ask` tool so the agent can request a credential itself. The question shows the same masked prompt instead of an option list, stores the answer under the question's `id`, and returns only the placeholder — the tool result text and `details.customInput`, both persisted verbatim to the session JSONL, never hold the value. A declined or unstorable answer returns `<not provided>` with a reason instead of aborting the turn.
+- Added a `<session-credentials>` system-prompt block listing each stored key and its placeholder, plus the rules that keep a placeholder from leaking (never into a file or a `task` subagent; prefer `env` over inlining). It is emitted only when at least one credential is stored, so sessions that never use the feature pay no tokens for it.
+- Added masked entry to the hook input dialog (`ui.input(..., { mask: true })`, backed by the existing pi-tui `Input.mask`), and switched the Smithery API-key prompt to use it — it previously echoed a live API key in cleartext.
 
 ### Changed
 

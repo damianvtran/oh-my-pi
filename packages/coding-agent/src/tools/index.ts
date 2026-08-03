@@ -405,6 +405,10 @@ export interface ToolSession {
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	/** Return image attachments visible to tools for resolving labels such as `Image #1`. */
 	getImageAttachments?: () => ImageAttachmentEntry[];
+	/** Runtime credential vault. Present only for sessions built with one; `ask`'s
+	 *  secret mode refuses to capture a value when it is missing, since without it
+	 *  there is nowhere to put a secret that is not the transcript. */
+	credentials?: import("../secrets/session-credentials").SessionCredentials;
 }
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;

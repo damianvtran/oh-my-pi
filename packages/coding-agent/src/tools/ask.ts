@@ -35,6 +35,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
 import { getMarkdownTheme, type Theme, theme } from "../modes/theme/theme";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
+import { describeStoreFailure, normalizeCredentialKey } from "../secrets/session-credentials";
 import { vocalizer } from "../tts/vocalizer";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
 import type { ToolSession } from ".";
@@ -54,6 +55,9 @@ const RESERVED_OPTION_LABELS: Record<string, true> = {
 	[NEXT_OPTION]: true,
 };
 
+/** Stands in for a secret answer that was declined or could not be stored. */
+const SECRET_NOT_PROVIDED = "<not provided>";
+
 const OptionItem = arkType({
 	label: arkType("string").describe("display label"),
 	"description?": arkType("string").describe("optional explanatory text displayed below the label"),
@@ -67,6 +71,9 @@ const QuestionItem = arkType({
 	options: OptionItem.array().describe("available options"),
 	"multi?": arkType("boolean").describe("allow multiple selections"),
 	"recommended?": arkType("number").describe("recommended option index"),
+	"secret?": arkType("boolean").describe(
+		"prompt for a masked credential instead of options; the answer is stored and only its placeholder is returned",
+	),
 }).narrow((question, ctx) => {
 	const reserved = question.options.find(option => RESERVED_OPTION_LABELS[option.label] === true);
 	return (
@@ -446,6 +453,17 @@ interface UIContext {
 		prefill?: string,
 		dialogOptions?: { signal?: AbortSignal },
 		editorOptions?: { promptStyle?: boolean },
+	): Promise<string | undefined>;
+	/**
+	 * Single-line dialog used only by secret questions. Masked entry needs the
+	 * `Input` primitive; the multi-line `editor` above has no masking and would
+	 * paint the credential into the terminal.
+	 */
+	input(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: { signal?: AbortSignal },
+		inputOptions?: { mask?: boolean },
 	): Promise<string | undefined>;
 }
 
@@ -846,6 +864,67 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		});
 	}
 
+	/**
+	 * Collect a credential for a `secret: true` question.
+	 *
+	 * The value goes straight from the masked dialog into the session vault, and
+	 * the caller receives the vault's placeholder as `customInput`. That is the
+	 * whole trick: the placeholder travels the ordinary answer path — tool
+	 * result, `AskToolDetails`, session JSONL, transcript, HTML export — all of
+	 * which persist their input verbatim, and none of which ever hold the secret.
+	 *
+	 * The question's `id` names the credential, so a later `/credential` listing
+	 * shows it alongside command-stored ones.
+	 *
+	 * Refusals (no vault, cancelled, unstorable) return a normal answer whose
+	 * text explains what happened. Throwing would abort the whole turn, and a
+	 * model that asked for one optional secret among several questions should
+	 * learn it did not get it, not lose the other answers.
+	 */
+	async #askSecretQuestion(
+		ui: UIContext,
+		q: AskParams["questions"][number],
+		signal?: AbortSignal,
+	): Promise<SelectionResult> {
+		// `customInput` doubles as "an answer exists": leaving it undefined with no
+		// selected option is how `execute` recognizes a dismissed dialog, and would
+		// abort the whole turn. A secret question always answers — with the
+		// placeholder on success, or this inert marker plus a reason on refusal —
+		// so a declined credential costs the model that one answer, not the turn
+		// and not the other answers in the batch. The marker cannot be mistaken
+		// for a value: a real one is always a `$$…$$` placeholder.
+		const refuse = (reason: string): SelectionResult => ({
+			selectedOptions: [],
+			customInput: SECRET_NOT_PROVIDED,
+			note: reason,
+			cancelled: false,
+			timedOut: false,
+		});
+		const vault = this.session.credentials;
+		if (!vault) return refuse("credential storage is unavailable in this session");
+		const key = normalizeCredentialKey(q.id) ?? "CREDENTIAL";
+		const showPrompt = () =>
+			ui.input(
+				`${q.question}\n\n_Hidden input, stored as **${key}**. Enter stores, esc skips._`,
+				undefined,
+				{ signal },
+				{ mask: true },
+			);
+		const raw = signal ? await untilAborted(signal, showPrompt) : await showPrompt();
+		if (raw === undefined) return refuse("user declined to provide the credential");
+		// Trimmed for the same reason as `/credential`: a pasted token routinely
+		// carries a trailing newline that silently breaks authentication later.
+		const result = vault.store(key, raw.trim(), "ask");
+		if (!result.ok) return refuse(describeStoreFailure(result.reason, key));
+		return {
+			selectedOptions: [],
+			customInput: result.credential.placeholder,
+			note: `stored as credential ${result.credential.key}; the placeholder resolves to the real value inside tool arguments only`,
+			cancelled: false,
+			timedOut: false,
+		};
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: AskParams,
@@ -865,6 +944,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			select: (prompt, options, dialogOptions) => extensionUi.select(prompt, options, dialogOptions),
 			editor: (title, prefill, dialogOptions, editorOptions) =>
 				extensionUi.editor(title, prefill, dialogOptions, editorOptions),
+			input: (title, placeholder, dialogOptions, inputOptions) =>
+				extensionUi.input(title, placeholder, dialogOptions, inputOptions),
 		};
 
 		// Determine timeout based on settings and plan mode
@@ -891,7 +972,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
 		}
 
-		const richAskDialog = extensionUi.askDialog;
+		// A secret question needs a masked single-line prompt, which the batched
+		// rich dialog cannot offer — and that dialog also echoes free-text answers
+		// back into its own option list. Fall through to the sequential path, where
+		// each question is acquired individually and `askSecretQuestion` can take
+		// over. One secret question forces the whole batch down this path so a
+		// mixed batch is still answered in a single coherent flow.
+		const hasSecretQuestion = params.questions.some(q => q.secret === true);
+		const richAskDialog = hasSecretQuestion ? undefined : extensionUi.askDialog;
 		if (richAskDialog) {
 			try {
 				const showRichDialog = () =>
@@ -995,6 +1083,14 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 				...(option.description?.trim() ? { description: option.description.trim() } : {}),
 			}));
 			const optionLabels = questionOptions.map(getAskOptionLabel);
+			// Secret questions never reach the selector. `askSecretQuestion` returns
+			// the same shape, with the vault placeholder standing in for
+			// `customInput`, so every downstream consumer — response text, details,
+			// session persistence, the transcript renderer — handles it as ordinary
+			// free text and none of them ever see the credential.
+			if (q.secret === true) {
+				return { ...(await this.#askSecretQuestion(ui, q, signal)), optionLabels };
+			}
 			try {
 				const { selectedOptions, customInput, note, navigation, cancelled, timedOut } = await askSingleQuestion(
 					ui,

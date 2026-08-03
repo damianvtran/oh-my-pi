@@ -178,6 +178,7 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { SessionCredentials } from "../secrets/session-credentials";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -648,6 +649,7 @@ export class AgentSession {
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
+	#credentials: SessionCredentials | undefined;
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
@@ -1327,6 +1329,7 @@ export class AgentSession {
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
 		this.#obfuscator = config.obfuscator;
+		this.#credentials = config.credentials;
 		const providerBoundaryHost: SessionProviderBoundaryHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1778,6 +1781,16 @@ export class AgentSession {
 	/** Secret obfuscator, when secrets are configured; /share redaction reuses it. */
 	get obfuscator(): SecretObfuscator | undefined {
 		return this.#obfuscator;
+	}
+
+	/**
+	 * Runtime credential vault backing `/credential` and `ask`'s secret mode.
+	 * Absent for sessions built without one (e.g. embedded SDK callers that never
+	 * pass it), in which case the command reports the feature as unavailable
+	 * rather than silently degrading to plaintext capture.
+	 */
+	get credentials(): SessionCredentials | undefined {
+		return this.#credentials;
 	}
 
 	/** Whether a TTSR abort is pending (stream was aborted to inject rules) */

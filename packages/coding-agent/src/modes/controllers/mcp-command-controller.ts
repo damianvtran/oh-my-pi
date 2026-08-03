@@ -2237,7 +2237,10 @@ export class MCPCommandController {
 
 	async #promptSmitheryApiKey(promptLabel: string): Promise<string | null> {
 		for (;;) {
-			const input = await this.ctx.showHookInput(promptLabel);
+			// Masked: this is a live API key, and the prompt replaces the composer in
+			// the terminal where anyone watching (or any screen recording) would
+			// otherwise read it verbatim.
+			const input = await this.ctx.showHookInput(promptLabel, undefined, { mask: true });
 			if (input === undefined) return null;
 			const apiKey = input.trim();
 			if (!apiKey) {

@@ -482,7 +482,7 @@ export interface InteractiveModeContext {
 		dialogOptions?: InteractiveSelectorDialogOptions,
 	): Promise<string | undefined>;
 	hideHookSelector(): void;
-	showHookInput(title: string, placeholder?: string): Promise<string | undefined>;
+	showHookInput(title: string, placeholder?: string, inputOptions?: { mask?: boolean }): Promise<string | undefined>;
 	hideHookInput(): void;
 	showHookEditor(
 		title: string,

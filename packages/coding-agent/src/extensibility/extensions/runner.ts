@@ -155,8 +155,8 @@ function createHandlerUIContext(
 			runDialog(() => ui.select(title, options, attachHandlerSignal(dialogOptions, handlerSignal))),
 		confirm: (title, message, dialogOptions) =>
 			runDialog(() => ui.confirm(title, message, attachHandlerSignal(dialogOptions, handlerSignal))),
-		input: (title, placeholder, dialogOptions) =>
-			runDialog(() => ui.input(title, placeholder, attachHandlerSignal(dialogOptions, handlerSignal))),
+		input: (title, placeholder, dialogOptions, inputOptions) =>
+			runDialog(() => ui.input(title, placeholder, attachHandlerSignal(dialogOptions, handlerSignal), inputOptions)),
 		askDialog: askDialog
 			? (questions, dialogOptions) =>
 					runDialog(() => askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal)))
