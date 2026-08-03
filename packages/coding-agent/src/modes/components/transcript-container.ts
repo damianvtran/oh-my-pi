@@ -9,6 +9,9 @@ import {
 	type NativeScrollbackWidthEpoch,
 	type RenderStablePrefix,
 	type ViewportTailProvider,
+	type VirtualViewportProvider,
+	type VirtualViewportRequest,
+	type VirtualViewportResult,
 } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { isToolActivityComponent } from "./tool-activity";
@@ -189,6 +192,24 @@ interface BlockSegment {
 	version: number | undefined;
 }
 
+/**
+ * Geometry retained only by the fullscreen virtual viewport. Unlike
+ * {@link BlockSegment}, this ledger may cover a suffix of `children`: older
+ * blocks do not exist in the materialized frame until the reader approaches
+ * its top.
+ */
+interface ViewportBlockSegment {
+	component: Component;
+	sourceIndex: number;
+	rawRef: readonly string[];
+	contribution: readonly string[];
+	width: number;
+	generation: number;
+	startRow: number;
+	rowCount: number;
+	sep: number;
+}
+
 const EMPTY_SEGMENTS: BlockSegment[] = [];
 /** Shared empty result for an empty viewport-tail render (no allocation). */
 const EMPTY_TAIL: readonly string[] = [];
@@ -226,7 +247,8 @@ export class TranscriptContainer
 		NativeScrollbackCommittedRows,
 		NativeScrollbackWidthEpoch,
 		RenderStablePrefix,
-		ViewportTailProvider
+		ViewportTailProvider,
+		VirtualViewportProvider
 {
 	#toolActivityVisible = true;
 	// Bumped to retire every block segment at once (theme change / clear); a
@@ -263,6 +285,20 @@ export class TranscriptContainer
 	// between engine frames lower it; they can never inflate it.
 	#stableRowsFloor = 0;
 
+	// Fullscreen keeps a bounded, progressively revealed suffix separate from
+	// the append-mode frame above. This prevents native-scrollback bookkeeping
+	// from inheriting partial geometry while letting the alternate-screen
+	// viewport avoid touching blocks that cannot intersect its window.
+	#viewportInitialized = false;
+	#viewportStartIndex = 0;
+	#viewportSourceCount = 0;
+	#viewportLines: string[] = [];
+	#viewportSegments: ViewportBlockSegment[] = [];
+	#viewportRevision = 0;
+	// `blockStartRows` / `publishHitZones` are consumed synchronously after the
+	// latest render call. This flag selects the ledger that produced those rows.
+	#activeViewportGeometry = false;
+
 	/**
 	 * Fired when the transcript is about to stop being empty, before the block
 	 * is added. The fullscreen home screen comes down here: "there is a
@@ -287,6 +323,12 @@ export class TranscriptContainer
 		this.invalidate();
 	}
 
+	override removeChild(component: Component): void {
+		const existed = this.children.includes(component);
+		super.removeChild(component);
+		if (existed) this.#resetVirtualViewport();
+	}
+
 	override invalidate(): void {
 		// Theme/global invalidation: retire every diff snapshot so stale styling
 		// is not diffed against the recolored render.
@@ -298,6 +340,7 @@ export class TranscriptContainer
 		this.#generation++;
 		super.clear();
 		this.#committedRows = 0;
+		this.#resetVirtualViewport();
 	}
 
 	override setNativeScrollbackCommittedRows(rows: number): void {
@@ -334,14 +377,20 @@ export class TranscriptContainer
 	 * ledger is the same record {@link publishHitZones} already trusts.
 	 */
 	blockStartRows(): readonly number[] | undefined {
+		const starts: number[] = [];
+		if (this.#activeViewportGeometry) {
+			for (const segment of this.#viewportSegments) {
+				if (this.children[segment.sourceIndex] !== segment.component) return undefined;
+				if (segment.rowCount > 0) starts.push(segment.startRow);
+			}
+			return starts;
+		}
 		const segments = this.#segments;
 		if (segments.length !== this.children.length) return undefined;
-		const starts: number[] = [];
 		for (let i = 0; i < this.children.length; i++) {
 			const segment = segments[i];
 			if (segment === undefined || segment.component !== this.children[i]) return undefined;
-			if (segment.rowCount <= 0) continue;
-			starts.push(segment.startRow);
+			if (segment.rowCount > 0) starts.push(segment.startRow);
 		}
 		return starts;
 	}
@@ -358,15 +407,16 @@ export class TranscriptContainer
 	 * the separator row and the blank edges assembly stripped.
 	 */
 	override publishHitZones(sink: HitZoneSink): void {
-		const segments = this.#segments;
-		if (segments.length !== this.children.length) return;
-		for (let i = 0; i < this.children.length; i++) {
-			const child = this.children[i]!;
-			const segment = segments[i];
+		const segments = this.#activeViewportGeometry ? this.#viewportSegments : this.#segments;
+		if (!this.#activeViewportGeometry && segments.length !== this.children.length) return;
+		for (let i = 0; i < segments.length; i++) {
+			const segment = segments[i]!;
+			const sourceIndex = this.#activeViewportGeometry ? (segment as ViewportBlockSegment).sourceIndex : i;
+			const child = this.children[sourceIndex];
 			// A ledger that no longer describes this child cannot be mapped, and a
 			// block that contributed nothing this frame owns no rows to claim.
 			// Publishing at a guessed row would hand its neighbour's rows away.
-			if (segment === undefined || segment.component !== child || segment.rowCount <= 0) continue;
+			if (child === undefined || segment.component !== child || segment.rowCount <= 0) continue;
 			if (!isHitZoneProvider(child)) continue;
 			// Blocks the frame cannot show own no reachable zone, and publishing
 			// them is the whole per-frame cost of a long transcript: the walk
@@ -377,12 +427,8 @@ export class TranscriptContainer
 			// leads with the separator row and the test is a strict superset of
 			// the painted span. That is what makes it safe to test one interval
 			// and publish at another (`localRowZero` below) — it can over-include
-			// but never under-include a painted row. Redefining `rowCount` as the
-			// contribution alone would turn this into an off-by-one at the bottom
-			// window edge and silently drop the last row's click target.
+			// but never under-include a painted row.
 			if (!sink.intersectsWindow(segment.startRow, segment.rowCount)) continue;
-			// The block's local row 0 is its raw render row 0, which assembly
-			// placed after the separator and after the rows it trimmed off the head.
 			const localRowZero = segment.startRow + segment.sep - leadingTrimmedRows(segment.rawRef);
 			sink.withOffset(localRowZero, () => child.publishHitZones(sink));
 		}
@@ -541,6 +587,230 @@ export class TranscriptContainer
 		return index === children.length - 1;
 	}
 
+	#resetVirtualViewport(): void {
+		this.#viewportInitialized = false;
+		this.#viewportStartIndex = 0;
+		this.#viewportSourceCount = 0;
+		this.#viewportLines = [];
+		this.#viewportSegments = [];
+		this.#viewportRevision++;
+		this.#activeViewportGeometry = false;
+	}
+
+	#initializeVirtualViewport(): void {
+		this.#viewportInitialized = true;
+		this.#viewportStartIndex = this.children.length;
+		this.#viewportSourceCount = this.children.length;
+		this.#viewportLines = [];
+		this.#viewportSegments = [];
+		this.#viewportRevision++;
+	}
+
+	#viewportStructureMatches(): boolean {
+		if (!this.#viewportInitialized || this.#viewportSourceCount > this.children.length) return false;
+		if (this.#viewportSegments.length !== this.#viewportSourceCount - this.#viewportStartIndex) return false;
+		for (const segment of this.#viewportSegments) {
+			if (this.children[segment.sourceIndex] !== segment.component) return false;
+		}
+		return true;
+	}
+
+	#makeViewportSegment(sourceIndex: number, width: number): ViewportBlockSegment {
+		const component = this.children[sourceIndex]!;
+		const rawRef = component.render(width);
+		return {
+			component,
+			sourceIndex,
+			rawRef,
+			contribution: stripPlainBlankEdges(rawRef),
+			width,
+			generation: this.#generation,
+			startRow: 0,
+			rowCount: 0,
+			sep: 0,
+		};
+	}
+
+	/**
+	 * Reassemble only the suffix whose geometry can have changed. Streaming
+	 * updates normally hit the final segment, so this is O(changed tail), not
+	 * O(materialized history).
+	 */
+	#rebuildVirtualViewportFrom(segmentIndex: number): void {
+		const segments = this.#viewportSegments;
+		const lines = this.#viewportLines;
+		let row = segmentIndex > 0 ? segments[segmentIndex - 1]!.startRow + segments[segmentIndex - 1]!.rowCount : 0;
+		lines.length = row;
+		for (let i = segmentIndex; i < segments.length; i++) {
+			const segment = segments[i]!;
+			const contribution = segment.contribution;
+			const sep = contribution.length > 0 && row > 0 && !isPlainBlank(lines[row - 1]!) ? 1 : 0;
+			segment.startRow = row;
+			segment.sep = sep;
+			if (contribution.length === 0) {
+				segment.rowCount = 0;
+				continue;
+			}
+			if (sep) lines.push("");
+			for (let j = 0; j < contribution.length; j++) lines.push(contribution[j]!);
+			segment.rowCount = sep + contribution.length;
+			row += segment.rowCount;
+		}
+		this.#viewportRevision++;
+	}
+
+	/** Materialize older blocks in one batch and return the exact head shift. */
+	#prependVirtualViewport(width: number, requestedRows: number): number {
+		if (this.#viewportStartIndex <= 0 || requestedRows <= 0) return 0;
+		const oldRows = this.#viewportLines.length;
+		const additions: ViewportBlockSegment[] = [];
+		let addedRows = 0;
+		let sourceIndex = this.#viewportStartIndex - 1;
+		while (sourceIndex >= 0 && addedRows < requestedRows) {
+			const segment = this.#makeViewportSegment(sourceIndex, width);
+			additions.push(segment);
+			if (segment.contribution.length > 0) {
+				addedRows += segment.contribution.length + (additions.length > 1 || oldRows > 0 ? 1 : 0);
+			}
+			sourceIndex--;
+		}
+		if (additions.length === 0) return 0;
+		additions.reverse();
+		this.#viewportStartIndex = sourceIndex + 1;
+		this.#viewportSegments = [...additions, ...this.#viewportSegments];
+		this.#rebuildVirtualViewportFrom(0);
+		// An initial tail has no old visual anchor to preserve.
+		return oldRows > 0 ? Math.max(0, this.#viewportLines.length - oldRows) : 0;
+	}
+
+	#appendVirtualViewport(width: number): void {
+		if (this.#viewportSourceCount >= this.children.length) return;
+		const fromSegment = this.#viewportSegments.length;
+		for (let sourceIndex = this.#viewportSourceCount; sourceIndex < this.children.length; sourceIndex++) {
+			this.#viewportSegments.push(this.#makeViewportSegment(sourceIndex, width));
+		}
+		this.#viewportSourceCount = this.children.length;
+		this.#rebuildVirtualViewportFrom(fromSegment);
+	}
+
+	/**
+	 * Refresh only blocks intersecting the visible+overscan band. Off-screen
+	 * blocks retain their last layout until the reader approaches them.
+	 */
+	#refreshVirtualViewport(width: number, startRow: number, endRow: number, request: VirtualViewportRequest): void {
+		const segments = this.#viewportSegments;
+		if (segments.length === 0 || !request.refreshVisible) return;
+		const fromRow = Math.max(0, startRow - request.overscanRows);
+		const toRow = Math.max(fromRow, endRow + request.overscanRows);
+		const candidates = new Set<number>();
+
+		let lo = 0;
+		let hi = segments.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			const segment = segments[mid]!;
+			if (segment.startRow + segment.rowCount <= fromRow) lo = mid + 1;
+			else hi = mid;
+		}
+		// Zero-row placeholders (a spinner before its first tick, a pending async
+		// card) share their successor's start row. Include the whole equal-row
+		// run so a visible empty block can transition to painted content.
+		while (lo > 0 && segments[lo - 1]!.startRow >= fromRow) lo--;
+		for (let i = lo; i < segments.length; i++) {
+			const segment = segments[i]!;
+			if (segment.startRow >= toRow) break;
+			if (segment.rowCount === 0) {
+				if (segment.startRow >= fromRow) candidates.add(i);
+			} else if (segment.startRow + segment.sep < toRow && segment.startRow + segment.rowCount > fromRow) {
+				candidates.add(i);
+			}
+		}
+
+		let firstChanged = segments.length;
+		for (const index of candidates) {
+			const segment = segments[index]!;
+			const rawRef = segment.component.render(width);
+			if (segment.rawRef === rawRef && segment.width === width && segment.generation === this.#generation) continue;
+			segment.rawRef = rawRef;
+			segment.contribution = stripPlainBlankEdges(rawRef);
+			segment.width = width;
+			segment.generation = this.#generation;
+			if (index < firstChanged) firstChanged = index;
+		}
+		if (firstChanged < segments.length) this.#rebuildVirtualViewportFrom(firstChanged);
+	}
+
+	/**
+	 * Once the reader returns to the tail, discard a distant materialized head.
+	 * It remains reconstructible from `children` and will be revealed lazily on
+	 * the next upward traversal.
+	 */
+	#trimVirtualViewport(retainRows: number): number {
+		const lines = this.#viewportLines;
+		if (lines.length <= retainRows * 2) return 0;
+		const targetRow = lines.length - retainRows;
+		let keep = 0;
+		while (keep + 1 < this.#viewportSegments.length && this.#viewportSegments[keep + 1]!.startRow <= targetRow) {
+			keep++;
+		}
+		const trimmedRows = this.#viewportSegments[keep]?.startRow ?? 0;
+		if (trimmedRows <= 0) return 0;
+		this.#viewportSegments = this.#viewportSegments.slice(keep);
+		this.#viewportStartIndex = this.#viewportSegments[0]!.sourceIndex;
+		this.#viewportLines = lines.slice(trimmedRows);
+		this.#rebuildVirtualViewportFrom(0);
+		return trimmedRows;
+	}
+
+	renderVirtualViewport(width: number, request: VirtualViewportRequest): VirtualViewportResult {
+		width = Math.max(1, width);
+		if (!this.#viewportInitialized) this.#initializeVirtualViewport();
+		if (!this.#viewportStructureMatches()) {
+			this.#resetVirtualViewport();
+			this.#initializeVirtualViewport();
+		}
+
+		const nearMaterializedEnd = request.endRow + request.overscanRows >= this.#viewportLines.length;
+		if (request.followEnd || nearMaterializedEnd) this.#appendVirtualViewport(width);
+
+		const hadMaterializedRows = this.#viewportLines.length > 0;
+		let prependedRows = 0;
+		const initialRows = Math.max(0, request.minRows - this.#viewportLines.length);
+		if (initialRows > 0) {
+			prependedRows += this.#prependVirtualViewport(width, initialRows);
+		}
+		const adjustedStart = request.startRow + prependedRows;
+		const nearHead = adjustedStart <= request.overscanRows;
+		if (
+			this.#viewportStartIndex > 0 &&
+			(request.revealAllBefore || (request.revealBefore && hadMaterializedRows && nearHead))
+		) {
+			const revealRows = request.revealAllBefore ? Number.POSITIVE_INFINITY : request.revealRows;
+			prependedRows += this.#prependVirtualViewport(width, revealRows);
+		}
+
+		const viewportRows = Math.max(0, request.endRow - request.startRow);
+		const startRow = request.followEnd
+			? Math.max(0, this.#viewportLines.length - viewportRows)
+			: request.startRow + prependedRows;
+		if (hadMaterializedRows) {
+			this.#refreshVirtualViewport(width, startRow, startRow + viewportRows, request);
+		}
+
+		const trimmedRows =
+			request.followEnd && !request.revealAllBefore
+				? this.#trimVirtualViewport(Math.max(2048, request.minRows * 8))
+				: 0;
+		this.#activeViewportGeometry = true;
+		return {
+			lines: this.#viewportLines,
+			revision: this.#viewportRevision,
+			prependedRows,
+			trimmedRows,
+			complete: this.#viewportStartIndex === 0,
+		};
+	}
+
 	/**
 	 * Render only the bottom `maxRows` rows of the transcript at `width`, walking
 	 * blocks from the last toward the first and stopping the instant enough rows
@@ -585,6 +855,7 @@ export class TranscriptContainer
 	}
 
 	override render(width: number): readonly string[] {
+		this.#activeViewportGeometry = false;
 		width = Math.max(1, width);
 		this.#nativeScrollbackLiveRegionStart = undefined;
 		this.#nativeScrollbackLiveRegionPinned = false;

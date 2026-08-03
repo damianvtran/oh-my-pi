@@ -480,6 +480,65 @@ function asViewportTailProvider(component: Component): ViewportTailProvider | un
 }
 
 /**
+ * Request passed to a long, scrollable child in the fullscreen viewport.
+ *
+ * Coordinates are local to the rows the provider returned on its previous
+ * call. Providers may prepend older rows as the window approaches row zero;
+ * `prependedRows` in the result lets the viewport preserve the reader's visual
+ * anchor while those rows appear above it.
+ */
+export interface VirtualViewportRequest {
+	/** First row the viewport is about to show, before this call's prepend. */
+	startRow: number;
+	/** Exclusive last row the viewport is about to show. */
+	endRow: number;
+	/** Rows to retain/render on either side so the next scroll stays cache-hot. */
+	overscanRows: number;
+	/** Minimum materialized rows for an initial tail render. */
+	minRows: number;
+	/** Minimum older-row batch to reveal when the window reaches the overscan band. */
+	revealRows: number;
+	/** The viewport is following the newest row. */
+	followEnd: boolean;
+	/** An explicit jump-to-start must reveal the real beginning, not one lazy batch. */
+	revealAllBefore: boolean;
+	/** An upward gesture is allowed to materialize older rows near the cache head. */
+	revealBefore: boolean;
+	/** Re-render the near-window blocks; false for scroll/selection-only paints. */
+	refreshVisible: boolean;
+}
+
+export interface VirtualViewportResult {
+	/** Materialized contiguous suffix of the component's logical rows. */
+	lines: readonly string[];
+	/** Monotonic content/layout revision; unlike `lines`, safe for in-place stores. */
+	revision: number;
+	/** Rows inserted before the previous result's row zero during this call. */
+	prependedRows: number;
+	/** Rows discarded from the previous result's head while following the tail. */
+	trimmedRows: number;
+	/** True once the provider has materialized its logical first row. */
+	complete: boolean;
+}
+
+/**
+ * Opt-in virtualization for a tall fullscreen child.
+ *
+ * The ordinary {@link Component.render} contract remains authoritative for
+ * append/native-scrollback mode. Fullscreen uses this seam because painting a
+ * 40-row window must not re-render and concatenate a 40,000-row transcript on
+ * every keypress or wheel notch.
+ */
+export interface VirtualViewportProvider {
+	renderVirtualViewport(width: number, request: VirtualViewportRequest): VirtualViewportResult;
+}
+
+function asVirtualViewportProvider(component: Component): VirtualViewportProvider | undefined {
+	const candidate = component as Component & Partial<VirtualViewportProvider>;
+	return typeof candidate.renderVirtualViewport === "function" ? (candidate as VirtualViewportProvider) : undefined;
+}
+
+/**
  * Interface for components that can receive focus and display a cursor.
  * When focused, the component should emit CURSOR_MARKER at the cursor position
  * in its render output. TUI will find this marker and position the hardware
@@ -1106,12 +1165,27 @@ interface FrameSegment {
 	liveRegionPinned: boolean;
 }
 
-/** Depth-first identity search through `Container`-shaped children. */
+/** Cached root-child contribution used only by the fullscreen compositor. */
+interface FullscreenFrameSegment {
+	component: Component;
+	lines: readonly string[];
+	/** Virtual providers may mutate a persistent line store; this detects it. */
+	revision: number | undefined;
+	rowCount: number;
+	blockStarts: readonly number[];
+	pinned: boolean;
+}
+
+/**
+ * Depth-first identity search through `Container`-shaped children. Active TUI
+ * components accumulate at the tail, so traverse newest-first to keep scoped
+ * input and streaming repaint lookup independent of long transcript history.
+ */
 function subtreeContains(root: Component, target: Component): boolean {
 	if (root === target) return true;
 	const children = (root as Partial<Container>).children;
 	if (!Array.isArray(children)) return false;
-	for (let i = 0; i < children.length; i++) {
+	for (let i = children.length - 1; i >= 0; i--) {
 		if (subtreeContains(children[i]!, target)) return true;
 	}
 	return false;
@@ -1647,6 +1721,10 @@ export class TUI extends Container {
 	// resolved it. Held because only the compose knows the transcript's current
 	// height; see `scrollTo`.
 	#scrollRequest: number | undefined;
+	// Distinguishes an explicit absolute jump (Home / scrollTo(0)) from a wheel
+	#scrollRequestRevealBefore = false;
+	// delta that merely reached the current lazy-cache head.
+	#scrollRequestToStart = false;
 	// Trackpad gesture state for the transcript wheel. Held on the TUI because a
 	// gesture spans reports and has to survive between them.
 	readonly #wheelMomentum = new WheelMomentum();
@@ -1655,6 +1733,10 @@ export class TUI extends Container {
 	// selection extraction both address frame rows, not screen rows.
 	#fullscreenScrollFrame: string[] = [];
 	#fullscreenScrollViewportRows = 0;
+	// Root-child cache for fullscreen composition. Long virtual providers carry
+	// a revision because their persistent row store may change in place.
+	#fullscreenFrameSegments: FullscreenFrameSegment[] = [];
+	#fullscreenComposeWidth = -1;
 	// Rows the scroll region prepends before its first child (the leading gap).
 	// Zone and selection mapping both address composed frame rows, so this has
 	// to shift every scroll-region child by the same amount.
@@ -1768,6 +1850,9 @@ export class TUI extends Container {
 	// once per frame by #doRender.
 	#componentRenderTargets = new Set<Component>();
 	#pendingRenderComponentsOnly = false;
+	// Scroll/hover/selection can repaint the existing window without asking any
+	// component to render. A real content request always clears this intent.
+	#pendingFullscreenViewportOnly = false;
 	// Root children that must re-render during the current compose; null for a
 	// full compose. Non-null only for the duration of a component-scoped
 	// render() call inside #doRender (the scratch set below, reused per frame).
@@ -2314,7 +2399,12 @@ export class TUI extends Container {
 		this.#viewportMode = mode;
 		this.#scrollTop = 0;
 		this.#stickyBottom = true;
+		this.#scrollRequestRevealBefore = false;
 		this.#scrollRequest = undefined;
+		this.#scrollRequestToStart = false;
+		this.#fullscreenFrameSegments = [];
+		this.#fullscreenScrollFrame = [];
+		this.#fullscreenComposeWidth = -1;
 		this.#wheelMomentum.reset();
 		this.#selection.clear();
 		this.#selectionInsets.clear();
@@ -2369,7 +2459,7 @@ export class TUI extends Container {
 	 * without a separate gesture.
 	 */
 	scrollBy(delta: number): boolean {
-		return this.scrollTo(this.#scrollTop + delta);
+		return this.#queueScroll(this.#scrollTop + Math.round(delta), false);
 	}
 
 	/**
@@ -2396,15 +2486,26 @@ export class TUI extends Container {
 	 * which address rows of the frame on screen, stay correct until then.
 	 */
 	scrollTo(row: number): boolean {
+		return this.#queueScroll(Math.max(0, Math.round(row)), row <= 0);
+	}
+
+	#queueScroll(target: number, toStart: boolean): boolean {
 		if (this.#viewportMode !== "fullscreen") return false;
-		const target = Math.max(0, Math.round(row));
-		const provisional = Math.min(this.maxScrollTop, target);
-		const settled = this.#scrollRequest === undefined && provisional === this.#scrollTop && provisional === target;
-		this.#scrollRequest = target;
-		this.#scrollTop = provisional;
+		const revealBefore = toStart || target < this.#scrollTop;
+		const provisional = Math.max(0, Math.min(this.maxScrollTop, target));
+		const settled =
+			!toStart &&
+			this.#scrollRequest === undefined &&
+			!this.#scrollRequestToStart &&
+			provisional === this.#scrollTop &&
+			provisional === target;
 		if (settled) return false;
+		this.#scrollRequest = target;
+		this.#scrollRequestRevealBefore = revealBefore;
+		this.#scrollRequestToStart = toStart;
+		this.#scrollTop = provisional;
 		this.onScrollChange?.();
-		this.requestRender();
+		this.#requestFullscreenViewportRender();
 		return true;
 	}
 
@@ -2451,7 +2552,7 @@ export class TUI extends Container {
 	/** Drop any active selection. Returns true when a repaint is needed. */
 	clearSelection(): boolean {
 		const cleared = this.#selection.clear();
-		if (cleared) this.requestRender();
+		if (cleared) this.#requestFullscreenViewportRender();
 		return cleared;
 	}
 
@@ -2967,9 +3068,25 @@ export class TUI extends Container {
 		this.#renderRequested = false;
 		this.#executeRender();
 	}
+	/**
+	 * Schedule a fullscreen paint that changes only window state (scroll,
+	 * selection, hover). Component rows and block geometry are reused verbatim.
+	 */
+	#requestFullscreenViewportRender(): void {
+		if (this.#viewportMode !== "fullscreen") {
+			this.requestRender();
+			return;
+		}
+		if (!this.#renderRequested && this.#postFullPaintSettleTimer === undefined) {
+			this.#pendingFullscreenViewportOnly = true;
+			this.#pendingRenderComponentsOnly = false;
+		}
+		this.#requestOrdinaryRender();
+	}
 
 	requestRender(force = false, options?: RenderRequestOptions): void {
 		// Any non-component-scoped request makes the pending frame a full one.
+		this.#pendingFullscreenViewportOnly = false;
 		this.#pendingRenderComponentsOnly = false;
 		if (force) {
 			// Forced repaints landing inside the multiplexer resize debounce
@@ -3033,6 +3150,7 @@ export class TUI extends Container {
 	 * cheaper.
 	 */
 	requestComponentRender(component: Component): void {
+		this.#pendingFullscreenViewportOnly = false;
 		if (this.#stopped) return;
 		// Start a component-scoped accumulation only when nothing else is in
 		// flight (a pending throttled request or a deferred ConPTY settle
@@ -3278,11 +3396,11 @@ export class TUI extends Container {
 		if (cached !== undefined && this.children.includes(cached) && subtreeContains(cached, target)) {
 			return cached;
 		}
-		for (const child of this.children) {
-			if (subtreeContains(child, target)) {
-				this.#componentRootCache.set(target, child);
-				return child;
-			}
+		for (let i = this.children.length - 1; i >= 0; i--) {
+			const child = this.children[i]!;
+			if (!subtreeContains(child, target)) continue;
+			this.#componentRootCache.set(target, child);
+			return child;
 		}
 		this.#componentRootCache.delete(target);
 		return null;
@@ -3643,7 +3761,7 @@ export class TUI extends Container {
 			}
 			if (this.#selecting) {
 				const point = this.#viewportPointAt(row, col);
-				if (point && this.#selection.extend(point)) this.requestRender();
+				if (point && this.#selection.extend(point)) this.#requestFullscreenViewportRender();
 				return true;
 			}
 			this.#updateHover(row, col);
@@ -3693,7 +3811,7 @@ export class TUI extends Container {
 				this.#selection.begin(point);
 				this.#selecting = true;
 			}
-			if (cleared) this.requestRender();
+			if (cleared) this.#requestFullscreenViewportRender();
 			return true;
 		}
 		if (event.release) {
@@ -3723,7 +3841,7 @@ export class TUI extends Container {
 						),
 					);
 				}
-				this.requestRender();
+				this.#requestFullscreenViewportRender();
 				return true;
 			}
 			const zone = hitTestZones(this.#zones, row, col);
@@ -3738,7 +3856,7 @@ export class TUI extends Container {
 				const text = zone.target.onZoneCopy?.(zoneEvent);
 				if (text !== undefined) {
 					this.onCopy?.(text);
-					this.requestRender();
+					this.#requestFullscreenViewportRender();
 					return true;
 				}
 			}
@@ -4294,10 +4412,12 @@ export class TUI extends Container {
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 
-		// Consume the component-scoped accumulation: it describes the render
+		// Consume the request-shape accumulation: it describes the render
 		// requests made up to this frame, whichever path the frame takes.
 		const componentScopedOnly = this.#pendingRenderComponentsOnly;
+		const fullscreenViewportOnly = this.#pendingFullscreenViewportOnly;
 		this.#pendingRenderComponentsOnly = false;
+		this.#pendingFullscreenViewportOnly = false;
 
 		// Alt-screen short-circuit. Two things route here:
 		//   - a fullscreen OVERLAY (the vim/less idiom): borrow the alt buffer,
@@ -4368,15 +4488,21 @@ export class TUI extends Container {
 			this.#altMouseTrackingActive = wantMouseTracking;
 		}
 		if (this.#altActive) {
-			this.#componentRenderTargets.clear();
 			// A modal that asked for the whole screen still gets the blank-base
 			// painter even when the app itself is full-screen: it wants to cover
 			// the transcript, not composite over it.
 			if (topOverlay?.options?.fullscreen === true) {
 				this.#renderAltFrame(width, height);
 			} else {
-				this.#renderFullscreenFrame(width, height);
+				this.#renderFullscreenFrame(
+					width,
+					height,
+					componentScopedOnly,
+					fullscreenViewportOnly,
+					this.#componentRenderTargets,
+				);
 			}
+			this.#componentRenderTargets.clear();
 			return;
 		}
 
@@ -5948,32 +6074,25 @@ export class TUI extends Container {
 		lines = this.#prepareLinesArray(lines, width);
 		this.#emitAltFrame(lines, width, height);
 	}
-
 	/**
-	 * Compose and paint one full-screen application frame on the alt buffer.
+	 * Paint the alternate-screen application viewport.
 	 *
-	 * Layout is a two-way partition of the root children (see
-	 * {@link FullscreenPinned}): everything before the first pinned child
-	 * scrolls, everything from it down is welded to the bottom of the viewport.
-	 * The scrolling region is composed in full — the same whole-frame compose
-	 * the append path does — and then windowed, which is what lets a selection
-	 * and a scroll offset both address stable frame rows.
-	 *
-	 * None of the commit ledger runs here. There is no native scrollback to
-	 * protect, so there is nothing to commit, audit or re-anchor.
+	 * Root-child rows are memoized across frames. A virtual transcript
+	 * materializes only a suffix around the visible window, revealing older
+	 * batches as scrolling approaches its head. Scroll/selection-only frames
+	 * therefore perform no component renders and no whole-history
+	 * concatenation; the final draw still considers exactly `height` rows.
 	 */
-	#renderFullscreenFrame(width: number, height: number): void {
+	#renderFullscreenFrame(
+		width: number,
+		height: number,
+		componentScopedOnly: boolean,
+		viewportOnly: boolean,
+		dirtyComponents: ReadonlySet<Component>,
+	): void {
 		const chrome = this.#viewportChrome;
-		// Content is composed narrower than the terminal and inset when painted.
-		// The gutter is what stops text colliding with the window edge, and it is
-		// most of why a filled surface reads as a panel rather than as a wall.
 		const padX = Math.max(0, Math.min(chrome.padX, Math.floor((width - 8) / 2)));
 		const contentWidth = Math.max(1, width - padX * 2);
-		// `padTop`/`padBottom` are chrome: they never scroll. The gap ABOVE the
-		// first transcript block is deliberately NOT chrome — it is the first
-		// row of the scroll region (see `scrollLead` below), so it is present at
-		// rest and scrolls away like any other row instead of leaving a fixed
-		// blank band pinned over a scrolled transcript.
 		const fits = height > chrome.padTop + chrome.padBottom + 4;
 		const padTop = fits ? chrome.padTop : 0;
 		const padBottom = fits ? chrome.padBottom : 0;
@@ -5987,78 +6106,173 @@ export class TUI extends Container {
 			}
 		}
 
-		// Row counts are captured here so zone collection can map each child to
-		// its screen rows without a second render pass, and block starts so the
-		// window can tell a whole block from the remains of a clipped one.
-		//
-		// The concatenation is deliberately NOT cached across frames. Caching it
-		// would have to key on each child's rendered array identity, and the
-		// transcript returns one persistent array it mutates in place — so the
-		// key cannot see a change and the viewport would freeze. The cost this
-		// would save is small anyway: the expensive part of a frame is the
-		// children's own render work, which they memoize themselves.
-		const rowCounts: number[] = new Array(children.length);
-		const scrollLines: string[] = [];
-		const pinnedLines: string[] = [];
-		const blockStarts: number[] = [];
-		for (let i = 0; i < children.length; i++) {
-			const child = children[i]!;
-			const rows = child.render(contentWidth);
-			rowCounts[i] = rows.length;
-			if (i < pinnedFrom) {
-				// One blank leading row, once the scroll region has content.
-				// Emitting it as content rather than as chrome is what makes it
-				// disappear on the first notch of an upward scroll.
-				if (scrollLines.length === 0 && rows.length > 0) scrollLines.push("");
-				const childStart = scrollLines.length;
-				for (const local of this.#localBlockStarts(child, rows.length)) blockStarts.push(childStart + local);
-				for (let j = 0; j < rows.length; j++) scrollLines.push(rows[j]!);
-			} else {
-				for (let j = 0; j < rows.length; j++) pinnedLines.push(rows[j]!);
+		const previous = this.#fullscreenFrameSegments;
+		let cacheValid = this.#fullscreenComposeWidth === contentWidth && previous.length === children.length;
+		if (cacheValid) {
+			for (let i = 0; i < children.length; i++) {
+				if (previous[i]!.component !== children[i] || previous[i]!.pinned !== i >= pinnedFrom) {
+					cacheValid = false;
+					break;
+				}
 			}
 		}
-		blockStarts.push(scrollLines.length);
-		this.#fullscreenScrollLead = scrollLines.length > 0 ? 1 : 0;
-		this.#blockStarts = blockStarts;
 
-		// Bottom chrome gets the rows it asks for, but never the whole screen:
-		// a composer expanded to twenty lines must not squeeze the transcript to
-		// nothing. When it does not fit we keep its TAIL, because the editor and
-		// its caret live at the bottom of that run.
+		let dirtyRoots: Set<Component> | null = null;
+		if (componentScopedOnly && cacheValid) {
+			dirtyRoots = new Set<Component>();
+			for (const target of dirtyComponents) {
+				const root = this.#resolveComponentRoot(target);
+				if (root === null) {
+					dirtyRoots = null;
+					break;
+				}
+				dirtyRoots.add(root);
+			}
+		}
+
+		const segments: FullscreenFrameSegment[] = new Array(children.length);
+		const deferredVirtual: number[] = [];
+		for (let i = 0; i < children.length; i++) {
+			const child = children[i]!;
+			const provider = i < pinnedFrom ? asVirtualViewportProvider(child) : undefined;
+			if (provider) {
+				deferredVirtual.push(i);
+				if (cacheValid) segments[i] = previous[i]!;
+				continue;
+			}
+			const reuse = cacheValid && (viewportOnly || (dirtyRoots !== null && !dirtyRoots.has(child)));
+			if (reuse) {
+				segments[i] = previous[i]!;
+				continue;
+			}
+			const rows = child.render(contentWidth);
+			const previousSegment = cacheValid ? previous[i] : undefined;
+			const blockStarts =
+				previousSegment?.lines === rows ? previousSegment.blockStarts : this.#localBlockStarts(child, rows.length);
+			segments[i] = {
+				component: child,
+				lines: rows,
+				revision: undefined,
+				rowCount: rows.length,
+				blockStarts,
+				pinned: i >= pinnedFrom,
+			};
+		}
+
+		// Pinned chrome is deliberately small, so flattening it is bounded by the
+		// screen rather than by transcript length.
+		const pinnedLines: string[] = [];
+		for (let i = pinnedFrom; i < children.length; i++) {
+			const rows = segments[i]!.lines;
+			for (let j = 0; j < rows.length; j++) pinnedLines.push(rows[j]!);
+		}
 		const bodyRows = Math.max(0, height - padTop - padBottom);
 		const pinnedRows = Math.min(pinnedLines.length, Math.max(0, bodyRows - TUI.#MIN_FULLSCREEN_SCROLL_ROWS));
 		const pinnedWindow = pinnedLines.slice(pinnedLines.length - pinnedRows);
 		const viewportRows = Math.max(0, bodyRows - pinnedRows);
-		// Home state floats the pinned block in the middle of an empty viewport.
-		// The scroll region still exists and still measures zero-or-more rows, so
-		// the transition to the normal layout is just this offset going to zero:
-		// nothing about scrolling, zones or selection changes shape.
+		const overscanRows = Math.max(80, viewportRows * 2);
+		const revealRows = Math.max(160, viewportRows * 4);
+
+		for (const index of deferredVirtual) {
+			const child = children[index]!;
+			const provider = asVirtualViewportProvider(child)!;
+			let rowsBefore = 0;
+			for (let i = 0; i < index; i++) rowsBefore += segments[i]?.rowCount ?? 0;
+			const localStart = Math.max(0, this.#scrollTop - 1 - rowsBefore);
+			const localEnd = Math.max(localStart, this.#scrollTop + viewportRows - 1 - rowsBefore);
+			const refreshVisible =
+				(!viewportOnly || this.#scrollRequest !== undefined) &&
+				(!componentScopedOnly || dirtyRoots === null || dirtyRoots.has(child));
+			const result = provider.renderVirtualViewport(contentWidth, {
+				startRow: localStart,
+				endRow: localEnd,
+				overscanRows,
+				minRows: viewportRows + overscanRows,
+				revealRows,
+				followEnd: this.#stickyBottom,
+				revealAllBefore: this.#scrollRequestToStart,
+				revealBefore: this.#scrollRequestRevealBefore,
+				refreshVisible,
+			});
+			if (result.prependedRows > 0 && !this.#scrollRequestToStart) {
+				this.#scrollTop += result.prependedRows;
+				if (this.#scrollRequest !== undefined) this.#scrollRequest += result.prependedRows;
+			}
+			if (result.trimmedRows > 0) {
+				this.#scrollTop = Math.max(0, this.#scrollTop - result.trimmedRows);
+				if (this.#scrollRequest !== undefined) {
+					this.#scrollRequest = Math.max(0, this.#scrollRequest - result.trimmedRows);
+				}
+			}
+			const previousSegment = cacheValid ? previous[index] : undefined;
+			const blockStarts =
+				previousSegment?.revision === result.revision
+					? previousSegment.blockStarts
+					: this.#localBlockStarts(child, result.lines.length);
+			segments[index] = {
+				component: child,
+				lines: result.lines,
+				revision: result.revision,
+				rowCount: result.lines.length,
+				blockStarts,
+				pinned: false,
+			};
+		}
+
+		let frameChanged = !cacheValid;
+		if (!frameChanged) {
+			for (let i = 0; i < segments.length; i++) {
+				const before = previous[i]!;
+				const after = segments[i]!;
+				if (
+					before.lines !== after.lines ||
+					before.revision !== after.revision ||
+					before.rowCount !== after.rowCount ||
+					before.component !== after.component
+				) {
+					frameChanged = true;
+					break;
+				}
+			}
+		}
+		this.#fullscreenFrameSegments = segments;
+		this.#fullscreenComposeWidth = contentWidth;
+
+		if (frameChanged) {
+			const scrollLines: string[] = [];
+			const blockStarts: number[] = [];
+			for (let i = 0; i < pinnedFrom; i++) {
+				const segment = segments[i]!;
+				if (scrollLines.length === 0 && segment.rowCount > 0) scrollLines.push("");
+				const childStart = scrollLines.length;
+				for (const local of segment.blockStarts) blockStarts.push(childStart + local);
+				const rows = segment.lines;
+				for (let j = 0; j < rows.length; j++) scrollLines.push(rows[j]!);
+			}
+			blockStarts.push(scrollLines.length);
+			this.#fullscreenScrollFrame = scrollLines;
+			this.#fullscreenScrollLead = scrollLines.length > 0 ? 1 : 0;
+			this.#blockStarts = blockStarts;
+		}
+
+		const scrollLines = this.#fullscreenScrollFrame;
 		const centered = this.#centerPinned && scrollLines.length === 0;
 		const pinnedTop = centered
 			? padTop + Math.max(0, Math.floor((bodyRows - pinnedRows) / 2))
 			: padTop + viewportRows;
 
-		this.#fullscreenScrollFrame = scrollLines;
 		this.#fullscreenScrollViewportRows = viewportRows;
 		this.#fullscreenPadX = padX;
 		this.#fullscreenContentWidth = contentWidth;
 		this.#fullscreenPadTop = padTop;
 
-		// Resolve the offset before windowing, so content that arrived this frame
-		// is visible in this frame rather than one frame later.
-		//
-		// This is the ONE place the offset is decided, and the only place with a
-		// true row count: `scrollLines` is the transcript as it exists now, while
-		// every offset written between renders was bounded by the previous
-		// frame's height. A pending request is the reader's own gesture meeting
-		// that count for the first time, so it derives follow intent directly.
-		// Everything else is the engine correcting itself and runs under the
-		// guard, which lets the correction re-engage following but never end it.
 		const maxScroll = Math.max(0, scrollLines.length - viewportRows);
 		const request = this.#scrollRequest;
 		this.#scrollRequest = undefined;
+		this.#scrollRequestRevealBefore = false;
+		this.#scrollRequestToStart = false;
 		if (request !== undefined) {
-			this.#scrollTop = Math.min(maxScroll, request);
+			this.#scrollTop = Math.max(0, Math.min(maxScroll, request));
 			this.#syncStickyBottom(maxScroll);
 		} else {
 			const wasApplying = this.#applyingSticky;
@@ -6072,15 +6286,8 @@ export class TUI extends Container {
 			}
 		}
 
-		// Blocks clipped by the window edge can leave nothing on screen but their
-		// own painted inset rows: a card's blank top or bottom padding, in the
-		// panel colour, with the body it belongs to scrolled out of sight. That
-		// reads as an unexplained coloured band, so a clipped block contributing
-		// no text at all contributes nothing.
 		const orphan = this.#orphanBlockRows(this.#scrollTop, viewportRows);
-
-		// Zones carry row-local selection geometry as well as pointer actions, so
-		// collect them before painting the selection wash for this frame.
+		const rowCounts = segments.map(segment => segment.rowCount);
 		this.#collectFullscreenZones(
 			children,
 			rowCounts,
@@ -6091,8 +6298,7 @@ export class TUI extends Container {
 			height,
 		);
 
-		const screen: string[] = new Array(height);
-		for (let r = 0; r < height; r++) screen[r] = "";
+		const screen: string[] = new Array(height).fill("");
 		for (let r = 0; r < viewportRows; r++) {
 			const frameRow = this.#scrollTop + r;
 			if (orphan?.(frameRow)) continue;
@@ -6108,15 +6314,8 @@ export class TUI extends Container {
 		}
 		for (let r = 0; r < pinnedRows; r++) screen[pinnedTop + r] = pinnedWindow[r] ?? "";
 
-		// Markers are stripped BEFORE insetting so their recorded column is the
-		// content column; the gutter is added back to the caret below.
 		const markers = this.#extractCursorMarkers(screen);
 		const cursor = markers.length > 0 ? { row: markers[0]!.row, col: markers[0]!.col + padX } : null;
-
-		// Inset and fill last, so every row above (including the blank padding
-		// rows and any short row) lands on one continuous surface. Skipping the
-		// blanks would leave the terminal's own background showing through in
-		// exactly the gaps that make a filled UI look broken.
 		if (padX > 0 || chrome.fill) {
 			const gutter = " ".repeat(padX);
 			for (let r = 0; r < height; r++) {

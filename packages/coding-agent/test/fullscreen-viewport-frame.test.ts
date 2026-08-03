@@ -48,12 +48,17 @@ class PinnedRow extends Container {
 
 class StaticRows extends Container {
 	#lines: string[];
+	renderCount = 0;
 	constructor(lines: string[]) {
 		super();
 		this.#lines = lines;
 	}
 	override render(): readonly string[] {
+		this.renderCount++;
 		return this.#lines;
+	}
+	setRows(lines: string[]): void {
+		this.#lines = lines;
 	}
 }
 
@@ -61,6 +66,7 @@ interface Harness {
 	term: VirtualTerminal;
 	tui: TUI;
 	transcript: TranscriptContainer;
+	pinned: StaticRows;
 	settle: () => Promise<void>;
 }
 
@@ -79,10 +85,11 @@ function mount(active: Theme): Harness {
 	const transcript = new TranscriptContainer();
 	tui.addChild(transcript);
 	const pinned = new PinnedRow();
-	pinned.addChild(new StaticRows(["composer"]));
+	const pinnedContent = new StaticRows(["composer"]);
+	pinned.addChild(pinnedContent);
 	tui.addChild(pinned);
 	tui.start();
-	return { term, tui, transcript, settle: () => scheduler.drain(term) };
+	return { term, tui, transcript, pinned: pinnedContent, settle: () => scheduler.drain(term) };
 }
 
 /** Rows of the painted viewport as plain text, with the gutter trimmed off. */
@@ -259,6 +266,49 @@ describe("fullscreen viewport frame", () => {
 			// otherwise publish 60 header zones on every frame of every scroll.
 			expect(tui.hitZoneCount).toBeGreaterThan(0);
 			expect(tui.hitZoneCount).toBeLessThanOrEqual(HEIGHT);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("renders and caches only the near-window transcript blocks", async () => {
+		const { term, tui, transcript, pinned, settle } = mount(active);
+		const blocks = Array.from(
+			{ length: 5000 },
+			(_value, index) => new StaticRows([`block-${index}a`, `block-${index}b`]),
+		);
+		try {
+			for (const block of blocks) transcript.addChild(block);
+			tui.requestRender();
+			await settle();
+
+			const initiallyRendered = blocks.filter(block => block.renderCount > 0);
+			expect(initiallyRendered.length).toBeLessThan(HEIGHT * 4);
+			expect(blocks[0]!.renderCount).toBe(0);
+			expect(blocks.at(-1)!.renderCount).toBeGreaterThan(0);
+
+			for (const block of blocks) block.renderCount = 0;
+			pinned.renderCount = 0;
+			tui.requestComponentRender(pinned);
+			await settle();
+			expect(blocks.every(block => block.renderCount === 0)).toBeTrue();
+			expect(pinned.renderCount).toBe(1);
+
+			const visibleTail = blocks.at(-1)!;
+			visibleTail.setRows(["streamed-visible"]);
+			visibleTail.renderCount = 0;
+			tui.requestComponentRender(visibleTail);
+			await settle();
+			const transitionedViewport = text(term);
+			expect(visibleTail.renderCount).toBeGreaterThan(0);
+			expect(transitionedViewport).toContain("streamed-visible");
+			expect(transitionedViewport.some(row => row.includes("block-4999"))).toBeFalse();
+
+			for (const block of blocks) block.renderCount = 0;
+			tui.scrollBy(-1);
+			await settle();
+			expect(blocks.filter(block => block.renderCount > 0).length).toBeLessThan(HEIGHT * 12);
+			expect(blocks[0]!.renderCount).toBe(0);
 		} finally {
 			tui.stop();
 		}
