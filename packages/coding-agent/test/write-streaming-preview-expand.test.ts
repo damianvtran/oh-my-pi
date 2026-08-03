@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as diffModule from "@oh-my-pi/pi-coding-agent/modes/components/diff";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import {
 	decodeStreamedToolArgs,
@@ -73,7 +74,7 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 		expect(hasLine(collapsed, 4)).toBe(true);
 		expect(stripAnsi(collapsed.join("\n"))).not.toContain("earlier line");
 	});
-	it("reuses the highlighted streaming body across frame renders", async () => {
+	it("reuses the rendered streaming body across frame renders", async () => {
 		if (!initialized) {
 			await themeModule.initTheme();
 			initialized = true;
@@ -81,9 +82,7 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
 		expect(uiTheme).toBeDefined();
 		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
-		const highlightSpy = vi
-			.spyOn(themeModule, "highlightCode")
-			.mockImplementation((code: string) => code.split("\n"));
+		const renderDiffSpy = vi.spyOn(diffModule, "renderDiff");
 		const component = writeToolRenderer.renderCall(
 			{ path: "/tmp/cache.ts", content: "const a = 1;\nconst b = 2;" },
 			options,
@@ -93,11 +92,11 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 
 		component.render(80);
 		component.render(120);
-		expect(highlightSpy).toHaveBeenCalledTimes(1);
+		expect(renderDiffSpy).toHaveBeenCalledTimes(1);
 
 		options.spinnerFrame = 1;
 		component.render(120);
-		expect(highlightSpy).toHaveBeenCalledTimes(1);
+		expect(renderDiffSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("coerces truthy non-string content for pending write previews", async () => {
@@ -114,7 +113,9 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("object first");
 		expect(rendered).toContain("object second");
-		expect(rendered).toMatch(/\b2 object second\b/);
+		// Written content renders as the edit tool's all-added diff rows: a `+N│`
+		// code-frame gutter, not the write tool's former plain line numbers.
+		expect(rendered).toMatch(/\+2│object second/);
 		expect(rendered).not.toContain("\r");
 	});
 
@@ -135,8 +136,10 @@ describe("write streaming preview honors Ctrl+O expansion", () => {
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("merged first");
 		expect(rendered).toContain("merged second");
-		expect(rendered).toContain("2 lines");
-		expect(rendered).toMatch(/\b2 merged second\b/);
+		// The header reports the written line count as an added-lines badge
+		// (`⟨+2⟩`), matching how an edit result reports its change counts.
+		expect(rendered).toContain(`${uiTheme.format.bracketLeft}+2${uiTheme.format.bracketRight}`);
+		expect(rendered).toMatch(/\+2│merged second/);
 		expect(rendered).not.toContain("\r");
 	});
 

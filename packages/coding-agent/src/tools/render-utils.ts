@@ -10,7 +10,7 @@ import * as path from "node:path";
 import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { getKeybindings, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { pluralize } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
@@ -297,6 +297,56 @@ export function formatCodeFrameLine(
 	return `${gutterText.padStart(lineNumberWidth + 1, " ")}│${content}`;
 }
 
+/**
+ * Wrap one rendered code-frame row, keeping its gutter intact and re-emitting a
+ * gutter-shaped prefix on every continuation row so wrapped code still lines up
+ * under the first row's content column.
+ *
+ * Gutter shapes produced by {@link formatCodeFrameLine}: "-315│", " 313│",
+ * "+322│", plus the deduplicated forms "   +│" and "    │" whose repeated line
+ * number `renderDiff` blanked (single-line replacement pairs and
+ * insert-then-context runs) — all │-separated. ASCII "|" gutters exist only in
+ * raw canonical diff rows passed through by a plain (uncolored) fallback
+ * renderer ("-42|old", " 42|ctx"), which always carry a marker column
+ * ("+"/"-"/space) and a line number. So the number is optional for "│", while
+ * "|" requires the full canonical shape; anything else (a body line merely
+ * starting with "|", error text like "123|…") is not a code-frame row and wraps
+ * generically.
+ */
+export function wrapDiffGutterLine(line: string, width: number): string[] {
+	if (width <= 0) return [line];
+	if (line.length === 0) return [""];
+
+	const startAnsi = line.match(/^((?:\x1b\[[0-9;]*m)*)/)?.[1] ?? "";
+	const bodyWithReset = line.slice(startAnsi.length);
+	const body = bodyWithReset.endsWith("\x1b[39m") ? bodyWithReset.slice(0, -"\x1b[39m".length) : bodyWithReset;
+	const gutterMatch = /^(\s*[+-]?\s*\d*)([|│])(.*)$/s.exec(body);
+
+	if (
+		!gutterMatch ||
+		gutterMatch[1].length === 0 ||
+		(gutterMatch[2] === "|" && !/^[+\-\s]\s*\d+$/.test(gutterMatch[1]))
+	) {
+		return wrapTextWithAnsi(line, width);
+	}
+
+	const [, gutter, separator, content] = gutterMatch;
+	const prefix = `${gutter}${separator}`;
+	const prefixWidth = visibleWidth(prefix);
+	const contentWidth = Math.max(1, width - prefixWidth);
+	const continuationPrefix = `${" ".repeat(Math.max(0, prefixWidth - 1))}${separator}`;
+	const wrappedContent = wrapTextWithAnsi(content ?? "", contentWidth);
+
+	// Each visual row is a standalone terminal line: wrapTextWithAnsi re-opens
+	// active SGR state at the next row's start, so a row that breaks inside an
+	// intra-line diff highlight still ends with inverse video active. Close it
+	// alongside the foreground reset — otherwise the frame padding appended
+	// after the row is painted as an inverse block (default-foreground cells).
+	return wrappedContent.map(
+		(segment, index) => `${startAnsi}${index === 0 ? prefix : continuationPrefix}${segment}\x1b[27m\x1b[39m`,
+	);
+}
+
 // =============================================================================
 // Tool UI Helpers
 // =============================================================================
@@ -530,6 +580,22 @@ export function formatDiffStats(added: number, removed: number, hunks: number, t
 	if (removed > 0) parts.push(theme.fg("toolDiffRemoved", `-${removed}`));
 	if (hunks > 0) parts.push(theme.fg("dim", `${hunks} hunk${hunks !== 1 ? "s" : ""}`));
 	return parts.join(theme.fg("dim", " / "));
+}
+
+/**
+ * Bracketed `⟨+12/-3⟩` change badge that rides a framed block's header next to
+ * the path. Shared by every renderer that reports "lines changed" so an edit's
+ * mixed counts and a write's all-added count read as the same notation; a
+ * missing side is omitted rather than shown as `-0`, and an empty change set
+ * yields no badge at all.
+ */
+export function formatChangeStatsSuffix(added: number, removed: number, theme: Theme): string {
+	if (added <= 0 && removed <= 0) return "";
+	const stats = [
+		added > 0 ? theme.fg("toolDiffAdded", `+${added}`) : undefined,
+		removed > 0 ? theme.fg("toolDiffRemoved", `-${removed}`) : undefined,
+	].filter(value => value !== undefined);
+	return ` ${theme.fg("dim", theme.format.bracketLeft)}${stats.join(theme.fg("dim", "/"))}${theme.fg("dim", theme.format.bracketRight)}`;
 }
 
 interface DiffSegment {

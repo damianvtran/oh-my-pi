@@ -112,7 +112,7 @@ describe("ToolExecutionComponent write repaint seam", () => {
 			const pendingRows = plainBuffer(term);
 			expect(pendingRows.some(row => row.includes("… (8 earlier lines)"))).toBe(true);
 			expect(pendingRows.some(row => row.includes("… (streaming)"))).toBe(true);
-			expect(pendingRows.some(row => row.includes("20 line 20"))).toBe(true);
+			expect(pendingRows.some(row => row.includes("+20│line 20"))).toBe(true);
 
 			component.setArgsComplete();
 			tui.requestRender();
@@ -126,12 +126,12 @@ describe("ToolExecutionComponent write repaint seam", () => {
 			// The stale pending tail window must not survive above the new frame.
 			expect(rows.some(row => row.includes("… (streaming)"))).toBe(false);
 			expect(rows.some(row => row.includes("earlier lines"))).toBe(false);
-			expect(rows.some(row => row.includes("20 line 20"))).toBe(false);
+			expect(rows.some(row => row.includes("+20│line 20"))).toBe(false);
 			// The first partial-result frame is what remains: progress line plus the
 			// top-anchored preview.
 			expect(rows.some(row => row.includes("Writing notes.txt..."))).toBe(true);
-			expect(rows.some(row => row.includes("  1 line 1"))).toBe(true);
-			expect(rows.some(row => row.includes("… 14 more lines"))).toBe(true);
+			expect(rows.some(row => row.includes("+1│line 1"))).toBe(true);
+			expect(rows.some(row => row.includes("… (14 more lines)"))).toBe(true);
 		} finally {
 			tui.stop();
 			await term.flush();
