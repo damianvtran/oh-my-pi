@@ -397,6 +397,8 @@
 ### Changed
 
 - Replaced arktype with @oh-my-pi/omptype for tool parameter and config schemas, significantly improving startup performance with ~100x faster schema construction. Config schema errors are now reported via OmpErrors using the same path/problem structure.
+- The `write` tool's content preview now renders in the `edit` tool's notation instead of its own: every written line is an addition, so rows carry the `+<line>│` code-frame gutter in the added-line color (with the same dim indent glyphs and flush frame border), the header reports `⟨+N⟩` rather than `· N lines`, and the collapsed footer reads `… (N more lines)`. Both cards are now produced by the same `renderDiff`, gutter-wrap and change-badge helpers, so the two styles can no longer drift apart.
+- Replaced arktype with `@oh-my-pi/omptype` across all tool parameter and config schemas: ~100x faster schema construction removes the arktype startup tax (the `scope({}, { jitless: true })` workarounds are gone). Config schema errors now report via `OmpErrors` entries with the same `path`/`problem` shape.
 
 ### Fixed
 
