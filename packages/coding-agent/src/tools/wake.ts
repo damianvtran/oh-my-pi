@@ -8,12 +8,13 @@
  * so this file only routes ops, mutates the session's schedule list, and
  * formats the reply.
  */
+
+import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { prompt, sanitizeText } from "@oh-my-pi/pi-utils";
-import { type } from "arktype";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import wakeDescription from "../prompts/tools/wake.md" with { type: "text" };
