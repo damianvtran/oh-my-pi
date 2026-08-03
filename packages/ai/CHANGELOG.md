@@ -162,6 +162,10 @@
 
 - Fixed OpenAI-Codex (ChatGPT OAuth) requests failing with an `Unsupported service_tier: auto` error on default or legacy sessions by omitting the implicit `auto` service tier on the wire.
 - Fixed an issue where Cursor `kimi-k3` sessions would break permanently when a same-model assistant turn was persisted without thinking blocks, replacing hard errors with graceful warnings.
+- Fixed OpenAI-Codex (ChatGPT OAuth) requests failing with `Unsupported service_tier: auto` on default/legacy sessions. `shouldSendServiceTier` no longer forwards `auto` on the wire — it is OpenAI's implicit default, so omitting `service_tier` is equivalent, and the Codex endpoint rejects an explicit `auto`. Explicit `default`/`flex`/`scale`/`priority` are unaffected ([#7517](https://github.com/can1357/oh-my-pi/issues/7517)).
+### Fixed
+
+- Fixed several signed-in QwenCloud Token Plan credentials losing their per-account usage history, and with it the signal usage-based ranking load balances on. A Token Plan credential is a JSON blob holding both the `sk-sp-` key and a session-lived console `Cookie`; the usage cache identity hashed the whole blob, so every routine cookie re-paste minted a fresh identity and orphaned that account's cached report and quota history. The identity now derives from the stable `sk-sp-` token, so re-pasting a cookie keeps one account's history intact while distinct keys stay distinct.
 
 ## [17.2.6] - 2026-08-03
 

@@ -2993,7 +2993,15 @@ export class AuthStorage {
 		if (!hasStableIdentifier) {
 			const secret = credential.apiKey?.trim() || credential.refreshToken?.trim() || credential.accessToken?.trim();
 			if (secret) {
-				parts.push(`secret:${Bun.hash(secret).toString(16)}`);
+				// A QwenCloud Token Plan credential is a JSON blob whose `cookie`
+				// member is a session-lived console cookie the user re-pastes
+				// whenever it expires. Hashing the whole blob would mint a new
+				// identity on every re-paste, orphaning that account's usage
+				// history and cache entry — and with them the signal that
+				// usage-based ranking uses to load balance several Token Plan
+				// accounts. The `sk-sp-` token is the stable part, so key off it.
+				const stable = parseAlibabaTokenPlanCredential(secret)?.token ?? secret;
+				parts.push(`secret:${Bun.hash(stable).toString(16)}`);
 			} else {
 				parts.push("anonymous");
 			}
