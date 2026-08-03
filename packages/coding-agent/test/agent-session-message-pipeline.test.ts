@@ -17,6 +17,7 @@ import {
 	registerCustomApi,
 	type SimpleStreamOptions,
 	type TextContent,
+	type TSchema,
 } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
