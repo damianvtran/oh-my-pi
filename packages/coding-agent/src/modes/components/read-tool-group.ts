@@ -370,10 +370,6 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.#updateDisplay();
 	}
 
-	override render(width: number): readonly string[] {
-		if (!this.#toolActivityVisible) return [];
-		return super.render(width);
-	}
 	isTranscriptBlockFinalized(): boolean {
 		if (this.#sealed) return true;
 		if (!this.#finalized) return false;
@@ -527,6 +523,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	override render(width: number): readonly string[] {
+		// Hidden tool activity draws nothing at all — the guard has to sit ahead
+		// of the card paint, or a hidden group would still emit its card chrome.
+		if (!this.#toolActivityVisible) return [];
 		const lines = super.render(this.#card.contentWidth(width));
 		const rows = this.#card.paint(lines, width, this.#header.hovered);
 		this.#cardRows = rows.length;
