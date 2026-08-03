@@ -233,6 +233,50 @@ export class SecretObfuscator {
 		return this.#hasAny;
 	}
 
+	/**
+	 * Register a secret discovered AFTER construction (today: a value the operator
+	 * hands over mid-session via `/credential` or an `ask` secret question) and
+	 * return the keyed placeholder that stands in for it everywhere the provider
+	 * can see.
+	 *
+	 * This mirrors the constructor's plain/obfuscate branch rather than rebuilding
+	 * the instance because the obfuscator is fanned out BY REFERENCE at session
+	 * construction (provider boundary, stream guards, side-stream, advisors); a
+	 * replacement instance would be invisible to all four, while an in-place add
+	 * propagates for free.
+	 *
+	 * Ordering matters and follows the constructor: the raw value joins
+	 * `#configuredSecretValues` BEFORE its own placeholder is minted, so
+	 * `#placeholderConflicts` can refuse a placeholder that collides with another
+	 * configured secret's literal bytes.
+	 *
+	 * Returns `undefined` — registering nothing — when the value cannot be
+	 * redacted safely:
+	 *  - shorter than {@link MIN_OBFUSCATE_SECRET_LEN}, where blanket substitution
+	 *    would corrupt unrelated text (the same rule the constructor applies), or
+	 *  - already a placeholder this obfuscator minted, which would make the
+	 *    forward and reverse maps ambiguous.
+	 * Callers must treat `undefined` as "not stored" and must not fall back to
+	 * handling the raw value themselves.
+	 */
+	addPlainSecret(secret: string, friendlyName?: string): string | undefined {
+		if (secret.length < MIN_OBFUSCATE_SECRET_LEN) return undefined;
+		if (this.#isGeneratedPlaceholder(secret)) return undefined;
+		// Idempotent: re-registering the same bytes (e.g. the operator pastes one
+		// token under two labels) reuses the existing placeholder instead of
+		// minting a second mapping that would race on the reverse lookup.
+		const existingIndex = this.#findObfuscateIndex(secret);
+		if (existingIndex !== undefined) return this.#obfuscateMappings.get(existingIndex)?.placeholder;
+		this.#configuredSecretValues.add(secret);
+		const placeholder = this.#createPlaceholder(secret, friendlyName);
+		const index = this.#nextIndex++;
+		this.#plainMappings.set(secret, index);
+		this.#obfuscateMappings.set(index, { secret, placeholder });
+		this.#generatedPlaceholders.add(placeholder);
+		this.#hasAny = true;
+		return placeholder;
+	}
+
 	/** Obfuscate all secrets in text. Bidirectional placeholders for obfuscate mode, one-way for replace. */
 	obfuscate(text: string, sharedRegexSecretValues?: ReadonlySet<string>): string {
 		if (!this.#hasAny) return text;

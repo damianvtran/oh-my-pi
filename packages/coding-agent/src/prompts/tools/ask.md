@@ -9,6 +9,7 @@ Asks user when you need clarification or input during task execution.
 - Use `questions` for multiple related questions instead of asking one at a time
 - Set `multi: true` on question to allow multiple selections
 - Use short option labels; put explanatory tradeoffs in `description` instead of merging them into the label
+- Need a credential (API key, token, password)? Set `secret: true` with `options: []`. The user pastes it masked; you get back a placeholder, never the value. Use `id` as the credential name (e.g. `GITHUB_TOKEN`).
 </instruction>
 
 <caution>

@@ -134,10 +134,86 @@ Regex entries always scan globally (the `g` flag is enforced automatically). The
 
 Environment variables are collected first, file-defined entries follow, and the built-in credential regex runs last so configured entries see matching content before the generic detector. Duplicate environment values are collapsed within the environment scan. Environment and file entries are not deduplicated against each other, so a plain value present in both is registered twice; both placeholders restore to the same secret, so deobfuscation is unaffected.
 
+## Session credentials (`/credential`)
+
+`secrets.yml` covers values you already have on disk. A **session credential**
+covers the other case: a secret only you can produce right now — a short-lived
+token, a one-off deploy key, a password for a system the agent has no standing
+access to — that you want the agent to *use* without ever *reading*.
+
+```
+/credential GITHUB_TOKEN     # prompts for the value with masked input, then stores it
+/credential                  # list what is stored, with each placeholder
+/credential --forget GITHUB_TOKEN
+/credential --forget-all
+```
+
+The prompt replaces the composer, renders every character as a bullet, and
+returns the value straight to the vault, so the secret never enters the editor
+buffer, its history, or a transcript entry. Keys are normalized to env-var
+shape, so `github token`, `github-token`, and `GITHUB_TOKEN` all name the same
+credential.
+
+This is **not a separate mechanism**. The value is registered with the session's
+`SecretObfuscator` exactly like a `secrets.yml` plain entry, so it inherits the
+whole round trip described in [How it works](#how-it-works): the model sees only
+a keyed `$$KEY_<hash>:<case>$$` placeholder, and `deobfuscateToolArguments`
+substitutes the real bytes into a tool call's arguments immediately before the
+tool runs. Two consequences worth stating plainly:
+
+- It works with `secrets.enabled` off. That setting governs *automatic*
+  redaction of configured and credential-shaped values; a credential you hand
+  over explicitly is always redacted.
+- Storing the first credential activates obfuscation for the session, so the
+  `$$…$$` placeholder format is also explained to the model from that point on.
+
+### Using one
+
+The system prompt gains a `<session-credentials>` block listing each key and its
+placeholder — and nothing else; sessions that never use the feature pay zero
+tokens for it. The model passes the placeholder where the secret belongs,
+usually a `bash` env value:
+
+```json
+{ "command": "gh api /user", "env": { "GITHUB_TOKEN": "$$GITHUBTOKEN_9SIWMKA7ATG3:M$$" } }
+```
+
+`env` is preferred over inlining into the command string so the value never
+reaches a shell history or a rendered command line.
+
+### Asking for one
+
+The `ask` tool can request a credential itself: a question with `secret: true`
+(and `options: []`) shows the same masked prompt instead of an option list,
+stores the answer under the question's `id`, and returns the placeholder as the
+answer. The tool result and its `details` — both persisted verbatim to the
+session JSONL — carry only the placeholder. A declined or unstorable answer
+comes back as `<not provided>` with a reason, rather than aborting the turn.
+
+### Limits worth knowing
+
+- **Minimum length 8** (`MIN_OBFUSCATE_SECRET_LEN`). Below that, substitution
+  would collide with ordinary prose. Shorter values are refused outright rather
+  than stored unredacted.
+- **Memory only.** Nothing is written to disk and nothing survives the session.
+  For anything longer-lived, have the agent put it in a real secrets manager or
+  vault — which it can do *using* the placeholder.
+- **`--forget` revokes the reference, not the redaction.** The obfuscator keeps
+  hiding those bytes for the rest of the session; un-hiding a value the operator
+  marked secret would be a downgrade, not a cleanup.
+- **Do not pass a placeholder to a subagent.** A `task` subagent builds its own
+  obfuscator and cannot resolve the handle, and because tool arguments are
+  deobfuscated before the tool runs, the raw value would be copied into that
+  subagent's context and transcript. The prompt block tells the model this; it is
+  guidance, not an enforced boundary.
+
 ## Key files
 
 - `packages/coding-agent/src/secrets/index.ts` -- loading, merging, env var collection
 - `packages/coding-agent/src/secrets/obfuscator.ts` -- `SecretObfuscator` class, placeholder generation, message obfuscation
+- `packages/coding-agent/src/secrets/session-credentials.ts` -- `SessionCredentials` vault behind `/credential` and `ask`'s secret mode
+- `packages/coding-agent/src/slash-commands/helpers/credential.ts` -- `/credential` argument parsing and operator-facing copy
+- `packages/coding-agent/src/prompts/system/session-credentials.md` -- the `<session-credentials>` prompt block
 - `packages/coding-agent/src/secrets/regex.ts` -- regex literal parsing and compilation
 - `packages/coding-agent/src/config/settings-schema.ts` -- `secrets.enabled` setting definition
 

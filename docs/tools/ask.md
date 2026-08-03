@@ -26,6 +26,29 @@
 | `header` | `string` | No | Optional short display chip used by rich ask dialogs. Ignored by the selector fallback. |
 | `multi` | `boolean` | No | Enables multi-select mode. Default: `false`. |
 | `recommended` | `number` | No | Zero-based recommended/default option index. Invalid indexes are ignored for selection; the fallback selector marks a valid single-select option with ` (Recommended)`. |
+| `secret` | `boolean` | No | Requests a credential instead of a choice. Pair with `options: []`. See [Secret questions](#secret-questions). Default: `false`. |
+
+### Secret questions
+
+A question with `secret: true` collects a credential the model must be able to
+use but never read. Instead of the option picker it shows a single-line masked
+prompt (`ui.input` with `mask: true`), hands the value to the session credential
+vault under `normalizeCredentialKey(question.id)`, and returns the vault's
+placeholder as `customInput`. The real bytes are substituted back only inside a
+later tool call's arguments — see [`secrets.md`](../secrets.md#session-credentials-credential).
+
+Behavioural notes:
+
+- One secret question routes the **whole batch** down the sequential path. The
+  rich ask dialog batches every question into one component and echoes free text
+  back into its own option rows, neither of which is compatible with masking.
+- A refusal — operator pressed esc, value below the 8-character minimum, or no
+  vault on the session — returns `customInput: "<not provided>"` with the reason
+  in `note`, rather than throwing. Declining one optional credential should not
+  cost the turn or the other answers in the batch.
+- `details.customInput` and the response text are the only places the answer
+  appears, and both hold the placeholder, so the session JSONL and every
+  transcript export stay free of the secret.
 
 ## Outputs
 - Single-shot result.
