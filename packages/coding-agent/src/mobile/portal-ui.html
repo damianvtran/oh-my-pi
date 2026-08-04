@@ -188,10 +188,14 @@ header {
 .btn:disabled:hover, .btn:disabled:active { background: var(--element); color: var(--muted); filter: none; }
 
 main { overflow-y: auto; overscroll-behavior: contain; background: var(--canvas); }
-/* `padX: 2` on each side and `padBottom: 1` at the end of the viewport, with no
-   top pad — the TUI leaves the leading row to the scroll region so it scrolls
-   away with the content instead of sitting there as chrome. */
-.wrap { max-width: 880px; margin: 0 auto; padding: 0 var(--gutter) var(--block-gap); }
+/* `padX: 2` on each side and `padBottom: 1` at the end of the viewport. The
+   leading row is one canvas row too — the same gap blocks keep between each other,
+   so the first card sits one rhythm-row off the header instead of flush against
+   it. It is padding on the SCROLL content rather than on `main`, which keeps the
+   TUI's property that the leading row scrolls away with the content instead of
+   sitting there as chrome; zero was only right for a viewport whose top edge is
+   the screen edge, and this one has a header bar above it. */
+.wrap { max-width: 880px; margin: 0 auto; padding: var(--block-gap) var(--gutter); }
 
 /* ── session list ─────────────────────────────────────────────────────────
    The list has no TUI counterpart either (a terminal shows one session), so each
