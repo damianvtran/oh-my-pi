@@ -21,10 +21,18 @@ import { isDarwin, reapStaleSessionJobs } from "./launchctl";
 import { SESSION_JOB_LABEL_PREFIX } from "./paths";
 import { PortalGuest } from "./portal-guest";
 import portalHtml from "./portal-ui.html" with { type: "text" };
+import { portalThemeStyle } from "./theme-css";
 import { INTERNAL_RESUME_PROMPT, type PortalControl } from "./types";
 
 /** bun-types claims `*.html` as `HTMLBundle`; with `type: "text"` it is the file's text. */
 const UI = portalHtml as unknown as string;
+
+/**
+ * Where the host's resolved theme is spliced into a page: immediately before
+ * `</head>`, so it lands after the stylesheet's own `:root` defaults and wins on
+ * source order at equal specificity. Nothing else in either page closes a head.
+ */
+const HEAD_END = "</head>";
 
 const DEFAULT_SCAN_INTERVAL_MS = 2000;
 /**
@@ -119,6 +127,14 @@ class Portal implements PortalHandle {
 	#watcher: fs2.FSWatcher | undefined;
 	#watchDebounce: Timer | undefined;
 	#stopped = false;
+	/**
+	 * The host theme's CSS, spliced into every page. Resolved once at start rather
+	 * than per request: it reads settings and theme JSON off disk, and it changes
+	 * only when the user switches theme — which needs `omp mobile restart` anyway,
+	 * the same lifetime as the port and the credential. Empty when no configured
+	 * theme could be loaded, leaving the built-in palette in `portal-ui.html`.
+	 */
+	#themeStyle = "";
 
 	static async start(options: PortalOptions): Promise<Portal> {
 		const portal = new Portal(options);
@@ -144,12 +160,29 @@ class Portal implements PortalHandle {
 			const reaped = await reapStaleSessionJobs(SESSION_JOB_LABEL_PREFIX).catch(() => []);
 			if (reaped.length > 0) portal.#log(`reaped ${reaped.length} stale session job label(s)`);
 		}
+		// Resolve the host's theme before the first request can arrive. A failure is
+		// not fatal: `portalThemeStyle` answers "" and the pages fall back to their
+		// own built-in palette, which is the same one a stock omp would paint.
+		portal.#themeStyle = await portalThemeStyle().catch(err => {
+			portal.#log(`theme unresolved, using the built-in palette: ${String(err)}`);
+			return "";
+		});
 		// One scan before returning so `omp mobile status` and the phone's first
 		// load see the sessions that were already running.
 		await portal.#scan();
 		portal.#scanTimer = setInterval(() => void portal.#scan(), portal.#scanIntervalMs);
 		portal.#watchLinkDir();
 		return portal;
+	}
+
+	/**
+	 * Splice {@link #themeStyle} into a page. Every HTML response goes through here,
+	 * including the login form: dropping out of the palette for the one screen a
+	 * visitor always sees first is exactly where a theme mismatch is most obvious.
+	 */
+	#themed(html: string): string {
+		if (!this.#themeStyle) return html;
+		return html.replace(HEAD_END, `${this.#themeStyle}${HEAD_END}`);
 	}
 
 	/**
@@ -433,7 +466,7 @@ class Portal implements PortalHandle {
 					// product: "could not send that answer — try again", "start failed".
 					// The username is echoed back (escaped) so only the password has to be
 					// retyped; the password never is.
-					return new Response(loginPage("incorrect username or password", nextOf(url), user), {
+					return new Response(this.#themed(loginPage("incorrect username or password", nextOf(url), user)), {
 						status: 401,
 						headers: LOGIN_HTML,
 					});
@@ -444,7 +477,7 @@ class Portal implements PortalHandle {
 				});
 			}
 			if (this.#authorized(req)) return Response.redirect(nextOf(url), 303);
-			return new Response(loginPage(undefined, nextOf(url)), { headers: LOGIN_HTML });
+			return new Response(this.#themed(loginPage(undefined, nextOf(url))), { headers: LOGIN_HTML });
 		}
 		if (url.pathname === "/logout") {
 			return new Response(null, {
@@ -462,7 +495,9 @@ class Portal implements PortalHandle {
 			return Response.redirect(`/login?next=${encodeURIComponent(next)}`, 303);
 		}
 
-		if (url.pathname === "/") return new Response(UI, { headers: { "content-type": "text/html" } });
+		if (url.pathname === "/") {
+			return new Response(this.#themed(UI), { headers: { "content-type": "text/html; charset=utf-8" } });
+		}
 		if (url.pathname === "/api/sessions") {
 			return Response.json([...this.#attached.values()].map(entry => this.#sessionSummary(entry)));
 		}
@@ -620,17 +655,23 @@ function nextOf(url: URL): string {
 }
 
 /**
- * Login form, styled from the same omp palette as the portal so the phone never
- * drops out of the theme. Deliberately hand-written rather than reusing the SPA
- * shell: it must render with no JS, no fetch, and no session.
+ * Login form, styled from the same omp palette and in the same flat, borderless,
+ * square idiom as the portal, so the phone never drops out of the theme.
+ * Deliberately hand-written rather than reusing the SPA shell: it must render with
+ * no JS, no fetch, and no session.
+ *
+ * Its custom properties are the SAME NAMES `portal-ui.html` uses, which is what
+ * lets {@link Portal.#themed} restyle both pages with one injected block. The
+ * values here are the built-in `dark`/`light` themes, for the case where no
+ * configured theme could be resolved.
  *
  * The autocomplete hints and the `action`/`method` pair are what make iOS and
  * 1Password offer to fill and then save this as a normal login.
  *
- * The fields are 16px while the page's type is 13px, which is the same floor
+ * The fields are 16px while the page's type is 12px, which is the same floor
  * `portal-ui.html` keeps and for the same reason: WebKit zooms the page whenever a
  * control with a computed font-size under 16px takes focus, and on iOS it does not
- * zoom back out on blur. Left at 13px, signing in is enough to leave the phone on
+ * zoom back out on blur. Left at 12px, signing in is enough to leave the phone on
  * a session list that has to be panned sideways. `user-scalable=no` and
  * `maximum-scale=1` are not alternatives — WebKit ignores both so that pinch-zoom
  * always works.
@@ -642,51 +683,52 @@ function loginPage(error: string | undefined, next: string, username = ""): stri
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark light">
-<meta name="theme-color" content="#0F0b14" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#faf9fb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#e0e0e0" media="(prefers-color-scheme: light)">
 <title>omp \u2014 sign in</title>
 <style>
-:root{color-scheme:dark;--bg:oklch(0.16 0.02 307);--bg-raised:oklch(0.19 0.022 307);--bg-inset:oklch(0.13 0.016 307);
---fg:oklch(0.92 0.01 307);--fg-muted:oklch(0.71 0.016 307);--fg-faint:oklch(0.53 0.018 307);
---accent:oklch(0.674 0.23 341);--accent-halo:oklch(0.674 0.23 341 / 22%);
---border:oklch(1 0 0 / 9%);--border-strong:oklch(1 0 0 / 13%);
---err:oklch(0.66 0.19 25);--radius:8px}
-@media(prefers-color-scheme:light){:root:not([data-theme="dark"]){color-scheme:light;--bg:oklch(0.985 0.004 307);--bg-raised:oklch(1 0 0);
---bg-inset:oklch(0.95 0.006 307);--fg:oklch(0.26 0.03 307);--fg-muted:oklch(0.46 0.03 307);--fg-faint:oklch(0.58 0.025 307);
---accent:oklch(0.52 0.21 341);--accent-halo:oklch(0.52 0.21 341 / 22%);--err:oklch(0.55 0.19 25);
---border:oklch(0 0 0 / 10%);--border-strong:oklch(0 0 0 / 15%)}}
+:root{color-scheme:dark;--canvas:#121212;--panel:#1c1c1c;--element:#262626;--overlay:#303030;
+--fg:#e5e5e7;--muted:#777d88;--dim:#5f6673;--accent:#febc38;--error:#fc3a4b}
+@media(prefers-color-scheme:light){:root:not([data-theme="dark"]){color-scheme:light;
+--canvas:#e0e0e0;--panel:#dbdbdb;--element:#d6d6d6;--overlay:#d1d1d1;
+--fg:#000000;--muted:#6c6c6c;--dim:#767676;--accent:#5a8080;--error:#aa5555}}
 *{box-sizing:border-box}
-body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px;background:var(--bg);color:var(--fg);
-font:400 13px/1.5 ui-monospace,"SF Mono","Cascadia Code",Menlo,monospace;-webkit-font-smoothing:antialiased}
-form{width:100%;max-width:320px;display:flex;flex-direction:column;gap:14px}
+body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px;background:var(--canvas);color:var(--fg);
+font:400 12px/1.5 ui-monospace,"SF Mono","Cascadia Code",Menlo,monospace;-webkit-font-smoothing:antialiased}
+/* The form is the panel rung, the way every framed thing in the fullscreen TUI is:
+a fill, squared, with no rule around it. */
+form{width:100%;max-width:320px;display:flex;flex-direction:column;gap:14px;padding:18px;background:var(--panel)}
+/* The TUI status line's own leading badge. */
 .brand{display:flex;align-items:baseline;gap:8px;margin-bottom:2px}
-.brand b{font-size:15px;font-weight:650;letter-spacing:.01em}
-.brand span{color:var(--fg-faint);font-size:11px}
-label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--fg-muted)}
-/* 16px, not the body's 13px. See this function's own comment: the floor is what
-keeps WebKit from zooming the page on focus and never zooming back out. Note for
-anyone editing this block: it is a template literal, so no backticks. */
-input{font:inherit;font-size:16px;color:var(--fg);background:var(--bg-inset);border:1px solid var(--border);
-border-radius:var(--radius);padding:11px 12px;min-height:44px}
-/* The halo is a token, not a literal: this page follows the OS palette now, and a
-literal dark-palette pink drew a brighter ring around a darker border on a light OS. */
-input:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-halo)}
-/* 16px like the fields above it, not the body's 13px: at 13px the primary action
+.brand b{color:var(--accent);font-size:15px;font-weight:650;letter-spacing:.01em}
+.brand span{color:var(--dim);font-size:11px}
+label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--muted)}
+/* 16px, not the body's 12px. See this function's own comment: the floor is what
+keeps WebKit from zooming the page on focus and never zooming back out. A field is
+the canvas rung inset in the panel, which is how a terminal input reads against the
+surface around it, and focus lifts it a rung instead of drawing a ring — the same
+treatment the portal's composer uses, and the only visible focus indicator on a
+control with no outline. Note for anyone editing this block: it is a template
+literal, so no backticks. */
+input{font:inherit;font-size:16px;color:var(--fg);background:var(--canvas);border:0;border-radius:0;
+padding:11px 12px;min-height:44px}
+input:focus-visible{outline:none;background:var(--element)}
+/* 16px like the fields above it, not the body's 12px: at 12px the primary action
 was the smallest type in the form, below the value the user had just typed, and the
 same padding gave a 44px button under two 48px inputs.
-The label colour is var(--bg), the same trick portal-ui.html uses for this fill: it
-has to invert with the palette, because a label light enough for the dark accent
+The label colour is var(--canvas), the same trick portal-ui.html uses for this fill:
+it has to invert with the palette, because a label light enough for the dark accent
 measures under 4.5:1 on the darker accent the light palette uses, and vice versa.
 (No backticks anywhere in this block: it is a template literal.) */
-button{font:inherit;font-size:16px;font-weight:600;min-height:44px;cursor:pointer;color:var(--bg);
-background:var(--accent);border:1px solid var(--accent);border-radius:var(--radius);padding:11px 12px}
-button:active{filter:brightness(.94)}
-.err{color:var(--err);font-size:11px;border-left:2px solid var(--err);padding-left:8px}
+button{font:inherit;font-size:16px;font-weight:600;min-height:44px;cursor:pointer;color:var(--canvas);
+background:var(--accent);border:0;border-radius:0;padding:11px 12px}
+button:active{filter:brightness(.92)}
+.err{color:var(--error);font-size:11px}
 </style>
 </head>
 <body>
 <form method="POST" action="/login?next=${escapeHtml(encodeURIComponent(next))}">
-	<div class="brand"><b>omp</b><span>remote access</span></div>
+	<div class="brand"><b>π</b><span>omp remote access</span></div>
 	${error ? `<div class="err">${escapeHtml(error)}</div>` : ""}
 	<label>username
 		<!-- Kept across a failure: re-rendering it empty made a mistyped password cost
