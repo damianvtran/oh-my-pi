@@ -453,6 +453,86 @@ describe("mobile portal guest", () => {
 	});
 });
 
+/**
+ * The `⟦+N/-M⟧` badge's numbers. They ride the wire as `stats` on the tool item
+ * because the phone cannot compute them: the diff itself is deliberately NOT
+ * published (it is the largest field on a tool result and the phone never draws it),
+ * so the count has to be taken here or not at all. `details` is host-shaped and
+ * unvalidated at this boundary, which is why every shape below is a real case.
+ */
+describe("mobile portal guest — edit diff stats", () => {
+	/** One edit call and its result, projected as the phone would receive them. */
+	async function editStats(details: unknown): Promise<{ added: number; removed: number } | undefined> {
+		const loaded: LoadedSession = {
+			id: "sess-edit",
+			cwd: "/tmp/project-edit",
+			entries: [
+				messageEntry(
+					"e1",
+					assistantMessage([
+						{ type: "toolCall", id: "call-edit", name: "edit", arguments: { i: "x", input: "" } },
+					]),
+				),
+				messageEntry("e2", {
+					role: "toolResult",
+					toolCallId: "call-edit",
+					toolName: "edit",
+					content: [{ type: "text", text: "applied" }],
+					details: details as never,
+					isError: false,
+					timestamp: 0,
+				}),
+			],
+		};
+		const { ctx } = makeHostHarness(loaded);
+		const host = new CollabHost(ctx);
+		await host.start(RELAY_URL);
+		const { guest } = await joinGuest(host.link);
+		try {
+			const item = guest.transcript.find(i => i.kind === "tool" && i.id === "call-edit");
+			return item?.kind === "tool" ? item.stats : undefined;
+		} finally {
+			guest.close();
+			await host.stop("test over");
+		}
+	}
+
+	it("counts the changed lines of a numbered diff", async () => {
+		// An edit result's diff body is `formatNumberedDiffLine`'s `+<n>|<content>`,
+		// which is the shape these numbers are actually taken from in production.
+		expect(
+			await editStats({
+				diff: ["-12|const a = 1;", "-13|const b = 2;", "+12|const a = 3;", " 14|unchanged"].join("\n"),
+			}),
+		).toEqual({ added: 1, removed: 2 });
+	});
+
+	it("ignores unified-diff file headers rather than counting them as changes", async () => {
+		// Defensive, not a live path: a result carrying `+++`/`---` would otherwise
+		// report two more changes than it made.
+		expect(await editStats({ diff: "--- a/x.ts\n+++ b/x.ts\n@@\n+one\n" })).toEqual({ added: 1, removed: 0 });
+	});
+
+	it("omits the badge rather than claiming +0/-0", async () => {
+		// A delete, a move-only rename and a genuine no-op all reach here. `⟦+0/-0⟧` on
+		// a card would read as a measurement; absence reads as "nothing to say".
+		expect(await editStats({ diff: "" })).toBeUndefined();
+		expect(await editStats({ diff: " 1|context only\n" })).toBeUndefined();
+		expect(await editStats({})).toBeUndefined();
+		expect(await editStats(undefined)).toBeUndefined();
+	});
+
+	it("survives a details payload of the wrong shape", async () => {
+		// `details` is whatever the host's tool put there. A non-string `diff` and an
+		// array `details` both reach this code, and a throw here would break the whole
+		// snapshot projection, not just one badge.
+		expect(await editStats({ diff: 42 })).toBeUndefined();
+		expect(await editStats({ diff: { added: 1 } })).toBeUndefined();
+		expect(await editStats([{ diff: "+1|x" }])).toBeUndefined();
+		expect(await editStats("a string")).toBeUndefined();
+	});
+});
+
 describe("mobile portal guest — stop and resume", () => {
 	it("hides only the internal resume prompt from the transcript", async () => {
 		const loaded: LoadedSession = { id: "sess-a", cwd: "/tmp/project-a", entries: [] };

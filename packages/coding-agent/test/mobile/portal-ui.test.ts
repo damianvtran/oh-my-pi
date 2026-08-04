@@ -81,11 +81,31 @@ interface PortalUi {
 	keyboardInsetOf(layoutHeight: number, viewport: { height: number; offsetTop: number; scale: number } | null): number;
 	renderTranscript(items: PortalTranscriptItem[]): string;
 	renderTodos(phases: PortalTodoPhase[] | null): string;
-	toolIdentity(item: PortalTranscriptItem): string;
+	/** `{ id, stats }`: the elastic identity and the fixed trailing badge. */
+	toolIdentity(item: PortalTranscriptItem): { id: string; stats: string };
 	contextText(usage: PortalContextUsage | null): string;
 	contextClass(usage: PortalContextUsage | null): string;
 	durationText(ms: number): string;
 	setExpandedTools(ids: string[]): void;
+	/**
+	 * The status line's composition for a given set of dropped segment keys. The
+	 * measuring loop that produces those keys needs a real layout; the row it
+	 * composes at each step does not, and that is where the ordering lives.
+	 */
+	statusSegments(dropped: Set<string>): { left: string[]; right: string[] };
+	/** Session state the status line reads, which arrives on SSE frames in the app. */
+	/** Whether the todos panel is showing the full plan or the collapsed policy. */
+	setTodosOpen(open: boolean | null): void;
+	/** Extra output pages a card has been asked for, keyed by tool call id. */
+	setToolPages(pages: Record<string, number>): void;
+	setOpenState(state: {
+		model?: string;
+		thinking?: string;
+		cwd?: string;
+		agents?: number;
+		context?: PortalContextUsage | null;
+		startedAt?: string;
+	}): void;
 }
 
 function portalScript(): string {
@@ -148,6 +168,17 @@ function loadPortalUi(): PortalUi {
 			durationText,
 			setAgentsOpen: value => { agentsOpen = value; },
 			setExpandedTools: ids => { expandedTools = new Set(ids); },
+			setTodosOpen: value => { todosOpen = value; },
+			setToolPages: pages => { toolPages = new Map(Object.entries(pages)); },
+			statusSegments,
+			setOpenState: state => {
+				if ("model" in state) openModel = state.model;
+				if ("thinking" in state) openThinking = state.thinking;
+				if ("cwd" in state) openCwd = state.cwd;
+				if ("agents" in state) openAgents = state.agents;
+				if ("context" in state) openContext = state.context;
+				if ("startedAt" in state) openStartedAt = state.startedAt;
+			},
 		}; }`,
 	) as (env: typeof stubs) => PortalUi;
 	return load(stubs);
@@ -791,6 +822,17 @@ describe("portal UI subagents panel", () => {
  * an edit card with no path, a card that wrapped to three rows, a transcript blanked
  * because its tail was all reasoning.
  */
+/**
+ * The whole identity row as it reaches the DOM: `toolIdentity` returns the elastic
+ * half and the fixed trailing badge separately, because inside one ellipsised span
+ * the badge was the first thing a 390px screen dropped. Every assertion below is
+ * about the row a reader sees, so it joins them the way `renderTranscript` does.
+ */
+function identityRow(ui: PortalUi, item: PortalTranscriptItem): string {
+	const { id, stats } = ui.toolIdentity(item);
+	return stats ? `${id}${stats}` : id;
+}
+
 describe("portal UI transcript cards", () => {
 	const tool = (over: Partial<PortalTranscriptItem> = {}): PortalTranscriptItem => ({
 		kind: "tool",
@@ -809,7 +851,7 @@ describe("portal UI transcript cards", () => {
 		// The whole card is the hit zone, so it is the button.
 		expect(html).toContain('data-toggle="call-1"');
 		expect(html).toContain('aria-expanded="false"');
-		expect(html).toContain("⟦click to expand⟧");
+		expect(html).toContain("⟦tap⟧");
 		// Collapsed means the identity ALONE: `OUTPUT_SETTLED` drops even the one
 		// preview row the terminal keeps.
 		expect(html).not.toContain("tool-body");
@@ -824,14 +866,14 @@ describe("portal UI transcript cards", () => {
 		// The terminal drops the hint when open because its hover fill still marks the
 		// card as live; a touch screen has no hover, so the label has to say so.
 		expect(html).toContain("⟦collapse⟧");
-		expect(html).not.toContain("⟦click to expand⟧");
+		expect(html).not.toContain("⟦tap⟧");
 	});
 
 	it("leaves a card with no output inert rather than silently untappable", () => {
 		const ui = loadPortalUi();
 		const html = ui.renderTranscript([tool({ output: "" })]);
 		expect(html).not.toContain("data-toggle");
-		expect(html).not.toContain("⟦click to expand⟧");
+		expect(html).not.toContain("⟦tap⟧");
 		// Still a card, still identified.
 		expect(html).toContain("Bash");
 	});
@@ -844,6 +886,81 @@ describe("portal UI transcript cards", () => {
 		expect(html).toContain("line 199");
 		expect(html).not.toContain("line 200");
 		expect(html).toContain("… 60 more lines");
+		// And the marker is a CONTROL, not a dead end: the terminal can leave it inert
+		// because a laptop is one keystroke from the raw result, and a phone is not.
+		expect(html).toContain('data-page="call-1"');
+		expect(html).toContain("tap for 60");
+	});
+
+	it("adds a page of output per request rather than all of it at once", () => {
+		const ui = loadPortalUi();
+		ui.setExpandedTools(["call-1"]);
+		const rows = Array.from({ length: 520 }, (_, i) => `line ${i}`).join("\n");
+		ui.setToolPages({ "call-1": 1 });
+		const second = ui.renderTranscript([tool({ output: rows })]);
+		expect(second).toContain("line 399");
+		expect(second).not.toContain("line 400");
+		expect(second).toContain("… 120 more lines");
+		// Enough pages to reach the end, and the marker goes away with the remainder.
+		ui.setToolPages({ "call-1": 2 });
+		const third = ui.renderTranscript([tool({ output: rows })]);
+		expect(third).toContain("line 519");
+		expect(third).not.toContain("more lines");
+		expect(third).not.toContain("data-page");
+	});
+
+	it("keeps the change badge out of the ellipsised half of the row", () => {
+		const ui = loadPortalUi();
+		/* The badge and the hint are FIXED siblings of the identity, which is the one
+		   elastic child. In a single span the badge was the first thing an ellipsis ate,
+		   so an edit card at phone width showed no line counts at all. */
+		const html = ui.renderTranscript([
+			tool({
+				name: "edit",
+				args: { path: "/Users/someone/proj/src/very/deep/path/to/a/file.ts" },
+				stats: { added: 24, removed: 7 },
+				output: "applied",
+			}),
+		]);
+		const idHalf = /<span class="tool-id">([\s\S]*?)<\/span><span class="tool-stats">/.exec(html)?.[1] ?? "";
+		expect(idHalf).not.toContain("+24");
+		expect(html).toContain('<span class="tool-stats">');
+		expect(html).toContain("+24");
+		expect(html).toContain("-7");
+	});
+
+	it("clamps a long path from the front, keeping the filename", () => {
+		const ui = loadPortalUi();
+		// `clampPathLength`: the ellipsis goes at the FRONT. The repo root is the same on
+		// every row of a session and is already in the status line; the filename is what
+		// identifies the card.
+		const html = identityRow(
+			ui,
+			tool({
+				name: "write",
+				args: { path: "/Users/someone/oss/oh-my-pi/packages/coding-agent/src/mobile/portal.ts" },
+			}),
+		);
+		expect(html).toContain("portal.ts");
+		expect(html).toContain("…");
+		expect(html).not.toContain("~/oss/oh-my-pi/packages");
+	});
+
+	it("strips a leading cd from a bash command", () => {
+		const ui = loadPortalUi();
+		/* Agents write `cd <dir> && <command>` constantly, and at 19 visible characters
+		   the prefix WAS the visible row: five adjacent cards all reading
+		   `❯ Bash: cd ~/hyperplane-wt-…`. The cwd is in the status line one row below. */
+		const html = identityRow(ui, tool({ name: "bash", args: { command: "cd ~/proj/sub && grep -rn needle src/" } }));
+		expect(html).toContain("grep -rn needle src/");
+		expect(html).not.toContain("cd ~/proj/sub");
+		// A quoted directory too, and only a LEADING one: a `cd` inside a pipeline is
+		// part of the command being described.
+		expect(identityRow(ui, tool({ name: "bash", args: { command: 'cd "a b" && ls' } }))).toContain(">ls<");
+		// `&&` is escaped on the way into the row, hence `&amp;&amp;`.
+		expect(identityRow(ui, tool({ name: "bash", args: { command: "make && cd out && ls" } }))).toContain(
+			"make &amp;&amp; cd out",
+		);
 	});
 
 	it("does not render reasoning at all", () => {
@@ -873,7 +990,7 @@ describe("portal UI transcript cards", () => {
 
 	it("counts a write's own content as the change badge", () => {
 		const ui = loadPortalUi();
-		const html = ui.toolIdentity(tool({ name: "write", args: { path: "/tmp/x/a.ts", content: "one\ntwo\nthree" } }));
+		const html = identityRow(ui, tool({ name: "write", args: { path: "/tmp/x/a.ts", content: "one\ntwo\nthree" } }));
 		expect(html).toContain("Write");
 		expect(html).toContain("+3");
 		expect(html).not.toContain("-0");
@@ -886,7 +1003,8 @@ describe("portal UI transcript cards", () => {
 		// The hashline edit mode's arguments are `{ i, input }` — there is no `path`
 		// field at all, and without parsing the section header every edit card in a
 		// transcript read `✎ Edit` and nothing else.
-		const html = ui.toolIdentity(
+		const html = identityRow(
+			ui,
 			tool({
 				name: "edit",
 				args: { input: "[/Users/someone/proj/src/main.rs#C051]\nCUT 83.=83\n" },
@@ -901,7 +1019,8 @@ describe("portal UI transcript cards", () => {
 
 	it("names every file a multi-file patch touches by count", () => {
 		const ui = loadPortalUi();
-		const html = ui.toolIdentity(
+		const html = identityRow(
+			ui,
 			tool({
 				name: "edit",
 				args: { input: "[a/one.ts#AAAA]\nCUT 1.=1\n[b/two.ts#BBBB]\nCUT 2.=2\n" },
@@ -910,33 +1029,84 @@ describe("portal UI transcript cards", () => {
 		expect(html).toContain("a/one.ts +1 more");
 	});
 
+	it("recovers a path from an apply_patch envelope too", () => {
+		const ui = loadPortalUi();
+		// `apply_patch` is a real wire tool name — the custom-tool spelling GPT-5-class
+		// providers get — and its schema is `{ input }` with no `path` either. Its
+		// envelope names files with `*** Update File:`, not `[path#TAG]`, so a
+		// hashline-only parse rendered every patch card on such a session as a bare
+		// `Patch`: the same unidentifiable row this whole identity path exists to fix.
+		const html = identityRow(
+			ui,
+			tool({
+				name: "apply_patch",
+				args: {
+					input: [
+						"*** Begin Patch",
+						"*** Update File: /Users/someone/proj/src/app.tsx",
+						"@@",
+						"-const a = 1;",
+						"+const a = 2;",
+						"*** End Patch",
+					].join("\n"),
+				},
+				stats: { added: 1, removed: 1 },
+			}),
+		);
+		expect(html).toContain("~/proj/src/app.tsx");
+		expect(html).toContain("+1");
+		expect(html).toContain("-1");
+		// Added and deleted files are named by their own markers.
+		const added = identityRow(
+			ui,
+			tool({ name: "apply_patch", args: { input: "*** Begin Patch\n*** Add File: pkg/new.go\n+package pkg\n" } }),
+		);
+		expect(added).toContain("pkg/new.go");
+		expect(added).toContain("🐹");
+		const deleted = identityRow(
+			ui,
+			tool({ name: "apply_patch", args: { input: "*** Begin Patch\n*** Delete File: old.rb\n" } }),
+		);
+		expect(deleted).toContain("old.rb");
+		// A multi-file envelope counts the same way a multi-section hashline patch does.
+		const many = identityRow(
+			ui,
+			tool({
+				name: "apply_patch",
+				args: { input: "*** Update File: a.ts\n@@\n*** Add File: b.ts\n*** Delete File: c.ts\n" },
+			}),
+		);
+		expect(many).toContain("a.ts +2 more");
+	});
+
 	it("takes an edit's path straight from the patch and replace modes", () => {
 		const ui = loadPortalUi();
 		// `patch` and `replace` modes carry `path` outright; which mode a host runs is a
 		// setting, so both shapes have to work.
-		expect(ui.toolIdentity(tool({ name: "edit", args: { path: "/tmp/p/x.py", edits: [] } }))).toContain(
+		expect(identityRow(ui, tool({ name: "edit", args: { path: "/tmp/p/x.py", edits: [] } }))).toContain(
 			"/tmp/p/x.py",
 		);
 	});
 
 	it("appends a read's line range and omits the colon the terminal omits", () => {
 		const ui = loadPortalUi();
-		const ranged = ui.toolIdentity(tool({ name: "read", args: { path: "/tmp/p/f.txt", offset: 1295, limit: 8 } }));
+		const ranged = identityRow(ui, tool({ name: "read", args: { path: "/tmp/p/f.txt", offset: 1295, limit: 8 } }));
 		expect(ranged).toContain(":1295-1302");
 		// `read-tool-group.ts` builds `● Read <path>` — a space, not `Read:`.
 		expect(ranged).not.toContain("Read</span>:");
 		// A spec that already carries its own selector is left alone.
-		expect(ui.toolIdentity(tool({ name: "read", args: { path: "/tmp/p/f.txt:10-20" } }))).toContain(":10-20");
+		expect(identityRow(ui, tool({ name: "read", args: { path: "/tmp/p/f.txt:10-20" } }))).toContain(":10-20");
 	});
 
 	it("summarises a task batch by the names it spawned", () => {
 		const ui = loadPortalUi();
-		const batch = ui.toolIdentity(
+		const batch = identityRow(
+			ui,
 			tool({ name: "task", args: { context: "…", tasks: [{ name: "ScoutOne" }, { name: "ScoutTwo" }] } }),
 		);
 		expect(batch).toContain("ScoutOne · ScoutTwo");
 		// A single spawn is titled by its agent type, the way `formatAgentHeaderLabel` does.
-		expect(ui.toolIdentity(tool({ name: "task", args: { agent: "scout" } }))).toContain("scout");
+		expect(identityRow(ui, tool({ name: "task", args: { agent: "scout" } }))).toContain("scout");
 	});
 
 	it("marks an errored call with the error glyph", () => {
@@ -960,9 +1130,15 @@ describe("portal UI todos panel", () => {
 		{ name: "Land", tasks: [{ content: "merge", status: "pending" }] },
 	];
 
-	it("labels phases with roman numerals and marks the active one", () => {
+	/** The panel with the full plan showing, which is what the disclosure gives. */
+	function expanded(plan: unknown[]): { ui: PortalUi; html: string } {
 		const ui = loadPortalUi();
-		const html = ui.renderTodos(phases);
+		ui.setTodosOpen(true);
+		return { ui, html: ui.renderTodos(plan as never) };
+	}
+
+	it("labels phases with roman numerals and marks the active one", () => {
+		const { html } = expanded(phases);
 		expect(html).toContain("I. Scout");
 		expect(html).toContain("II. Implement");
 		expect(html).toContain("III. Land");
@@ -978,23 +1154,28 @@ describe("portal UI todos panel", () => {
 		// rows answer "how much of it".
 		expect(ui.renderTodos(phases)).toContain('Todos<span class="count"> · 2/3</span>');
 		// A single-phase plan has no stage progression to state.
-		expect(ui.renderTodos([phases[0]!])).toContain('<div class="todos-h">Todos</div>');
+		expect(ui.renderTodos([phases[0]!])).toContain("</span>Todos</button>");
 	});
 
 	it("carries the checkbox glyphs and the status palette", () => {
-		const ui = loadPortalUi();
-		const html = ui.renderTodos(phases);
-		expect(html).toContain("☑ read the repo");
-		expect(html).toContain("☐ write it");
+		const { html } = expanded(phases);
+		expect(html).toContain("☑</span> read the repo");
+		expect(html).toContain("☐</span> write it");
 		expect(html).toContain("task done");
 		expect(html).toContain("task now");
 		// `formatTodoLine` appends the word, it does not only recolour the row.
-		expect(html).toContain("☐ waiting on review (blocked)");
+		expect(html).toContain("☐</span> waiting on review (blocked)");
+	});
+
+	it("hides the glyph from assistive tech and keeps the content", () => {
+		const { html } = expanded(phases);
+		// "ballot box with check" once per row, 25 rows deep, is noise: the row's own
+		// class carries the state and the content is the information.
+		expect(html).toContain('<span aria-hidden="true">☑</span>');
 	});
 
 	it("draws the two-character tree guides the terminal draws", () => {
-		const ui = loadPortalUi();
-		const html = ui.renderTodos(phases);
+		const { html } = expanded(phases);
 		expect(html).toContain("├─");
 		expect(html).toContain("└─");
 		// `getTreeContinuePrefix`: `│  ` under a branch, three spaces under the last.
@@ -1006,6 +1187,118 @@ describe("portal UI todos panel", () => {
 		expect(ui.renderTodos(null)).toBe("");
 		expect(ui.renderTodos([])).toBe("");
 		expect(ui.renderTodos([{ name: "Empty", tasks: [] }])).toBe("");
+	});
+
+	/*
+	 * The collapsed policy, which is the DEFAULT and is the terminal's own
+	 * (`#renderTodoList` + `selectCollapsedTodos`). Rendering the whole plan instead
+	 * took 58% of a 390×844 viewport on a 12-task plan, most of it struck-through
+	 * completions, sitting between the newest transcript row and the composer.
+	 */
+	describe("collapsed", () => {
+		it("windows from the active phase and draws following ones as headers alone", () => {
+			const ui = loadPortalUi();
+			const html = ui.renderTodos(phases);
+			/* `phases.slice(activeIdx, activeIdx + 1 + subsequentStageCap)`: the window
+			   STARTS at the active phase, so a finished stage before it is dropped
+			   entirely — "the header's n/total count implies any not shown". Its roman
+			   numeral is still the real phase index, which is what keeps `II.` meaningful
+			   when `I.` is off the panel. */
+			expect(html).not.toContain("I. Scout");
+			expect(html).not.toContain("read the repo");
+			expect(html).toContain("II. Implement");
+			expect(html).toContain("write it");
+			// A FOLLOWING phase is its header alone: not started, so its rows say nothing
+			// its `0/1` does not.
+			expect(html).toContain("III. Land");
+			expect(html).not.toContain("merge");
+		});
+
+		it("omits completed and abandoned rows from the active phase", () => {
+			const ui = loadPortalUi();
+			const html = ui.renderTodos([
+				{
+					name: "Work",
+					tasks: [
+						{ content: "old done thing", status: "completed" },
+						{ content: "dropped thing", status: "abandoned" },
+						{ content: "current thing", status: "in_progress" },
+					],
+				},
+			]);
+			expect(html).toContain("current thing");
+			expect(html).not.toContain("old done thing");
+			expect(html).not.toContain("dropped thing");
+		});
+
+		it("keeps a settled phase visible when nothing is open", () => {
+			const ui = loadPortalUi();
+			// `selectCollapsedTodos` falls back to the closed tasks when there is no open
+			// work — the HUD's closed-todo persistence. A finished plan should not vanish.
+			const html = ui.renderTodos([{ name: "Done", tasks: [{ content: "shipped it", status: "completed" }] }]);
+			expect(html).toContain("shipped it");
+		});
+
+		it("caps the active phase at five rows and names the remainder", () => {
+			const ui = loadPortalUi();
+			const tasks = Array.from({ length: 9 }, (_, i) => ({ content: `task ${i}`, status: "pending" }));
+			const html = ui.renderTodos([{ name: "Big", tasks }]);
+			for (const i of [0, 1, 2, 3, 4]) expect(html).toContain(`task ${i}`);
+			for (const i of [5, 6, 7, 8]) expect(html).not.toContain(`task ${i}`);
+			// `trailingSummary`, the row `renderTreeList` adds under a capped list.
+			expect(html).toContain("… 4 more todos");
+		});
+
+		it("leads with the active task and fills with its successors", () => {
+			const ui = loadPortalUi();
+			// Seven open rows against a cap of five, so the selection actually runs: at or
+			// under the cap `selectCollapsedTodos` returns the list untouched, in plan
+			// order, which is the right answer when everything fits.
+			const tasks = [
+				{ content: "before one", status: "pending" },
+				{ content: "before two", status: "pending" },
+				{ content: "before three", status: "pending" },
+				{ content: "running now", status: "in_progress" },
+				{ content: "after one", status: "pending" },
+				{ content: "after two", status: "pending" },
+				{ content: "after three", status: "pending" },
+			];
+			const html = ui.renderTodos([{ name: "Mixed", tasks }]);
+			// The active row is promoted to the head and its successors follow in plan
+			// order; the pending rows BEFORE it are what gets dropped, because the reader
+			// is looking for what is happening now and what comes next.
+			expect(html.indexOf("running now")).toBeLessThan(html.indexOf("after one"));
+			expect(html.indexOf("after one")).toBeLessThan(html.indexOf("after two"));
+			expect(html).not.toContain("before one");
+			expect(html).toContain("… 3 more todos");
+		});
+
+		it("windows the phase list to the active one and the four after it", () => {
+			const ui = loadPortalUi();
+			// `subsequentStageCap`. A nine-phase plan otherwise pushed the composer off a
+			// phone screen with headers alone.
+			const plan = Array.from({ length: 9 }, (_, i) => ({
+				name: `Phase${i}`,
+				tasks: [{ content: `t${i}`, status: i === 0 ? "in_progress" : "pending" }],
+			}));
+			const html = ui.renderTodos(plan);
+			expect(html).toContain("I. Phase0");
+			expect(html).toContain("V. Phase4");
+			expect(html).not.toContain("VI. Phase5");
+			// The header still states the whole shape, so nothing is hidden silently.
+			expect(html).toContain('Todos<span class="count"> · 1/9</span>');
+		});
+
+		it("is a disclosure control, and expanding it shows the whole plan", () => {
+			const ui = loadPortalUi();
+			expect(ui.renderTodos(phases)).toContain('aria-expanded="false"');
+			ui.setTodosOpen(true);
+			const open = ui.renderTodos(phases);
+			expect(open).toContain('aria-expanded="true"');
+			// Everything the collapsed form dropped.
+			expect(open).toContain("read the repo");
+			expect(open).toContain("merge");
+		});
 	});
 });
 
@@ -1037,5 +1330,110 @@ describe("portal UI status-line formatters", () => {
 		expect(ui.durationText(2 * 3_600_000 + 30 * 60_000)).toBe("2h30m");
 		expect(ui.durationText(3 * 86_400_000 + 2 * 3_600_000)).toBe("3d2h");
 		expect(ui.durationText(0)).toBe("");
+	});
+});
+
+/**
+ * The status line's drop precedence. The row is the composer's last line and it is
+ * the one place on the page where running out of width is the NORMAL case, not the
+ * edge one: a 390px screen fits about four of the six segments. Which two go, and in
+ * what order, is the whole design — the terminal drops from the tail of the right
+ * group and keeps `path` longest, and the alternative it replaced (shrink everything)
+ * produced a row of four ellipses that named nothing.
+ */
+describe("portal UI status line", () => {
+	const FULL = {
+		model: "Qwen3.8 Max Preview",
+		thinking: "high",
+		cwd: "/Users/me/src/hyperplane",
+		agents: 3,
+		context: { percent: 28.5, contextWindow: 984_000, tokens: 280_440 },
+		startedAt: new Date(Date.now() - 95 * 60_000).toISOString(),
+	};
+
+	function segments(dropped: string[]): { left: string; right: string } {
+		const ui = loadPortalUi();
+		ui.setOpenState(FULL);
+		const { left, right } = ui.statusSegments(new Set(dropped));
+		return { left: left.join(" "), right: right.join(" ") };
+	}
+
+	it("paints every segment when nothing has been dropped", () => {
+		const { left, right } = segments([]);
+		expect(left).toContain("π");
+		expect(left).toContain("⬢ Qwen3.8 Max Preview");
+		// The thinking level rides INSIDE the model segment, as ` · ◒ high`, which is
+		// what lets it be dropped without dropping the model name.
+		expect(left).toContain("◒ high");
+		expect(left).toContain("~/src/hyperplane");
+		expect(right).toContain("◈ 3 agents");
+		// Context sits in the LEFT group, where `presets.default` puts `context_pct`.
+		expect(left).toContain("28.5%/984K");
+		expect(right).toContain("2h");
+	});
+
+	it("keeps π and the path through every drop the loop can make", () => {
+		// The full drop order, which is what a 320px screen with a long model name
+		// actually reaches. `path` is not in `STATUS_DROP_ORDER` at all and `π` is one
+		// column: between them they are what still identifies the row as omp's.
+		const { left, right } = segments(["time", "agents", "thinking", "context", "model"]);
+		expect(left).toContain("π");
+		expect(left).toContain("~/src/hyperplane");
+		expect(right).toBe("");
+		expect(left).not.toContain("Qwen3.8");
+	});
+
+	it("drops the thinking tail without taking the model name with it", () => {
+		const { left } = segments(["thinking"]);
+		expect(left).toContain("⬢ Qwen3.8 Max Preview");
+		// The glyph, not the bare word: `high` is also the context segment's threshold
+		// class, so a substring test passed on the wrong span.
+		expect(left).not.toContain("◒ high");
+	});
+
+	it("drops each right segment independently", () => {
+		expect(segments(["time"]).right).not.toContain("1h35m");
+		expect(segments(["time"]).right).toContain("◈ 3 agents");
+		expect(segments(["agents"]).right).not.toContain("agent");
+		expect(segments(["context"]).left).not.toContain("984K");
+	});
+
+	it("omits a segment whose value the wire never carried", () => {
+		const ui = loadPortalUi();
+		// A session that has not reported a model, has no subagents, and whose context
+		// is unknown: the TUI omits a segment whose `visible` is false rather than
+		// printing a placeholder, and an empty right group drops its `◀` with it.
+		ui.setOpenState({ model: "", thinking: "", cwd: "/Users/me/x", agents: 0, context: null, startedAt: "" });
+		const { left, right } = ui.statusSegments(new Set());
+		expect(left.join(" ")).toBe(`<span class="pi">π</span> <span class="path">▤ ~/x</span>`);
+		expect(right).toEqual([]);
+	});
+
+	it("marks a scratch cwd with its own geometric glyph", () => {
+		const ui = loadPortalUi();
+		// `SCRATCH_ROOTS` in the TUI: a session under a temp root is disposable, and on
+		// a phone the folder glyph is the only place that can say so.
+		ui.setOpenState({ cwd: "/tmp/omp-fs", model: "", agents: 0, context: null, startedAt: "" });
+		expect(ui.statusSegments(new Set()).left.join("")).toContain("▥");
+		ui.setOpenState({ cwd: "/Users/me/tmpfiles" });
+		// Not a prefix match on the string: `~/tmpfiles` is a real project directory.
+		expect(ui.statusSegments(new Set()).left.join("")).toContain("▤");
+	});
+
+	it("escapes a model name and a cwd", () => {
+		const ui = loadPortalUi();
+		ui.setOpenState({
+			model: "<img src=x onerror=alert(1)>",
+			cwd: "/Users/me/<b>",
+			agents: 0,
+			context: null,
+			startedAt: "",
+		});
+		const html = ui.statusSegments(new Set()).left.join("");
+		expect(html).not.toContain("<img");
+		expect(html).toContain("&lt;img");
+		// `esc` leaves a bare `>` alone, which is inert in text position; the `<` is what
+		// would have opened an element.
+		expect(html).toContain("&lt;b>");
 	});
 });

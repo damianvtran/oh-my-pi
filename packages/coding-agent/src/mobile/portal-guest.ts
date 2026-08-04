@@ -113,10 +113,16 @@ function todoPhasesFrom(details: unknown): TodoPhase[] | null {
  * Lines added and removed from a tool result's unified diff, for the `⟦+N/-M⟧`
  * badge the phone puts on an edit card.
  *
- * Counted the way `getDiffStats` counts them: a body line starting with `+` or `-`
- * is a change, and the `+++`/`---` file headers are not. Returns `undefined` for a
- * result with no diff (a delete, a move-only rename, a genuine no-op) so the badge
- * is simply absent rather than reported as `⟦+0/-0⟧`.
+ * `getDiffStats` — the TUI's own counter, which produces the badge this mirrors —
+ * counts every line starting with `+` or `-` and excludes nothing. The `+++`/`---`
+ * guard here is defensive rather than a divergence: an edit result's diff body is
+ * always `formatNumberedDiffLine`'s `+<n>|<content>`, so a `+++` line cannot occur,
+ * and `isDiffContentLine` (which does exclude them) matches `"+++ "` WITH the
+ * trailing space. Keeping the guard costs one comparison and means a future
+ * result that does carry file headers cannot inflate the badge by two.
+ *
+ * Returns `undefined` for a result with no diff (a delete, a move-only rename, a
+ * genuine no-op) so the badge is simply absent rather than reported as `⟦+0/-0⟧`.
  */
 function diffStatsFrom(details: unknown): { added: number; removed: number } | undefined {
 	if (!details || typeof details !== "object" || !("diff" in details)) return undefined;
