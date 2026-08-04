@@ -711,7 +711,7 @@ function loginPage(error: string | undefined, next: string, username = ""): stri
 :root{color-scheme:dark;--canvas:#121212;--panel:#1c1c1c;--element:#262626;--overlay:#303030;
 --fg:#e5e5e7;--muted:#777d88;--dim:#5f6673;--accent:#febc38;--error:#fc3a4b}
 @media(prefers-color-scheme:light){:root:not([data-theme="dark"]){color-scheme:light;
---canvas:#e0e0e0;--panel:#dbdbdb;--element:#d6d6d6;--overlay:#d1d1d1;
+--canvas:#e0e0e0;--panel:#d2d2d2;--element:#c4c4c4;--overlay:#b6b6b6;
 --fg:#000000;--muted:#6c6c6c;--dim:#767676;--accent:#5a8080;--error:#aa5555}}
 *{box-sizing:border-box}
 body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px;background:var(--canvas);color:var(--fg);
