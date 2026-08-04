@@ -110,6 +110,28 @@ function todoPhasesFrom(details: unknown): TodoPhase[] | null {
 }
 
 /**
+ * Lines added and removed from a tool result's unified diff, for the `⟦+N/-M⟧`
+ * badge the phone puts on an edit card.
+ *
+ * Counted the way `getDiffStats` counts them: a body line starting with `+` or `-`
+ * is a change, and the `+++`/`---` file headers are not. Returns `undefined` for a
+ * result with no diff (a delete, a move-only rename, a genuine no-op) so the badge
+ * is simply absent rather than reported as `⟦+0/-0⟧`.
+ */
+function diffStatsFrom(details: unknown): { added: number; removed: number } | undefined {
+	if (!details || typeof details !== "object" || !("diff" in details)) return undefined;
+	const diff = details.diff;
+	if (typeof diff !== "string" || diff.length === 0) return undefined;
+	let added = 0;
+	let removed = 0;
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("+") && !line.startsWith("+++")) added++;
+		else if (line.startsWith("-") && !line.startsWith("---")) removed++;
+	}
+	return added > 0 || removed > 0 ? { added, removed } : undefined;
+}
+
+/**
  * Narrowed `AgentProgress` for one subagent: only the fields the phone renders,
  * validated at the wire boundary.
  *
@@ -604,11 +626,13 @@ export class PortalGuest {
 					if (phases) this.todos = phases;
 				}
 				// Attach to the pending call so the card renders as one unit.
+				const stats = diffStatsFrom(message.details);
 				for (let i = this.transcript.length - 1; i >= 0; i--) {
 					const item = this.transcript[i]!;
 					if (item.kind === "tool" && item.id === message.toolCallId) {
 						item.output = text;
 						item.isError = message.isError === true;
+						if (stats) item.stats = stats;
 						return;
 					}
 				}
@@ -622,6 +646,7 @@ export class PortalGuest {
 						args: {},
 						output: text,
 						isError: message.isError === true,
+						...(stats ? { stats } : {}),
 					});
 				}
 				return;

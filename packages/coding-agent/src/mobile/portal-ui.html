@@ -4,72 +4,85 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="color-scheme" content="dark light">
-<meta name="theme-color" content="#0f0b14" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#faf9fb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#e0e0e0" media="(prefers-color-scheme: light)">
 <title>omp</title>
 <style>
-/* Palette and type lifted verbatim from omp's own web surfaces:
-   packages/coding-agent/src/export/html/web-palette.ts (the vars omp injects on
-   :root for share/export pages) and template.css (the "dense devtool aesthetic"
-   — mono type, hairlines via color-mix, small radii, whisper hovers). Keeping
-   the same tokens means this portal and an omp /share page are the same product. */
+/* Palette and layout are omp's TUI, not a web design.
+
+   Every colour here is a token from omp's own theme system
+   (packages/coding-agent/src/modes/theme/theme.ts and the `dark`/`light` theme
+   JSON beside it), and the four surfaces are the fullscreen viewport's derived
+   "surface ladder": one anchor (`statusLineBg`) with every RGB channel stepped
+   +10 per rung on a dark theme, -5 on a light one. Those four flat, opaque
+   fills are the ONLY thing that marks a boundary in the fullscreen TUI — it
+   draws no borders and no rounded corners anywhere in the transcript — so the
+   contrast between `--canvas` and `--panel` is load-bearing rather than
+   decorative, and nothing in this file may reintroduce a rule or a radius to do
+   a fill's job.
+
+   The values below are the BUILT-IN `dark`/`light` themes, so this file renders
+   correctly opened on its own (which is how the render-function test suite loads
+   it). The portal overrides them with the host's configured theme by injecting a
+   later `:root` block of the same specificity — see `mobile/theme-css.ts`. Token
+   names match omp's own (`--muted` is `muted`, `--sl-path` is `statusLinePath`)
+   so a rule here can be read against the TUI component it mirrors. */
 :root {
   color-scheme: dark;
-  --bg: #0f0b14; --bg-raised: #16111c; --bg-inset: #09060c; --bg-overlay: #211b28;
-  --fg: #e6e3ea; --fg-muted: #a49faa; --fg-faint: oklch(0.68 0.015 307);
-  --accent: #ed4abf; --accent-muted: oklch(0.674 0.23 341 / 18%);
-  /* Three accent roles, because one colour cannot serve all of them at 12px:
-     `--accent` for borders and glyphs, `--accent-text` for text on the page
-     background, `--accent-solid` as a fill with a label on top. In the dark
-     palette they coincide; in the light one they must not. */
-  --accent-text: #ed4abf;
-  --accent-solid: #ed4abf;
-  /* Warn as *text* needs more contrast than warn as a dot or a border. */
-  --warn-text: #e4b33f;
-  --ok: #68ca80; --err: #f05653; --warn: #e4b33f; --link: #5ad8e5;
-  --border: oklch(1 0 0 / 9%); --border-strong: oklch(1 0 0 / 13%);
-  --ring: oklch(0.817 0.112 205 / 70%);
+  /* Surface ladder, derived from `statusLineBg: #121212`. */
+  --canvas: #121212; --panel: #1c1c1c; --element: #262626; --overlay: #303030;
+  --fg: #e5e5e7; --muted: #777d88; --dim: #5f6673;
+  --accent: #febc38; --success: #89d281; --error: #fc3a4b; --warning: #e4c00f;
+  --border-muted: #3d424a; --thinking: #777d88; --tool-output: #777d88;
+  --diff-add: #89d281; --diff-del: #fc3a4b;
+  --user-bg: #221d1a; --custom-bg: #2a2530;
+  --link: #0088fa; --code: #e5c1ff; --code-block: #9CDCFE;
+  --sl-model: #d787af; --sl-path: #00afaf; --sl-context: #8787af;
+  --sl-sep: #808080; --sl-agents: #febc38; --context-purple: #b281d6;
 }
-/* Light: explicit `data-theme` override first, then the system fallback —
-   same two-tier shape as collab-web's tokens.css. */
+/* Light: explicit `data-theme` override first, then the system fallback — the
+   same two-tier shape the injected block uses, so `?theme=light` pins the
+   palette and otherwise the OS decides. */
 [data-theme="light"] {
-    color-scheme: light;
-    --bg: oklch(0.985 0.004 307); --bg-raised: oklch(1 0 0);
-    --bg-inset: oklch(0.95 0.006 307); --bg-overlay: oklch(0.965 0.006 307);
-    --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.52 0.025 307);
-    --accent: oklch(0.62 0.23 341); --accent-muted: oklch(0.62 0.23 341 / 14%);
-    --accent-text: oklch(0.55 0.22 341);
-    --accent-solid: oklch(0.52 0.21 341);
-    --warn-text: oklch(0.47 0.13 85);
-    --ok: oklch(0.52 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
-    --link: oklch(0.45 0.09 210);
-    --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
-    --ring: oklch(0.58 0.13 230 / 70%);
+  color-scheme: light;
+  --canvas: #e0e0e0; --panel: #dbdbdb; --element: #d6d6d6; --overlay: #d1d1d1;
+  --fg: #000000; --muted: #6c6c6c; --dim: #767676;
+  --accent: #5a8080; --success: #588458; --error: #aa5555; --warning: #9a7326;
+  --border-muted: #b0b0b0; --thinking: #6c6c6c; --tool-output: #6c6c6c;
+  --diff-add: #588458; --diff-del: #aa5555;
+  --user-bg: #e8e8e8; --custom-bg: #ede7f6;
+  --link: #547da7; --code: #5a8080; --code-block: #588458;
+  --sl-model: #875f87; --sl-path: #005f87; --sl-context: #5f5f87;
+  --sl-sep: #808080; --sl-agents: #5a8080; --context-purple: #875f87;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
     color-scheme: light;
-    --bg: oklch(0.985 0.004 307); --bg-raised: oklch(1 0 0);
-    --bg-inset: oklch(0.95 0.006 307); --bg-overlay: oklch(0.965 0.006 307);
-    --fg: oklch(0.26 0.03 307); --fg-muted: oklch(0.46 0.03 307); --fg-faint: oklch(0.52 0.025 307);
-    --accent: oklch(0.62 0.23 341); --accent-muted: oklch(0.62 0.23 341 / 14%);
-    --accent-text: oklch(0.55 0.22 341);
-    --accent-solid: oklch(0.52 0.21 341);
-    --warn-text: oklch(0.47 0.13 85);
-    --ok: oklch(0.52 0.13 150); --err: oklch(0.55 0.19 25); --warn: oklch(0.6 0.13 85);
-    --link: oklch(0.45 0.09 210);
-    --border: oklch(0 0 0 / 10%); --border-strong: oklch(0 0 0 / 15%);
-    --ring: oklch(0.58 0.13 230 / 70%);
+    --canvas: #e0e0e0; --panel: #dbdbdb; --element: #d6d6d6; --overlay: #d1d1d1;
+    --fg: #000000; --muted: #6c6c6c; --dim: #767676;
+    --accent: #5a8080; --success: #588458; --error: #aa5555; --warning: #9a7326;
+    --border-muted: #b0b0b0; --thinking: #6c6c6c; --tool-output: #6c6c6c;
+    --diff-add: #588458; --diff-del: #aa5555;
+    --user-bg: #e8e8e8; --custom-bg: #ede7f6;
+    --link: #547da7; --code: #5a8080; --code-block: #588458;
+    --sl-model: #875f87; --sl-path: #005f87; --sl-context: #5f5f87;
+    --sl-sep: #808080; --sl-agents: #5a8080; --context-purple: #875f87;
   }
 }
 :root {
-  --hairline: color-mix(in srgb, var(--fg) 10%, transparent);
-  --hover-wash: color-mix(in srgb, var(--fg) 5%, transparent);
-  /* The error counterpart of `--accent-muted`, derived rather than declared per
-     palette so it can only ever be the `--err` that is actually in force. */
-  --err-muted: color-mix(in srgb, var(--err) 18%, transparent);
-  --radius-card: 8px; --radius-ctl: 6px;
+  /* The composer's text selection: `panelBg` pulled 26% toward the accent, which
+     is exactly `deriveSelectionWash`'s blend in sRGB. The theme module then walks
+     the result until it clears 1.5:1 against the panel; CSS cannot express that
+     walk, so the handful of themes whose accent sits almost on their panel get a
+     fainter wash here than in the terminal. */
+  --selection: color-mix(in srgb, var(--accent) 26%, var(--panel));
   --line-height: 18px;
+  /* The TUI's transcript geometry, in the units a monospace page has:
+     `padX: 2` viewport gutter, `CARD_PADDING_X: 2` card inset, `CARD_PADDING_Y: 1`
+     filled row above and below a card, and exactly one unpainted canvas row
+     between blocks. A "row" is `--line-height` rather than the `lh` unit, which
+     iOS only learned in 16.4 and which this file has no other reason to require. */
+  --gutter: 2ch; --card-pad-x: 2ch; --card-pad-y: var(--line-height); --block-gap: var(--line-height);
   /* Text-entry controls are 16px while everything else stays 12px, and that is
      not a taste call. WebKit zooms the page whenever a control with a computed
      font-size under 16px takes focus, and on iOS it does not zoom back out on
@@ -93,7 +106,7 @@ html { height: 100%; -webkit-text-size-adjust: 100%; scrollbar-width: thin;
 body {
   height: 100%;
   font: 400 12px/var(--line-height) ui-monospace, "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas, "DejaVu Sans Mono", monospace;
-  color: var(--fg); background: var(--bg);
+  color: var(--fg); background: var(--canvas);
   -webkit-font-smoothing: antialiased;
   overscroll-behavior-y: none;
 }
@@ -101,9 +114,10 @@ button, input, select, textarea { font: inherit; color: inherit; -webkit-tap-hig
 /* Only the fields: a `button` cannot take a focus zoom, and growing the chrome
    with them would cost the dense look for nothing. */
 input, select, textarea { font-size: var(--input-size); }
-button { cursor: pointer; background: none; border: 0; }
-:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+/* Squared and borderless by default, like every control in the fullscreen TUI. */
+button { cursor: pointer; background: none; border: 0; border-radius: 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+::selection { background: var(--selection); }
 input, textarea { caret-color: var(--accent); }
 
 /* ── frame ───────────────────────────────────────────────────────────── */
@@ -122,76 +136,97 @@ input, textarea { caret-color: var(--accent); }
    `width: 100%` on that select something real to resolve against. */
 #app { display: grid; grid-template-rows: auto minmax(0,1fr) auto; grid-template-columns: minmax(0,1fr); height: var(--app-h, 100dvh); }
 
+/* The header is the one piece of chrome the TUI has no counterpart for — the
+   terminal's title bar is the terminal's. It rides the panel surface so it reads
+   as the same rung as the composer at the other end of the screen, and it is
+   separated from the canvas by that fill alone: no rule, matching the fullscreen
+   viewport, which replaced every `├──┤` with a blank filled row. */
 header {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 8px 12px; padding-top: calc(8px + env(safe-area-inset-top, 0px));
-  border-bottom: 1px solid var(--hairline); background: var(--bg);
+  padding: 4px var(--gutter); padding-top: calc(4px + env(safe-area-inset-top, 0px));
+  background: var(--panel);
 }
 .brand { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.brand b { font-weight: 650; letter-spacing: 0.01em; }
-.brand .sub { color: var(--fg-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* `π`, the TUI status line's own leading badge (`icon.pi`, in `accent`). */
+.brand b { color: var(--accent); font-weight: 650; letter-spacing: 0.01em; }
+.brand .sub { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* One control scale for the whole app. 44px is the iOS minimum and this surface
-   is phone-only, so the pill keeps its dense look while the tap target is a
+   is phone-only, so the control keeps its dense look while the tap target is a
    thumb's worth of it — the header buttons used to be 26px tall and 6px apart,
-   which put `stop` one mis-tap away from navigating out of the session. */
+   which put `stop` one mis-tap away from navigating out of the session.
+
+   Squared and borderless: a control in the fullscreen TUI is a row of the
+   surface it sits on, lifted one rung when the pointer is over it
+   (`hoverBg` === `elementBg`). `--element` is therefore both the hover fill and
+   the press fill — on a phone there is no hover, so the press is what the reader
+   actually sees. */
 .btn {
   display: inline-flex; align-items: center; justify-content: center;
-  min-height: 44px; padding: 3px 12px;
-  color: var(--fg-muted); background: var(--bg-raised);
-  border: 1px solid var(--hairline); border-radius: var(--radius-ctl);
-  transition: background .14s ease, color .14s ease, border-color .14s ease;
+  min-height: 44px; padding: 3px 10px;
+  color: var(--muted); background: var(--element);
+  /* A label is one row in a terminal and has to be one here: `← all` wrapped to two
+     lines inside its own box the moment the header ran out of room. */
+  white-space: nowrap;
+  transition: background .14s ease, color .14s ease;
 }
-.btn:hover { background: var(--hover-wash); color: var(--fg); border-color: var(--border-strong); }
-.btn:active { transform: scale(.97); }
-/* `--accent-solid` rather than `--accent`: white-on-accent measured 3.94:1 in the
-   light palette, under the 4.5:1 floor for 12px text. */
-.btn-accent { color: var(--bg); background: var(--accent-solid); border-color: var(--accent-solid); }
-.btn-stop { color: var(--err); }
-.btn-go { color: var(--ok); }
+.btn:hover, .btn:active { background: var(--overlay); color: var(--fg); }
+.btn-accent { color: var(--canvas); background: var(--accent); }
+.btn-accent:hover, .btn-accent:active { color: var(--canvas); background: var(--accent); filter: brightness(.92); }
+.btn-stop { color: var(--error); }
+.btn-go { color: var(--success); }
 /* A disabled control must not keep offering hover and press feedback: the start
    button spends a whole request round trip disabled, which on a phone tunnel is
    exactly when a second tap happens. */
 .btn:disabled { opacity: .55; cursor: default; }
-.btn:disabled:active { transform: none; }
-.btn:disabled:hover { background: var(--bg-raised); color: var(--fg-muted); border-color: var(--hairline); }
+.btn:disabled:hover, .btn:disabled:active { background: var(--element); color: var(--muted); filter: none; }
 
-main { overflow-y: auto; overscroll-behavior: contain; }
-.wrap { max-width: 880px; margin: 0 auto; padding: 10px 12px 16px; }
+main { overflow-y: auto; overscroll-behavior: contain; background: var(--canvas); }
+/* `padX: 2` on each side and `padBottom: 1` at the end of the viewport, with no
+   top pad — the TUI leaves the leading row to the scroll region so it scrolls
+   away with the content instead of sitting there as chrome. */
+.wrap { max-width: 880px; margin: 0 auto; padding: 0 var(--gutter) var(--block-gap); }
 
-/* ── session list ────────────────────────────────────────────────────── */
+/* ── session list ─────────────────────────────────────────────────────────
+   The list has no TUI counterpart either (a terminal shows one session), so each
+   row borrows the transcript card's shape: a panel-filled block, squared, one
+   canvas row of separation, lifting to `--element` under a thumb. */
 .card {
   display: block; width: 100%; text-align: left;
-  padding: 10px 12px; margin-bottom: 8px;
-  background: color-mix(in srgb, var(--bg-raised) 60%, var(--bg));
-  border: 1px solid var(--hairline); border-radius: var(--radius-card);
-  transition: background .14s ease, border-color .14s ease;
+  padding: var(--card-pad-y) var(--card-pad-x); margin-bottom: var(--block-gap);
+  background: var(--panel);
+  transition: background .14s ease;
 }
-.card:hover { background: var(--bg-raised); border-color: var(--border-strong); }
+.card:hover, .card:active { background: var(--element); }
 .card-top { display: flex; align-items: baseline; gap: 8px; }
-.card-name { font-weight: 650; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card-cwd { color: var(--fg-faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.meta { display: flex; flex-wrap: wrap; gap: 3px 14px; margin-top: 4px; font-size: 11px; color: var(--fg-muted); }
-.meta .k { color: var(--fg-faint); }
+.card-name { font-weight: 650; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-cwd { color: var(--sl-path); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta { display: flex; flex-wrap: wrap; gap: 3px 14px; margin-top: 4px; font-size: 11px; color: var(--muted); }
+.meta .k { color: var(--dim); }
 /* The subagent chip, emphasised against its neighbours because on a session that is
    `idle` with agents still running it is the only thing on the card explaining why.
    `.meta .k.ag-run` rather than `.ag-run` alone: `.meta .k` is two selectors and
    would win on specificity, which silently rendered the chip the same faint grey as
    `pid`. */
-.meta .k.ag-run { color: var(--accent-text); }
+.meta .k.ag-run { color: var(--sl-agents); }
 /* Same two-selector reason as `.ag-run` above, and the same accent: an unsent draft
    is the reader's own business on a card that is otherwise all about the agent. */
-.meta .k.draft { color: var(--accent-text); }
-.empty { padding: 24px 12px; color: var(--fg-faint); text-align: center; }
+.meta .k.draft { color: var(--accent); }
+.empty { padding: 24px var(--card-pad-x); color: var(--dim); text-align: center; }
 
-/* status dot — mirrors the TUI's ● run-state marker */
-.dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); }
-.dot.run { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
-.dot.ask { background: var(--warn); animation: pulse 1s ease-in-out infinite; }
+/* status dot — the TUI's ● run-state marker (`status.enabled`), drawn as the
+   glyph itself rather than a CSS circle so nothing on the page is round. */
+.dot { flex: none; color: var(--dim); }
+.dot.run { color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.dot.ask { color: var(--warning); animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
 
-/* context gauge — the footer bar from the TUI status line */
-.gauge { flex: none; width: 54px; height: 4px; border-radius: 999px; background: var(--bg-inset); overflow: hidden; }
-.gauge i { display: block; height: 100%; min-width: 2px; background: var(--accent); }
+/* context usage — the status line's `◫ 22.1%/984K`, verbatim. It used to be a
+   rounded progress pill, which is the one shape the TUI never draws; the
+   terminal states the number and colours it by threshold, so this does too. */
+.ctx { color: var(--sl-context); }
+.ctx.warn { color: var(--warning); }
+.ctx.high { color: var(--context-purple); }
+.ctx.crit { color: var(--error); }
 
 /* markdown tables — box-drawn like the TUI (boxSharp glyphs), so they stay a
    grid instead of reflowing into a web table. Scrolls horizontally rather than
@@ -199,7 +234,7 @@ main { overflow-y: auto; overscroll-behavior: contain; }
 pre.tbl {
   margin: 8px 0; padding: 0; overflow-x: auto; overscroll-behavior-x: contain;
   background: none; border: 0; border-radius: 0;
-  font: inherit; line-height: 1.35; color: var(--fg-muted); white-space: pre;
+  font: inherit; line-height: 1.35; color: var(--muted); white-space: pre;
   -webkit-overflow-scrolling: touch;
 }
 /* The box-drawn grid only lines up if every glyph shares one advance width, and
@@ -208,103 +243,156 @@ pre.tbl {
    inline code. Inheriting the family and size is what keeps the table square. */
 pre.tbl b, pre.tbl code { font-family: inherit; font-size: inherit; letter-spacing: inherit; }
 pre.tbl b { color: var(--fg); font-weight: 650; }
-pre.tbl code { padding: 0; background: none; color: var(--link); }
+pre.tbl code { padding: 0; background: none; color: var(--code); }
 
-/* working line — the TUI's spinner + intent above the composer, with the live
-   thinking trace beneath it. Present only while the agent is actually running. */
+/* working line — the TUI's `Loader`: one canvas row, a braille spinner in the
+   accent, the in-flight tool call's own `i` intent, then the ⟦esc⟧ interrupt
+   hint. No fill and no frame — in the terminal this line sits on the canvas
+   between the transcript and the composer panel, which is why the old bordered,
+   accent-railed, raised box had to go.
+
+   The live thinking trace that used to hang underneath is gone with it: this
+   surface hides reasoning, exactly as `hideThinkingBlock` does in the TUI. */
+/* No horizontal padding: `.wrap` already supplies the viewport gutter, and the
+   TUI's Loader sits at that gutter — two columns to the left of card content,
+   which is what makes it read as a line about the session rather than a block in
+   the transcript. */
 .working {
-  display: flex; align-items: flex-start; gap: 8px;
-  padding: 8px 10px; margin: 8px 0 0;
-  border: 1px solid var(--border); border-left: 2px solid var(--accent);
-  border-radius: var(--radius-card); background: var(--bg-raised);
+  display: flex; align-items: flex-start; gap: 1ch;
+  margin: var(--block-gap) 0 0;
 }
 .working .spin { flex: none; color: var(--accent); width: 1ch; }
-.working .txt { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.working .what { color: var(--fg); overflow-wrap: anywhere; }
-.working .trace {
-  color: var(--fg-faint); font-size: 11px; overflow-wrap: anywhere;
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
-}
-.working .trace::before { content: "✺ "; color: var(--fg-faint); }
+.working .what { min-width: 0; color: var(--fg); font-weight: 650; overflow-wrap: anywhere; }
+/* `interruptHint()`: one leading space, then `⟦esc⟧` in the hint palette. */
+.working .esc { color: var(--dim); font-weight: 400; }
 
 /* card activity line — what each session is doing, in the list view */
-.card-act { display: flex; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--fg-muted); }
+.card-act { display: flex; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--muted); }
 .card-act .spin { flex: none; color: var(--accent); }
 .card-act .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── transcript: TUI cards ───────────────────────────────────────────────
-   Mirrors how the terminal draws a turn: assistant prose is bare, a tool call
-   is a rounded hairline box with an inline `Output` divider and a dim meta
-   footer, thinking is a dim block behind a ✺ marker, and todos are a tree with
-   ├ │ └ guides. Glyphs are the same ones omp's unicode symbol preset uses
+   Mirrors how the fullscreen terminal draws a turn: assistant prose is bare on
+   the canvas at the card's own content column, a user prompt is a filled bubble
+   with no prefix glyph, and a tool call is a borderless panel-filled card —
+   squared, full width inside the gutter, one blank filled row top and bottom,
+   one unpainted canvas row between blocks. Reasoning is not drawn at all.
+   Glyphs are omp's unicode symbol preset
    (packages/coding-agent/src/modes/theme/theme.ts → UNICODE_SYMBOLS). */
-.turn { margin: 10px 0; }
-.turn:first-child { margin-top: 0; }
+.turn { margin: 0 0 var(--block-gap); }
 
-/* user prompt — the TUI's ❯ badge line.
-   `pre-wrap` and `overflow-wrap` for the same reason `.think` and `.tool-body`
-   carry them: a prompt can be several lines. It could not be until the composer
-   became a textarea, so this rendered a pasted stack trace — the input the
-   textarea exists for — as one collapsed paragraph, and an unbroken 200-character
-   token as ~1600px of horizontal scroll inside the transcript. */
-.user-line { color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
-.user-line::before { content: "❯ "; color: var(--accent-text); }
+/* user prompt — the TUI's `userMessageBg` bubble: `paddingX 1`, `paddingY 1`, and
+   deliberately NO leading chevron. The `❯ ` this used to print was a portal
+   invention; the terminal separates a prompt from the prose around it with the
+   fill alone, and printing both said the same thing twice.
+   `pre-wrap` and `overflow-wrap` for the same reason `.tool-body` carries them: a
+   prompt can be several lines. It could not be until the composer became a
+   textarea, so this rendered a pasted stack trace — the input the textarea exists
+   for — as one collapsed paragraph, and an unbroken 200-character token as
+   ~1600px of horizontal scroll inside the transcript. */
+.user-line {
+  padding: var(--line-height) 1ch; background: var(--user-bg);
+  color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere;
+}
 
-/* assistant prose — no chrome, like the terminal */
-.md { color: var(--fg); }
+/* assistant prose — no chrome, at the same column as a card's content
+   (`isFullscreenViewport() ? 2 : 1` in `assistant-message.ts`). */
+.md { padding-left: var(--card-pad-x); color: var(--fg); }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
-.md h1, .md h2, .md h3 { margin: 12px 0 4px; font-size: 12px; font-weight: 650; color: var(--accent-text); }
-.md h1::before { content: "# "; color: var(--fg-faint); font-weight: 400; }
-.md h2::before { content: "## "; color: var(--fg-faint); font-weight: 400; }
-.md h3::before { content: "### "; color: var(--fg-faint); font-weight: 400; }
+.md h1, .md h2, .md h3 { margin: 12px 0 4px; font-size: 12px; font-weight: 650; color: var(--accent); }
+.md h1::before { content: "# "; color: var(--dim); font-weight: 400; }
+.md h2::before { content: "## "; color: var(--dim); font-weight: 400; }
+.md h3::before { content: "### "; color: var(--dim); font-weight: 400; }
 .md p { margin: 4px 0; }
 .md ul, .md ol { margin: 4px 0; padding-left: 0; list-style: none; }
 .md li { padding-left: 16px; position: relative; }
-.md ul > li::before { content: "•"; position: absolute; left: 4px; color: var(--accent-text); }
+/* `md.bullet` / `mdListBullet`. */
+.md ul > li::before { content: "•"; position: absolute; left: 4px; color: var(--accent); }
 .md ol { counter-reset: n; }
 .md ol > li { counter-increment: n; }
-.md ol > li::before { content: counter(n) "."; position: absolute; left: 0; color: var(--accent-text); }
+.md ol > li::before { content: counter(n) "."; position: absolute; left: 0; color: var(--accent); }
 .md b, .md strong { font-weight: 650; color: var(--fg); }
-.md em { font-style: italic; color: var(--fg-muted); }
+.md em { font-style: italic; color: var(--muted); }
 .md a { color: var(--link); }
-.md code { padding: 0 3px; color: var(--link); background: var(--bg-inset); border-radius: 3px; }
-.md hr { margin: 8px 0; border: 0; border-top: 1px solid var(--hairline); }
-.md blockquote { margin: 4px 0; padding-left: 9px; border-left: 2px solid var(--hairline); color: var(--fg-muted); }
+/* `mdCode`, unfilled and unrounded: the terminal colours inline code and draws
+   nothing behind it. */
+.md code { padding: 0; background: none; color: var(--code); }
+.md hr { margin: 8px 0; border: 0; border-top: 1px solid var(--border-muted); }
+.md blockquote { margin: 4px 0; padding-left: 1ch; border-left: 1px solid var(--border-muted); color: var(--muted); }
+/* A fenced block is `mdCodeBlock` text on the element rung — the raised surface a
+   code frame gets in the fullscreen viewport — with no rule and no radius. */
 .md pre {
-  margin: 6px 0; padding: 8px 10px; overflow-x: auto;
-  background: var(--bg-inset); border: 1px solid var(--hairline); border-radius: var(--radius-card);
+  margin: 6px 0; padding: 4px 1ch; overflow-x: auto;
+  background: var(--element); border: 0; border-radius: 0;
 }
-.md pre code { padding: 0; background: none; color: var(--fg); }
+.md pre code { padding: 0; background: none; color: var(--code-block); }
 
-/* tool call — the rounded box the TUI draws around every action */
+/* ── tool call ────────────────────────────────────────────────────────────
+   A `BlockCard`: `Box(CARD_PADDING_X = 2, CARD_PADDING_Y = 1)` painted with
+   `panelBg`, no border, no corners, and no per-state tint — a settled call that
+   succeeded and one that failed share one fill, and the state is carried by the
+   status glyph and the text colour, exactly as `tool-execution.ts` documents.
+
+   The whole card is the hit zone ("the fill is what the pointer sees, so the fill
+   is the target"), so it is a <button>: one tap toggles collapsed/expanded. The
+   press lifts it to `--element`, which is the same rung the terminal's hover uses
+   — a phone has no hover, so the press is where that feedback has to land. */
 .tool {
-  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
-  border-radius: var(--radius-card); overflow: hidden;
+  display: block; width: 100%; text-align: left;
+  padding: var(--card-pad-y) var(--card-pad-x);
+  background: var(--panel); color: var(--fg);
+  transition: background .14s ease;
 }
-.tool.err { border-color: color-mix(in srgb, var(--err) 45%, transparent); }
-.tool-head { padding: 6px 10px; color: var(--fg); overflow-wrap: anywhere; }
-.tool-head .sigil { color: var(--accent-text); }
-.tool-head .arg { color: var(--fg-muted); }
-/* the `├─ Output ───┤` divider, as a rule with an inline label */
-.tool-div {
-  display: flex; align-items: center; gap: 8px;
-  padding: 0 10px; color: var(--fg-faint); font-size: 11px;
-}
-.tool-div::after { content: ""; flex: 1; border-top: 1px solid var(--hairline); }
-.tool-body { padding: 4px 10px 6px; color: var(--fg-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
-.tool-body.clip { max-height: 168px; overflow: hidden; }
-.tool-more { padding: 0 10px; color: var(--fg-faint); font-size: 11px; }
-/* The last control under the 44px floor: it reveals the rest of a tool's output,
-   which on a phone is a thing people reach for mid-turn. */
-.tool-more button {
-  display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px;
-  color: var(--link); text-decoration: underline;
-}
+.tool:active { background: var(--element); }
+/* A card that hides nothing is inert in the TUI: no hover fill, no pointer
+   cursor, and a click does nothing rather than toggling invisibly. */
+.tool:not(.more) { cursor: default; }
+.tool:not(.more):active { background: var(--panel); }
+/* `renderStatusLine`: `<icon> <title>` with the title in `accent`, then
+   `: <description>` in `muted`.
 
-/* thinking — dim, behind the ✺ marker the TUI uses */
-.think { color: var(--fg-faint); white-space: pre-wrap; overflow-wrap: anywhere; }
-.think::before { content: "✺ "; color: var(--fg-muted); }
+   A COLLAPSED card is exactly one row, as it is in the terminal: `#summaryRow`
+   fits the identity to the card's width and lets `truncateToWidth` end it in `…`.
+   Wrapping instead turned a `cd … && ninja … && ctest …` command into a
+   three-row block, which is most of a phone screen spent on a call that has
+   already finished — the opposite of what collapsing is for. Expanding releases
+   the clamp, so the full command is one tap away. */
+.tool-head { display: flex; gap: 1ch; align-items: baseline; }
+.tool-id { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool[aria-expanded="true"] .tool-id { overflow-wrap: anywhere; white-space: normal; }
+.tool-head .sigil { color: var(--accent); }
+.tool-head .title { color: var(--accent); }
+.tool-head .arg { color: var(--muted); }
+/* The language icon `getLangIcon` puts in front of a write/edit path, and the
+   accent path itself. */
+.tool-head .lang { color: var(--muted); }
+.tool-head .path { color: var(--accent); }
+/* `formatChangeStatsSuffix`: ` ⟦+N/-M⟧`, brackets and the slash in `dim`, the
+   counts in the diff palette. */
+.tool-head .stat-add { color: var(--diff-add); }
+.tool-head .stat-del { color: var(--diff-del); }
+.tool-head .bracket { color: var(--dim); }
+/* `formatExpandHint` — `⟦click to expand⟧` in `interactiveHint` (the `dim` role),
+   flush right with at least one space before it, and never dropped: nothing else
+   on a collapsed card says that it opens.
+
+   `⟦collapse⟧` on an expanded card is this surface's one addition to that
+   vocabulary. The terminal can drop the hint once open because the hover fill
+   still marks the card as live; a touch screen has no hover, so without a label
+   an expanded card is a dead end. */
+.tool-hint { flex: none; color: var(--dim); }
+/* The output body, flush under the identity row at the same column — the
+   fullscreen viewport zeroes the block's own padding because the card supplies
+   the whole inset, and it draws no `├─ Output ─┤` divider, just a blank row.
+   `display: block` because these are spans: see `renderTranscript`. */
+.tool-body {
+  display: block; margin-top: var(--line-height);
+  color: var(--tool-output); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.tool.err .tool-body { color: var(--error); }
+/* `… N more lines`, the row the terminal leaves above a clipped tail. */
+.tool-more-lines { display: block; color: var(--dim); }
 
 /* ── tree panels: todos and subagents ────────────────────────────────────
    Both draw omp's ├/└ guides, and both are built from the same row primitive: a
@@ -324,27 +412,34 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
    line ends. Without it the indent silently loses columns — the todos tree rendered
    4 where 5 were written, and a subagent continuation collapsed to 2 columns, or to
    none at all on the last row. */
-.guide { color: var(--fg-faint); white-space: pre; }
+.guide { color: var(--dim); white-space: pre; }
 
-/* todos — strikethrough completions over the shared tree */
-.todos { margin: 10px 0; }
+/* todos — the TUI's anchored HUD (`#renderTodoList`): a bold accent `Todos` with
+   the active phase's `· n/total` in dim, then a `├─`/`└─` tree of phases labelled
+   with roman numerals, each with its own ` · done/total`. The active phase is bold
+   accent; the others are muted. Task rows carry `☐`/`☑` and the status palette. */
+.todos { margin: 0 0 var(--block-gap); padding-left: var(--card-pad-x); }
 /* Same min-height as the subagents header, which is a button: a 14px difference
-   between two adjacent panel headers reads as inconsistent spacing, not affordance. */
-.todos-h { display: flex; align-items: center; min-height: 32px; font-weight: 650; color: var(--accent-text); }
-.todos-h .count { color: var(--fg-faint); font-weight: 400; }
-.phase { color: var(--fg); font-weight: 650; overflow-wrap: anywhere; }
-.phase .count { color: var(--fg-faint); font-weight: 400; }
-.task { color: var(--fg-faint); overflow-wrap: anywhere; }
-.task.now { color: var(--fg); }
-.task.done { color: var(--ok); text-decoration: line-through; }
-.task.blocked { color: var(--warn-text); }
+   between two adjacent panel headers reads as inconsistent spacing, not affordance.
+   `gap` rather than trusting the count's own leading space: flex blockifies its
+   items, which trims leading whitespace, and the header rendered `Todos· 2/5`. */
+.todos-h { display: flex; align-items: center; gap: 6px; min-height: 32px; font-weight: 650; color: var(--accent); }
+.todos-h .count { color: var(--dim); font-weight: 400; }
+.phase { color: var(--muted); overflow-wrap: anywhere; }
+.phase.now { color: var(--accent); font-weight: 650; }
+.phase .count { color: var(--dim); font-weight: 400; }
+.task { color: var(--dim); overflow-wrap: anywhere; }
+.task.now { color: var(--accent); }
+.task.done { color: var(--success); text-decoration: line-through; }
+.task.blocked { color: var(--warning); }
+.task.dropped { color: var(--error); text-decoration: line-through; }
 
 /* subagents — the TUI's anchored "Subagents" HUD, over the shared tree row above.
    Same idiom as the todos panel directly above it (accent header with a dim count,
    ├/└ guides), because in the terminal these two blocks are deliberately the same
    shape and a phone that drew them differently would imply a difference that is not
    there. */
-.agents { margin: 10px 0; }
+.agents { margin: 0 0 var(--block-gap); padding-left: var(--card-pad-x); }
 /* A control, not a heading: the panel is up to ~470px tall at the row cap, sitting
    directly above the composer for as long as a fan-out runs. 32px rather than the
    44px floor `.btn` and the approval options use — a mis-tapped collapse costs one
@@ -352,13 +447,13 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
    reclaim. */
 .agents-h {
   display: flex; align-items: center; gap: 6px; width: 100%; min-height: 32px;
-  text-align: left; font-weight: 650; color: var(--accent-text);
+  text-align: left; font-weight: 650; color: var(--accent);
 }
-.agents-h .count { color: var(--fg-faint); font-weight: 400; }
+.agents-h .count { color: var(--dim); font-weight: 400; }
 /* Immediately after the count, not pushed to the far edge: a 7px triangle stranded
    200px away from the label does not read as a disclosure control. */
-.agents-h .caret { color: var(--fg-faint); font-weight: 400; }
-.agents-h .bad { color: var(--err); }
+.agents-h .caret { color: var(--dim); font-weight: 400; }
+.agents-h .bad { color: var(--error); }
 /* One cell, centred, plus its own trailing column: the status glyphs do not share an
    advance width (⟳ is 1.10ch, ✔ is 0.97ch), so an unpinned glyph left the id column
    ragged and shifted every continuation indent by a fraction. `margin-right` because
@@ -367,22 +462,20 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
    while the continuation guide indents 4ch. Pinning also survives a user theme that
    overrides the symbol preset. */
 .ag-st { flex: none; display: inline-block; width: 1ch; margin-right: 1ch; text-align: center; }
-/* `--accent-text`, not `--accent`: this is a 12px glyph on the page background, and
-   `--accent` measures 3.94:1 there in the light palette — under the 4.5:1 floor,
-   the exact trap the `--warn`/`--warn-text` split above exists to prevent. */
-.ag-run { color: var(--accent-text); }
-.ag-ok { color: var(--ok); }
-.ag-err { color: var(--err); }
+/* `statusLineSubagents`, the token the TUI's own subagent badge uses. */
+.ag-run { color: var(--sl-agents); }
+.ag-ok { color: var(--success); }
+.ag-err { color: var(--error); }
 /* Aborted is an interruption, not a failure, and sharing red with `failed` left
    that pair distinguished by a 12px glyph alone. */
-.ag-stop { color: var(--warn-text); }
-.ag-off { color: var(--fg-faint); }
+.ag-stop { color: var(--warning); }
+.ag-off { color: var(--dim); }
 /* Live work carries the emphasis; a FINISHED row recedes. Parked is deliberately not
    in that set: the session is disposed but revivable, often waiting on its parent, so
    dimming it to match a completed agent overstated how done it was. */
-.ag-id { color: var(--accent-text); font-weight: 650; overflow-wrap: anywhere; }
-.ag-done .ag-id { color: var(--fg-muted); font-weight: 400; }
-.ag-meta { color: var(--fg-faint); font-weight: 400; overflow-wrap: anywhere; }
+.ag-id { color: var(--accent); font-weight: 650; overflow-wrap: anywhere; }
+.ag-done .ag-id { color: var(--muted); font-weight: 400; }
+.ag-meta { color: var(--dim); font-weight: 400; overflow-wrap: anywhere; }
 /* The budget split between the two continuation lines follows which one changes. The
    assignment is static context you read once, so one ellipsized line; the live tool is
    why the panel exists and is the signal that an agent is stuck, so it gets the
@@ -390,14 +483,14 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
    `bash sleep 75; cd … && pnpm` at 48 characters while the label below it spent two
    full lines.) */
 .ag-task {
-  display: block; color: var(--fg-muted);
+  display: block; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ag-what {
-  color: var(--fg-faint); overflow-wrap: anywhere;
+  color: var(--dim); overflow-wrap: anywhere;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.ag-more { color: var(--fg-faint); }
+.ag-more { color: var(--dim); }
 /* Screen-reader-only text. The status is otherwise a glyph plus a colour, which
    announces as an unlabeled symbol or not at all — and this is the block that
    changes most often. */
@@ -406,175 +499,228 @@ pre.tbl code { padding: 0; background: none; color: var(--link); }
   overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
 
-/* ── ask / approval prompt ───────────────────────────────────────────── */
+/* ── ask / approval prompt ─────────────────────────────────────────────────
+   An approval is an overlay in the terminal, so it takes the overlay rung — the
+   one surface above a card — instead of a warning-coloured border. The fullscreen
+   viewport paints overlays with `overlayBg` and drops their rules entirely
+   (`overlay-box.ts` returns blank filled rows where it used to draw `╭──╮`). */
 #ask {
-  margin: 0 0 10px; padding: 10px 12px;
-  background: var(--bg-raised);
-  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
-  border-radius: var(--radius-card);
+  margin: 0 0 var(--block-gap); padding: var(--card-pad-y) var(--card-pad-x);
+  background: var(--overlay);
 }
-/* `--warn-text`, not `--warn`: this is the highest-stakes sentence in the app and
-   it is 12px text, where the dot/border colour does not carry enough contrast. */
-#ask .q { color: var(--warn-text); font-weight: 650; margin-bottom: 8px; }
+/* This is the highest-stakes sentence in the app, in the `warning` role the TUI
+   uses for a pending approval. */
+#ask .q { color: var(--warning); font-weight: 650; margin-bottom: 8px; }
 /* Same 44px floor as `.btn`: these authorise a tool call, and a mis-tap here —
    "yes, and don't ask again" is one row from "no" — is not recoverable the way a
-   mis-tapped stop is. */
+   mis-tapped stop is. A row in a TUI select list is a fill, not a box: at rest it
+   is the surface it sits on, and the hovered/selected row lifts one rung. */
 #ask .opt {
   display: flex; align-items: center; gap: 6px; min-height: 44px; width: 100%;
-  text-align: left; padding: 6px 10px; margin-top: 6px;
-  background: var(--bg); border: 1px solid var(--hairline); border-radius: var(--radius-ctl);
+  text-align: left; padding: 6px 1ch; margin-top: 2px;
+  background: var(--overlay);
 }
-#ask .opt:hover { background: var(--hover-wash); border-color: var(--border-strong); }
-/* No trailing space in the glyph: a flex item trims it, which collided the chevron
-   with the label. The gap above does that job instead. */
-#ask .opt::before { content: "›"; color: var(--accent-text); }
-.ask-err { margin-top: 8px; font-size: 11px; color: var(--err); }
+#ask .opt:hover, #ask .opt:active { background: var(--element); }
+/* `nav.cursor`, the glyph omp puts in front of a selectable row. No trailing space
+   in it: a flex item trims it, which collided the chevron with the label. The gap
+   above does that job instead. */
+#ask .opt::before { content: "❯"; color: var(--accent); }
+.ask-err { margin-top: 8px; font-size: 11px; color: var(--error); }
 
-/* ── new-session form ────────────────────────────────────────────────── */
+/* ── new-session form ─────────────────────────────────────────────────────
+   Also an overlay: it is a modal the phone opens over the session list. */
 #newform {
-  padding: 10px 12px; margin-bottom: 8px;
-  background: color-mix(in srgb, var(--bg-raised) 60%, var(--bg));
-  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
-  border-radius: var(--radius-card);
+  padding: var(--card-pad-y) var(--card-pad-x); margin-bottom: var(--block-gap);
+  background: var(--overlay);
 }
-.nf-title { font-weight: 650; color: var(--fg); margin-bottom: 8px; }
+.nf-title { font-weight: 650; color: var(--accent); margin-bottom: 8px; }
 .nf-field { display: grid; gap: 4px; margin-top: 8px; }
-/* `--fg-muted`, not `--fg-faint`: these are the form's only labels, and at 11px
-   faint measured 3.55:1 — structure the user needs, below the contrast floor. */
-.nf-field > span { color: var(--fg-muted); font-size: 11px; }
+/* `muted`, not `dim`: these are the form's only labels, and at 11px the dim role
+   measured 3.55:1 — structure the user needs, below the contrast floor. */
+.nf-field > span { color: var(--muted); font-size: 11px; }
 .nf-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+/* A field is the canvas rung inset in the overlay — the darkest surface on the
+   page, which is how a terminal input reads against the panel around it. */
 #newsuggest, #newdir {
   width: 100%; min-width: 0; min-height: 44px; padding: 8px;
-  background: var(--bg-inset); border: 1px solid var(--hairline);
-  border-radius: var(--radius-ctl); color: var(--fg);
+  background: var(--canvas); border: 0; border-radius: 0; color: var(--fg);
 }
 /* Room for the UA's own chevron, which a long clipped label otherwise runs under. */
 #newsuggest { appearance: auto; padding-right: 28px; }
-#newdir::placeholder { color: var(--fg-faint); }
+#newdir::placeholder { color: var(--dim); }
 /* The primary needs to be the wider of the two: `cancel` is the longer word and
    would otherwise be the physically larger button. */
 .nf-actions .btn-accent { min-width: 96px; }
 /* Its own line, and wrapping: sharing the button row truncated the one message
    that matters after committing ("started — the session appear…"). */
-.nf-status { margin-top: 8px; font-size: 11px; color: var(--fg-muted); }
-.nf-status.err { color: var(--err); }
+.nf-status { margin-top: 8px; font-size: 11px; color: var(--muted); }
+.nf-status.err { color: var(--error); }
 
-/* Interruption marker in the transcript's own idiom (same hairline rule as a
-   tool's `Output` divider). Without it an aborted turn left no trace at all: a
-   prompt with no answer read as the agent ignoring the user, and a resumed turn
-   ran straight on from the truncated one with no boundary. */
-.stopped {
-  display: flex; align-items: center; gap: 8px;
-  margin: 10px 0; color: var(--warn-text); font-size: 11px;
-}
-.stopped::after { content: ""; flex: 1; border-top: 1px solid var(--hairline); }
+/* Interruption marker, in the `aborted` glyph and warning colour the TUI stamps an
+   interrupted turn with. Without it an aborted turn left no trace at all: a prompt
+   with no answer read as the agent ignoring the user, and a resumed turn ran
+   straight on from the truncated one with no boundary. The trailing hairline rule
+   this used to draw is gone with every other rule on the page. */
+.stopped { margin: 0 0 var(--block-gap); padding-left: var(--card-pad-x); color: var(--warning); }
 /* A prompt another participant sent, named so it does not read as the phone's own. */
-.user-from { color: var(--fg-faint); }
+.user-from { color: var(--dim); }
 
-/* ── composer ────────────────────────────────────────────────────────── */
+/* ── composer ─────────────────────────────────────────────────────────────
+   In the fullscreen TUI the composer is a filled panel with no frame at all —
+   `custom-editor.ts`'s `COMPOSER_PANEL`: `fill: panelBg`, `paddingLeft: 2`,
+   `paddingRight: 2`, `paddingBottom: 1`, and `#borderVisible` forced false
+   because "a filled panel already marks its own boundary". Its rows, top to
+   bottom, are: one blank filled row, the text, one blank filled row, the status
+   line, then `paddingBottom`. Below the panel the viewport's own `padBottom: 1`
+   leaves one canvas row before the screen edge.
+
+   That whole stack is reproduced here: `footer` is the canvas (gutters plus the
+   trailing row), and `footer .wrap` is the panel. */
 footer {
-  padding: 8px 12px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
-  border-top: 1px solid var(--hairline); background: var(--bg);
+  background: var(--canvas);
+  padding: 0 var(--gutter);
+  padding-bottom: calc(var(--block-gap) + env(safe-area-inset-bottom, 0px));
 }
 /* An open keyboard covers the home indicator, so reserving its inset as well
    floats the composer a third of an inch above the keys for no reason. `.kb` is
    set from the visual viewport, the only place that knows. */
-body.kb footer { padding-bottom: 8px; }
-/* Same 880px column as `.wrap`, so the input lines up with the transcript.
-   `flex-end` rather than `center`: the field grows with its content, and send and
+body.kb footer { padding-bottom: var(--block-gap); }
+/* The panel. Same 880px column as the transcript's `.wrap`, and the vertical
+   padding IS the TUI's blank filled row above the text and its `paddingBottom`
+   under the status line. */
+footer .wrap {
+  max-width: 880px; margin: 0 auto;
+  padding: var(--line-height) var(--card-pad-x);
+  background: var(--panel);
+}
+/* `flex-end` rather than `center`: the field grows with its content, and send and
    stop belong beside its last line instead of floating at its middle. */
-footer .wrap { display: flex; gap: 8px; align-items: flex-end; padding: 0; }
+.input-row { display: flex; gap: 8px; align-items: flex-end; }
 /* Past `COMPACT_ROWS` rows the field takes the whole width and the buttons wrap
    under it. Sharing the row with them costs the field 160px — two 72px buttons and
    the two 8px gaps around them, none of which shrink, since `stop` and `send` hold
-   their slots whether or not a turn is running. (The sigil and its own gap are the
-   other 20px of the row, and are paid in both layouts, which is what the basis
-   below reserves.) That leaves the field 16 characters a line at 390px and 15 at
-   375px, so the five-row cap showed about 80 characters in total and an ordinary
-   two-sentence steer already scrolled. Full width doubles it to 33 at 390px.
+   their slots whether or not a turn is running. That leaves the field 18 characters
+   a line at 390px, so the five-row cap showed about 90 characters in total and an
+   ordinary two-sentence steer already scrolled. Full width nearly doubles it.
 
    It costs 52px of transcript at a given row count — the wrapped button line is a
    44px control plus the 8px gap — but the wide field needs fewer rows for the same
-   text, so what it actually costs is much less than that and varies with length:
-   11px at the first length that engages it, where the wide field needs one row
-   against three, and 31px across the band above that, where it needs two against
-   three. Further up the two converge to about 10px, and between 65 and 66
-   characters the wide layout is briefly the cheaper of the two.
+   text, so what it actually costs is much less than that and varies with length.
    `send` does not move: the composer is anchored to the bottom, so it grows upward
    and the buttons stay where the thumb left them. `syncComposer` owns the class and
    re-derives it from the text on every sync — see the reference-geometry note. */
-footer .wrap.grown { flex-wrap: wrap; }
-/* The 20px this reserves is the sigil's pinned width plus the row gap. Pinned
-   because the reserve is arithmetic: the glyph's natural advance is 9.6-9.9px
-   depending on which mono face the platform resolves, so there were about 2px of
-   slack, and past it the field no longer fits beside the sigil and drops to a flex
-   line of its own — a silently three-row composer. */
-footer .wrap.grown .field { flex: 1 1 calc(100% - 20px); }
-footer .wrap.grown #turn { margin-left: auto; }
-/* Pinned to the field's *first* line, sharing its size and line box so the glyph
-   reads as the prompt leading that line rather than a chevron in the margin: same
-   `--input-size`, same line height, and a padding-top equal to the field's border
-   plus its padding. At 12px against 16px text its baseline sat 1.2px high. */
-.prompt {
-  color: var(--accent-text); flex: none; align-self: flex-start; width: 12px;
-  font-size: var(--input-size); line-height: var(--input-line); padding-top: 11px;
-  cursor: text;
-}
+.input-row.grown { flex-wrap: wrap; }
+.input-row.grown .field { flex: 1 1 100%; }
+.input-row.grown #turn { margin-left: auto; }
 /* A textarea, not a single-line input: a steer is regularly a paragraph or a
    pasted stack trace, and a one-line field showed a ~30-character window onto it
    with no way to see or fix what had already been typed. It grows from one row to
    five and then scrolls, so the transcript keeps the screen in the common case.
 
-   The chrome lives on `.field` and only the text lives in the textarea, which is
-   not tidiness: with the padding on the textarea the content scrolled *under* it,
-   so at the cap a sixth line showed as a slice through its x-height flush against
-   the rounded border — reading as clipping rather than as more below. With the
-   padding outside the scrollport the cap is exactly five line boxes and the sixth
-   line is cleanly outside it. It also makes the height arithmetic honest: the
-   textarea has no padding or border, so its `scrollHeight` *is* the height to set.
+   No fill and no frame at rest: the TUI's composer text sits directly on the panel,
+   with no inner box and no prompt glyph in front of the caret (`#getPromptGutter`
+   returns nothing for the main editor). The `› ` sigil this used to draw was a
+   portal invention and is gone with the field's border.
+
+   Focus lifts the field one rung instead of drawing a ring. That is the TUI's own
+   way of marking the live surface (`elementBg`), and it is also what keeps a
+   visible focus indicator on a control that otherwise has no outline — a caret
+   alone does not satisfy WCAG 1.4.11.
 
    One row is the 44px the rest of the row's controls use: 21px line + 20px padding
-   + 2px border is 43, and `min-height` supplies the last pixel. */
+   is 41, and `min-height` supplies the rest. */
 .field {
-  flex: 1; min-width: 0; display: flex; min-height: 44px; padding: 10px 8px;
-  background: var(--bg-inset); border: 1px solid var(--hairline);
-  border-radius: var(--radius-ctl); cursor: text;
+  flex: 1; min-width: 0; display: flex; min-height: 44px; padding: 10px 1ch;
+  background: none; border: 0; border-radius: 0; cursor: text;
+  transition: background .14s ease;
 }
-/* The field's only focus cue used to be the shared `--ring`, which measures 2.57:1
-   against the light background — under WCAG 1.4.11's 3:1 for a focus indicator.
-   This is the treatment `loginPage()` already uses, and its accent border measures
-   5.87:1. Applying it to the container rather than the textarea is what keeps the
-   ring outside the text. */
-.field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-muted); }
+.field:focus-within { background: var(--element); }
 /* A steer the portal could not deliver: the text is put back in the field, the line
-   at the end of the transcript names the failure, and the border says which control
-   it belongs to. The halo goes with the border, because this is the *normal* look of
-   a failure rather than an edge case — tapping `send` on iOS does not blur the
-   textarea, so the field is still focused when the failure paints, and the accent
-   halo drew a pink wash around a red ring. */
-.field.err { border-color: var(--err); }
-.field.err:focus-within { border-color: var(--err); box-shadow: 0 0 0 3px var(--err-muted); }
+   at the end of the transcript names the failure, and the fill says which control it
+   belongs to. A tint rather than a rule, in the spirit of `toolErrorBg` — and it
+   has to survive focus, because tapping `send` on iOS does not blur the textarea,
+   so the field is still focused when the failure paints. */
+.field.err, .field.err:focus-within { background: color-mix(in srgb, var(--error) 18%, var(--panel)); }
 #msg {
   flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--fg);
   line-height: var(--input-line); max-height: calc(var(--input-line) * 5);
   resize: none; overflow-y: hidden; overflow-wrap: anywhere;
+  /* The TUI's `inputCursor` is an unstyled `▏`; the caret takes the text colour,
+     not the accent. */
+  caret-color: var(--fg);
 }
 /* The container carries focus for both of them. */
 #msg:focus-visible { outline: none; }
-#msg::placeholder { color: var(--fg-faint); }
+/* `hintStyle` is `dim` in `getEditorTheme`, which is what an omp editor hint is. */
+#msg::placeholder { color: var(--dim); }
 /* Stop and resume are two states of one control, so they share one fixed slot: the
    row's geometry cannot shift under a thumb that is already reaching for it. `send`
    shares that width because the pair reads as a pair, and because an 84px `stop`
    beside a 56px `send` made the secondary control the largest thing in the row —
    the inversion `.nf-actions .btn-accent` exists to prevent in the other form.
    72px holds `resume`, the longest label either takes, at its 70.5px natural width.
-   It is deliberately tight: this rule and `.prompt`'s `font-size` are the two things
-   that own the placeholder's width budget, and at 76px both placeholders wrapped and
-   clipped on a 375px screen. Change either one and re-measure the copy. */
+   It is deliberately tight: this rule owns the placeholder's width budget, and at
+   76px both placeholders wrapped and clipped on a 375px screen. Change it and
+   re-measure the copy. */
 #turn, #send { flex: none; min-width: 72px; }
 
+/* ── status line ──────────────────────────────────────────────────────────
+   The last row of the composer panel, exactly where the TUI puts it: in append
+   mode omp paints these segments into the editor's top border, and in the
+   fullscreen viewport they become a panel row under the input — "the strip
+   describes what SENDING will do, so it belongs under everything that is part of
+   composing" (`editor.ts`).
+
+   `margin-top` is the blank filled row the terminal leaves between the text and
+   the strip. The left group is flush with the text column and the right group is
+   flush right, with plain panel fill between them — in fullscreen the `─` rule
+   that fills that gap in append mode is dropped.
+
+   Symbols are omp's `unicode` preset throughout, never `nerd`: a phone browser
+   cannot be assumed to have a patched font, and a missing PUA glyph is a
+   tofu box in the most persistent row on the screen. The separator is
+   `sep.powerlineLeft`/`Right` (`▶`/`◀`) rather than the `powerline-thin` default's
+   `>`/`<`, which at 11px read as prose rather than as chrome. */
+.statusline {
+  display: flex; align-items: baseline; gap: 1ch;
+  margin-top: var(--line-height); font-size: 11px; color: var(--fg);
+  overflow: hidden; white-space: nowrap;
+}
+/* Overflow follows the TUI's own precedence, and it is resolved by DROPPING
+   segments in `renderStatusLine` rather than by shrinking them here.
+
+   BOTH groups are `flex: none`, and that is the whole measurement. Left as
+   `flex: 1 1 auto; min-width: 0` the left group's BOX shrank while its `flex: none`
+   children kept their width and drew straight over the right group — a row reading
+   `Qwen3.8 Max Pre9iagents ⓘ28.8%/984K` — and because the box fitted, the row's
+   `scrollWidth` equalled its `clientWidth` and the drop loop never ran. Sized to
+   content, the overflow is real, measurable, and resolved by removing a segment.
+
+   The terminal's elastic `path` segment becomes a static cap here for the same
+   reason: a flexible child inside a content-sized parent cannot shrink, and a phone
+   row has no columns to lend anyway. */
+.statusline .left { display: flex; align-items: baseline; gap: 1ch; flex: none; }
+.statusline .right { display: flex; align-items: baseline; gap: 1ch; margin-left: auto; flex: none; }
+.statusline .sep { color: var(--sl-sep); flex: none; }
+/* `icon.pi`, in the accent, and never dropped. */
+.statusline .pi { color: var(--accent); flex: none; }
+/* `theme.sep.dot` — literally " · ", spaces included, and an intra-segment joiner
+   rather than a separator between segments. */
+.statusline .sdot { color: var(--sl-model); }
+.statusline .model { color: var(--sl-model); flex: none; }
+/* Capped rather than dropped outright: a deep worktree path is the segment the
+   terminal preserves longest, so it keeps its tail (`…`) instead of vanishing while
+   there is still room for its first 22 columns. */
+.statusline .path { color: var(--sl-path); flex: none; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; }
+.statusline .agents { color: var(--sl-agents); flex: none; }
+/* `timeSpentSegment` applies no colour at all — it inherits the bar's text fg. */
+.statusline .time { color: var(--fg); flex: none; }
+/* The context glyph sits OUTSIDE the coloured span in `contextPctSegment`
+   (`withIcon(icon, fg(color, text))`), so only the numbers take the threshold
+   colour. `.ctx` above carries those four tiers. */
+.statusline .ctx-icon { color: var(--fg); flex: none; }
+
 @media (max-width: 640px) {
-  .wrap { padding: 8px 10px 14px; }
   .card-cwd { display: none; }
 }
 </style>
@@ -582,7 +728,8 @@ footer .wrap.grown #turn { margin-left: auto; }
 <body>
 <div id="app">
   <header>
-    <div class="brand"><b>omp</b><span class="sub" id="sub">sessions</span></div>
+    <!-- `icon.pi`, the glyph the TUI status line leads with, in the accent. -->
+    <div class="brand"><b>π</b><span class="sub" id="sub">sessions</span></div>
     <div style="display:flex;gap:6px">
       <button class="btn" id="back" hidden>← all</button>
       <button class="btn" id="new" aria-expanded="false" aria-controls="newform">+ new</button>
@@ -615,22 +762,25 @@ footer .wrap.grown #turn { margin-left: auto; }
   --><div id="sendfail" class="ask-err" role="status" hidden>could not send that steer — try again</div></div></div></main>
   <footer id="composer" hidden>
     <div class="wrap">
-      <!-- Decorative: the field carries its own name, and unhidden this glyph was
-           announced ahead of it. Tapping it focuses the field, so the 27px strip at
-           the screen's left edge is not dead to a thumb. -->
-      <span class="prompt" aria-hidden="true">›</span>
-      <!-- `aria-label` because the placeholder is the only other name this field has
-           and it both disappears on the first keystroke and changes between the
-           empty-session and ongoing-session states.
-           `enterkeyhint` is corrected at runtime: Enter is a newline on a soft
-           keyboard and send on a hardware one. -->
-      <div class="field"><textarea id="msg" rows="1" aria-label="steer this session" placeholder="steer the agent" enterkeyhint="enter" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></div>
-      <!-- No `hidden` attribute: this slot is hidden with `visibility` so the row's
-           geometry never depends on turn state, and `[hidden]`'s
-           `display:none !important` would win over that and blank the control in
-           every state. `renderTurnControl` owns its visibility from the first frame. -->
-      <button class="btn btn-stop" id="turn" style="visibility:hidden" title="stop the current turn — the session stays open">stop</button>
-      <button class="btn btn-accent" id="send">send</button>
+      <div class="input-row">
+        <!-- `aria-label` because the placeholder is the only other name this field has
+             and it both disappears on the first keystroke and changes between the
+             empty-session and ongoing-session states.
+             `enterkeyhint` is corrected at runtime: Enter is a newline on a soft
+             keyboard and send on a hardware one. -->
+        <div class="field"><textarea id="msg" rows="1" aria-label="steer this session" placeholder="steer the agent" enterkeyhint="enter" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea></div>
+        <!-- No `hidden` attribute: this slot is hidden with `visibility` so the row's
+             geometry never depends on turn state, and `[hidden]`'s
+             `display:none !important` would win over that and blank the control in
+             every state. `renderTurnControl` owns its visibility from the first frame. -->
+        <button class="btn btn-stop" id="turn" style="visibility:hidden" title="stop the current turn — the session stays open">stop</button>
+        <button class="btn btn-accent" id="send">send</button>
+      </div>
+      <!-- The status line, the composer panel's last row. `aria-hidden` because every
+           number in it is a glyph plus a fragment ("◫ 22.1%/984K"), which announces as
+           a run of unlabeled symbols; the header already names the session and its
+           state in words, and `renderHeader` keeps that authoritative. -->
+      <div class="statusline" id="statusline" aria-hidden="true"></div>
     </div>
   </footer>
 </div>
@@ -809,43 +959,299 @@ function md(src) {
   return out.join("");
 }
 
-/* One-line argument summary, the way the TUI titles a tool card. */
-const TOOL_ARG = { read: "path", write: "path", edit: "path", bash: "command", glob: "path", grep: "pattern", task: "task", todo: "op", web_search: "query" };
-function toolTitle(item) {
-  const key = TOOL_ARG[item.name];
-  const raw = key ? item.args?.[key] : undefined;
-  const arg = typeof raw === "string" ? raw : "";
-  const label = item.name === "bash" ? "$" : `• ${item.name}`;
-  return { label, arg: arg.length > 160 ? `${arg.slice(0, 160)}…` : arg };
+/* ── the tool card's identity row ─────────────────────────────────────────
+   `renderStatusLine` (src/tui/status-line.ts) composes every tool header in the
+   TUI as `<icon> <title>[: <description>][ ⟦badge⟧][ <meta>][suffix]`, with the
+   title in `accent` and the description in `muted`. The collapsed card in the
+   fullscreen viewport is that one row and nothing else.
+
+   Reproduced here rather than shipped over the wire because the frames a guest
+   receives carry the tool NAME and ARGUMENTS, not the host's rendered rows: omp
+   renders a header at the width of the terminal that drew it, and a phone is a
+   different width. The per-tool sigils are `theme.ts`'s `tool.*` keys in the
+   unicode preset. */
+const TOOL_SIGIL = {
+  bash: "❯", write: "✎", edit: "✎", apply_patch: "✎", task: "⇶", todo: "☑",
+  web_search: "⌕", browser: "🌐", eval: "▶", debug: "🐞", lsp: "💡", ask: "?",
+  ssh: "⇄", memory: "🧠", resolve: "✓", review: "◉", goal: "◎", hub: "✉",
+  ast_edit: "✎",
+};
+/* `read` has no sigil of its own in omp: the grouped read row is stamped with
+   `status.enabled` (`●`), the same glyph a successful read reports. */
+const READ_SIGIL = "●";
+/* Title-cased tool names, matching the `title` each renderer passes
+   (`resolveTitle: () => "Bash"`, `title: "Write"`, `getOperationTitle` → Edit).
+   Anything not listed keeps its wire name, which is what an extension tool's
+   generic card shows. */
+const TOOL_TITLE = {
+  bash: "Bash", write: "Write", edit: "Edit", apply_patch: "Patch", read: "Read",
+  glob: "Glob", grep: "Grep", task: "Task", todo: "Todo", web_search: "Search",
+  ast_edit: "AST Edit", hub: "Hub", eval: "Eval",
+};
+/* The argument each tool is identified by — the `description` half of its header.
+
+   A flat "one key per tool" table is not enough, because the tools whose cards
+   matter most do not all carry their identity in a plain string field:
+
+   - `edit` has FOUR parameter shapes, one per edit mode: `patch` and `replace`
+     carry `path` outright, while `hashline` and `apply_patch` carry only
+     `{ i, input }` and name their files in the patch's own `[PATH#TAG]` section
+     headers. Both are handled, because which mode a host runs is a setting: on a
+     hashline session every edit card read `✎ Edit` and nothing else, which is the
+     single most common card in a transcript, unidentifiable.
+   - `task` takes `{ agent }` for one spawn and `{ context, tasks[] }` for a batch;
+     `formatAgentHeaderLabel` uses the agent type, so a batch is summarised by its
+     spawn names instead.
+   - `ast_edit` takes `paths[]`.
+
+   Anything with a single obvious string field stays in the table. */
+const TOOL_ARG = { read: "path", write: "path", bash: "command", glob: "path", grep: "pattern", todo: "op", hub: "op", web_search: "query", eval: "title" };
+/* Section headers of a hashline / apply_patch payload, which is where those two
+   modes name the files they touch. */
+const HASHLINE_HEADER = /^\[([^\]\n]+?)#[0-9A-Fa-f]{4}\]$/gm;
+function editPathsOf(input) {
+  if (typeof input !== "string") return [];
+  const paths = [];
+  for (const match of input.matchAll(HASHLINE_HEADER)) {
+    if (!paths.includes(match[1])) paths.push(match[1]);
+  }
+  return paths;
+}
+function toolArgOf(item) {
+  const args = item.args ?? {};
+  if (item.name === "edit" || item.name === "apply_patch") {
+    // `patch`/`replace` modes: the path is right there.
+    if (typeof args.path === "string" && args.path) return args.path;
+    const paths = editPathsOf(args.input);
+    if (!paths.length) return "";
+    return paths.length === 1 ? paths[0] : `${paths[0]} +${paths.length - 1} more`;
+  }
+  if (item.name === "ast_edit") {
+    return Array.isArray(args.paths) ? args.paths.join(" ") : "";
+  }
+  if (item.name === "task") {
+    if (typeof args.agent === "string" && args.agent) return args.agent;
+    if (!Array.isArray(args.tasks)) return "";
+    const named = args.tasks.map(t => t?.name ?? t?.agent ?? "").filter(Boolean);
+    return named.length ? named.join(" · ") : `${args.tasks.length} agents`;
+  }
+  const raw = TOOL_ARG[item.name] ? args[TOOL_ARG[item.name]] : undefined;
+  return typeof raw === "string" ? raw : "";
+}
+/* `getLangIcon`, the glyph `formatEditDescription` and the write header put in
+   front of a path. Only the extensions that actually turn up in a transcript are
+   mapped; everything else takes `lang.default`, exactly as the theme's own
+   `langMap` lookup does. */
+const LANG_ICON = {
+  ts: "🟦", tsx: "🟦", mts: "🟦", cts: "🟦", js: "🟨", jsx: "🟨", mjs: "🟨", cjs: "🟨",
+  py: "🐍", rs: "🦀", go: "🐹", java: "☕", c: "Ⓒ", h: "Ⓒ", cpp: "➕", cc: "➕",
+  cxx: "➕", hpp: "➕", cs: "♯", rb: "💎", jl: "Ⓙ", php: "🐘", swift: "🕊", kt: "🅺",
+  sh: "💻", bash: "💻", zsh: "💻", fish: "💻", html: "🌐", css: "🎨", json: "🧾",
+  yaml: "📋", yml: "📋", md: "📝", sql: "🗄", lua: "🌙", txt: "🗒", env: "🔧",
+  toml: "🧾", xml: "⟨⟩", ini: "⚙", conf: "⚙", log: "📜", csv: "📑", tsv: "📑",
+  png: "🖼", jpg: "🖼", jpeg: "🖼", gif: "🖼", svg: "🖼", webp: "🖼", pdf: "📕",
+  zip: "🗜", tar: "🗜", gz: "🗜", tgz: "🗜",
+};
+const DEFAULT_LANG_ICON = "⌘";
+
+/* `shortenPath`: an absolute path under $HOME collapses to `~/…`. The home
+   directory is not on the wire, so this matches the shape omp emits rather than
+   the exact prefix — `/Users/<name>/` and `/home/<name>/` are the two layouts a
+   host can have, and neither can be a real project directory on its own. */
+const shortenPath = value =>
+  String(value).replace(/^(?:\/Users|\/home)\/[^/]+(?=\/|$)/, "~");
+
+/* ` ⟦+N/-M⟧` — `formatChangeStatsSuffix`. A side with no lines is omitted rather
+   than printed as `-0`, and an empty change set yields no badge at all. */
+function statsSuffix(added, removed) {
+  const parts = [];
+  if (added > 0) parts.push(`<span class="stat-add">+${added}</span>`);
+  if (removed > 0) parts.push(`<span class="stat-del">-${removed}</span>`);
+  if (!parts.length) return "";
+  const slash = `<span class="bracket">/</span>`;
+  return ` <span class="bracket">⟦</span>${parts.join(slash)}<span class="bracket">⟧</span>`;
 }
 
-const TODO_GLYPH = { pending: "☐", in_progress: "◐", completed: "☑", abandoned: "☒", blocked: "⚠" };
+/* The card's identity row as HTML: sigil, title, and the description the tool is
+   recognised by. Write and edit carry a language icon and a change badge the way
+   their TUI headers do; read carries the `:start-end` selector its path spec or
+   its `offset`/`limit` args imply, in the same accent as the path. */
+function toolIdentity(item) {
+  const args = item.args ?? {};
+  const name = item.name;
+  const title = TOOL_TITLE[name] ?? name;
+  const sigil = item.isError ? "✘" : name === "read" ? READ_SIGIL : (TOOL_SIGIL[name] ?? "•");
+  const sigilCls = item.isError ? "sigil ag-err" : "sigil";
+  const arg = toolArgOf(item);
+  const head = `<span class="${sigilCls}">${esc(sigil)}</span> <span class="title">${esc(title)}</span>`;
+  // Read is the one row with no colon: `read-tool-group.ts` builds it as
+  // `● Read <path>`, and the grouped rows are what a transcript mostly shows.
+  if (name === "read") {
+    if (!arg) return head;
+    // A `path:sel` spec already carries its range; `offset`/`limit` are the other
+    // way to ask for one, and the renderer prints them in the same `:a-b` form.
+    let path = shortenPath(arg);
+    if (!/:[\d,\-]+$/.test(path) && Number.isFinite(args.offset ?? args.limit)) {
+      const start = Number.isFinite(args.offset) ? args.offset : 1;
+      const end = Number.isFinite(args.limit) ? start + args.limit - 1 : "";
+      path += `:${start}${end === "" ? "" : `-${end}`}`;
+    }
+    return `${head} <span class="path">${esc(path)}</span>`;
+  }
+  if (!arg) return head;
+  if (name === "write" || name === "edit" || name === "ast_edit" || name === "apply_patch") {
+    // The lang icon keys off the FIRST path, which is the one the header names; a
+    // multi-file patch carries its own ` +N more` tail from `toolArgOf`.
+    const path = shortenPath(arg);
+    const ext = /\.([A-Za-z0-9]+)(?:\s|$)/.exec(path)?.[1]?.toLowerCase() ?? "";
+    const icon = LANG_ICON[ext] ?? DEFAULT_LANG_ICON;
+    // Write counts every line it wrote as an addition (`countLines(fileContent)`);
+    // edit takes the real counts off the result's diff, forwarded as `stats`.
+    const stats = item.stats
+      ? statsSuffix(item.stats.added ?? 0, item.stats.removed ?? 0)
+      : name === "write" && typeof args.content === "string"
+        ? statsSuffix(args.content.split("\n").length, 0)
+        : "";
+    return `${head}: <span class="lang">${esc(icon)}</span> <span class="path">${esc(path)}</span>${stats}`;
+  }
+  return `${head}: <span class="arg">${esc(arg)}</span>`;
+}
 
+/* `checkbox.checked` / `checkbox.unchecked`. Every non-completed status shares the
+   empty box in the TUI and differs by colour and by an appended `(blocked)` — the
+   glyph carries "done or not", the palette carries the rest. */
+const TODO_GLYPH = { completed: "☑" };
+const TODO_CLASS = {
+  completed: "done", in_progress: "now", blocked: "blocked", abandoned: "dropped",
+};
+
+/* `phaseRomanNumeral` (src/tools/todo.ts): a one-based ASCII roman numeral, which
+   is how every phase in the TUI's HUD is labelled. */
+const ROMAN_PAIRS = [[1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"], [90, "XC"], [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"]];
+function romanNumeral(oneBased) {
+  if (!(oneBased > 0)) return "";
+  let out = "";
+  let rem = oneBased;
+  for (const [value, sym] of ROMAN_PAIRS) {
+    while (rem >= value) { out += sym; rem -= value; }
+  }
+  return out;
+}
+
+/* The todos HUD, following `#renderTodoList`: a bold accent `Todos` with the
+   ACTIVE PHASE's position (not a task count — the TUI's header answers "which
+   stage", and the per-phase rows answer "how much of it"), then a `├─`/`└─` tree
+   of roman-numbered phases with the active one in accent and the rest muted.
+
+   Every phase and every task is listed. The terminal caps both because it is
+   spending rows of a fixed screen directly above the composer; this panel is in a
+   scroll area, and a plan the reader has to scroll to see in full is better than
+   one that silently hides the phase they were looking for. */
 function renderTodos(phases) {
-  if (!phases?.length) return "";
-  const all = phases.flatMap(p => p.tasks);
-  const done = all.filter(t => t.status === "completed").length;
-  const rows = phases.map((p, pi) => {
-    const last = pi === phases.length - 1;
+  const kept = (phases ?? []).filter(p => p.tasks?.length);
+  if (!kept.length) return "";
+  const multi = kept.length > 1;
+  // `#getActivePhase`: the first phase with work left, else the last one.
+  const open = kept.findIndex(p => p.tasks.some(t => t.status === "pending" || t.status === "in_progress"));
+  const activeIdx = open === -1 ? kept.length - 1 : open;
+  const rows = kept.map((p, pi) => {
+    const last = pi === kept.length - 1;
     const pdone = p.tasks.filter(t => t.status === "completed").length;
+    const label = multi ? `${romanNumeral(pi + 1)}. ${p.name}` : p.name;
     // `.tree-row`/`.tree-body` and the `aria-hidden` guide are shared with the
     // subagents panel below: without them a long task wrapped back to column 0 and an
     // unbreakable one scrolled the whole transcript sideways, and a screen reader read
     // the box-drawing characters aloud once per line.
     const head =
-      `<div class="tree-row"><span class="guide" aria-hidden="true">${last ? "└" : "├"} </span>` +
-      `<span class="tree-body phase">${esc(p.name)}<span class="count"> · ${pdone}/${p.tasks.length}</span></span></div>`;
+      `<div class="tree-row"><span class="guide" aria-hidden="true">${last ? "└─" : "├─"} </span>` +
+      `<span class="tree-body phase${pi === activeIdx ? " now" : ""}">${esc(label)}` +
+      `<span class="count"> · ${pdone}/${p.tasks.length}</span></span></div>`;
     const tasks = p.tasks.map((t, ti) => {
-      const cls = t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : t.status === "blocked" ? "blocked" : "";
-      const branch = ti === p.tasks.length - 1 ? "└" : "├";
+      const cls = TODO_CLASS[t.status] ?? "";
+      const glyph = TODO_GLYPH[t.status] ?? "☐";
+      const blocked = t.status === "blocked" ? " (blocked)" : "";
+      // `getTreeContinuePrefix`: three spaces under a `└─`, `│  ` under a `├─`.
+      const branch = ti === p.tasks.length - 1 ? "└─" : "├─";
       return (
-        `<div class="tree-row"><span class="guide" aria-hidden="true">${last ? "  " : "│ "} ${branch} </span>` +
-        `<span class="tree-body task ${cls}">${TODO_GLYPH[t.status] ?? "☐"} ${esc(t.content)}</span></div>`
+        `<div class="tree-row"><span class="guide" aria-hidden="true">${last ? "   " : "│  "}${branch} </span>` +
+        `<span class="tree-body task ${cls}">${glyph} ${esc(t.content)}${blocked}</span></div>`
       );
     }).join("");
     return head + tasks;
   }).join("");
-  return `<div class="todos"><div class="todos-h">Todos<span class="count"> · ${done}/${all.length}</span></div>${rows}</div>`;
+  const count = multi ? `<span class="count"> · ${activeIdx + 1}/${kept.length}</span>` : "";
+  return `<div class="todos"><div class="todos-h">Todos${count}</div>${rows}</div>`;
+}
+
+/* ── status-line formatters ───────────────────────────────────────────────
+   Shared by the composer's status row and the session list's cards, so a number
+   the phone shows twice cannot be formatted two ways. */
+
+/* `formatNumber` from @oh-my-pi/pi-utils: one decimal while the leading digit is
+   small and non-zero, rounded above that. `984000` → `984K`, `1500` → `1.5K`. */
+function formatNumber(n) {
+  if (!Number.isFinite(n) || n < 0) return "0";
+  const trim1 = v => {
+    const s = v.toFixed(1);
+    return s.endsWith(".0") ? s.slice(0, -2) : s;
+  };
+  if (n < 1e3) return String(Math.round(n));
+  if (n < 1e4) return `${trim1(n / 1e3)}K`;
+  if (n < 1e6) return `${Math.round(n / 1e3)}K`;
+  if (n < 1e7) return `${trim1(n / 1e6)}M`;
+  if (n < 1e9) return `${Math.round(n / 1e6)}M`;
+  return `${trim1(n / 1e9)}B`;
+}
+
+/* `formatContextUsage`: `<pct>%/<window>`, degrading to `<tokens>/?` when the host
+   could not name a context window — never `0.0%/0`. */
+function contextText(usage) {
+  if (!usage) return "";
+  const window = usage.contextWindow;
+  if (!Number.isFinite(window) || window <= 0) return `${formatNumber(usage.tokens ?? 0)}/?`;
+  const pct = Number.isFinite(usage.percent) ? `${usage.percent.toFixed(1)}%` : "?";
+  return `${pct}/${formatNumber(window)}`;
+}
+
+/* The four tiers from `context-thresholds.ts`. Each fires at whichever bound is
+   reached first — the flat percentage or the token budget expressed as a
+   percentage of this window — which is why a 22% reading on a 984K window is
+   already `warn`: 150K of it is 15.2%. */
+const CONTEXT_TIERS = [
+  { cls: "crit", pct: 90, tokens: 500_000 },
+  { cls: "high", pct: 70, tokens: 270_000 },
+  { cls: "warn", pct: 50, tokens: 150_000 },
+];
+function contextClass(usage) {
+  const pct = usage?.percent;
+  if (!Number.isFinite(pct) || pct <= 0) return "";
+  const window = usage.contextWindow;
+  for (const tier of CONTEXT_TIERS) {
+    const bound = Number.isFinite(window) && window > 0 ? Math.min(tier.pct, (tier.tokens / window) * 100) : tier.pct;
+    if (pct >= bound) return tier.cls;
+  }
+  return "";
+}
+
+/* `formatDuration`: `123ms`, `1.5s`, `44m58s`, `2h30m`, `3d2h` — no space anywhere,
+   and the smaller unit dropped when it is zero. */
+function durationText(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 3_600_000) {
+    const mins = Math.floor(ms / 60_000);
+    const secs = Math.floor((ms % 60_000) / 1000);
+    return secs > 0 ? `${mins}m${secs}s` : `${mins}m`;
+  }
+  if (ms < 86_400_000) {
+    const hours = Math.floor(ms / 3_600_000);
+    const mins = Math.floor((ms % 3_600_000) / 60_000);
+    return mins > 0 ? `${hours}h${mins}m` : `${hours}h`;
+  }
+  const days = Math.floor(ms / 86_400_000);
+  const hours = Math.floor((ms % 86_400_000) / 3_600_000);
+  return hours > 0 ? `${days}d${hours}h` : `${days}d`;
 }
 
 /* Status glyph and colour per subagent. Glyphs come from omp's own unicode preset
@@ -1012,36 +1418,111 @@ function renderSubagents(s) {
   return `<div class="agents">${header}<div id="aglist" role="list">${body}${more}</div></div>`;
 }
 
-/* Tool outputs the user expanded. The transcript is re-rendered wholesale on every
+/* Tool cards the user opened. The transcript is re-rendered wholesale on every
    frame, so an expansion that lived only as a removed class disappeared on the
    next token — unusable exactly while a turn is running, which is when someone
    wants to read what the agent is doing. Keyed by tool call id, not by index, so
    the set survives cards falling off the front of the cap. */
 let expandedTools = new Set();
 
+/* Output rows a collapsed card keeps. `PREVIEW_LIMITS.OUTPUT_SETTLED` is 1 in the
+   fullscreen viewport and the settled card drops even that, showing its identity
+   row alone — "a finished call is history: its header already carries the outcome,
+   and one click brings the rest back". This surface follows that: nothing but the
+   identity row until it is tapped. */
+const COLLAPSED_OUTPUT_ROWS = 0;
+/* Rows an EXPANDED card shows. The terminal caps its expanded view too
+   (`PREVIEW_LIMITS.OUTPUT_EXPANDED` is 10) because it is spending rows of a fixed
+   screen; a phone is scrolling, and a tap on a card is an explicit request to read
+   that call, so the cap here is generous rather than tight. It exists at all
+   because a tool result is unbounded — a build log or a full-file read can be tens
+   of thousands of lines, and pushing that through `innerHTML` on a phone is a
+   several-second freeze. The remainder is named with the terminal's own
+   `… N more lines` marker rather than silently dropped. */
+const EXPANDED_OUTPUT_ROWS = 200;
+
 function renderTranscript(items) {
-  return items.map((it, i) => {
-    if (it.kind === "user") {
-      // `from` is only set for a prompt another participant sent, so an unnamed
-      // card is unambiguously this phone's own.
-      const who = it.from ? `<span class="user-from">${esc(it.from)} </span>` : "";
-      return `<div class="turn"><div class="user-line">${who}${esc(it.text)}</div></div>`;
-    }
-    if (it.kind === "assistant") return `<div class="turn"><div class="md">${md(it.text)}</div></div>`;
-    if (it.kind === "thinking") return `<div class="turn"><div class="think">${esc(it.text)}</div></div>`;
-    // The seam where a turn was cut short. It comes from the projection, so it sits
-    // at the point the stop happened and stays there once the work resumes.
-    if (it.kind === "stopped") return `<div class="stopped">⨯ stopped here</div>`;
-    const { label, arg } = toolTitle(it);
-    const body = it.output ?? "";
-    const clip = body.split("\n").length > 9 && !expandedTools.has(it.id);
-    return `<div class="turn"><div class="tool ${it.isError ? "err" : ""}">
-      <div class="tool-head"><span class="sigil">${esc(label)}</span> <span class="arg">${esc(arg)}</span></div>
-      ${body ? `<div class="tool-div">${it.isError ? "Error" : "Output"}</div>
-      <div class="tool-body ${clip ? "clip" : ""}" data-body="${i}">${esc(body)}</div>
-      ${body.split("\n").length > 9 ? `<div class="tool-more"><button data-expand="${esc(it.id)}">${clip ? "… expand" : "collapse"}</button></div>` : ""}` : ""}
-    </div></div>`;
-  }).join("");
+  return items
+    .map(it => {
+      if (it.kind === "user") {
+        // `from` is only set for a prompt another participant sent, so an unnamed
+        // card is unambiguously this phone's own.
+        const who = it.from ? `<span class="user-from">${esc(it.from)} </span>` : "";
+        return `<div class="turn"><div class="user-line">${who}${esc(it.text)}</div></div>`;
+      }
+      if (it.kind === "assistant") return `<div class="turn"><div class="md">${md(it.text)}</div></div>`;
+      /* Reasoning is not rendered at all — the same thing `hideThinkingBlock` does
+         in the TUI, chosen unconditionally here because a phone screen is the one
+         place where a paragraph of reasoning per turn buries the work. The items
+         are still projected and still cross the wire: this is a rendering
+         decision, and dropping them upstream would also drop them for the
+         snapshot fetches and the tests that pin the projection. */
+      if (it.kind === "thinking") return "";
+      // The seam where a turn was cut short. It comes from the projection, so it sits
+      // at the point the stop happened and stays there once the work resumes.
+      // `status.aborted`'s own glyph, in the warning role.
+      if (it.kind === "stopped") return `<div class="stopped">⏹ stopped here</div>`;
+      const body = it.output ?? "";
+      const rows = body ? body.split("\n") : [];
+      const open = expandedTools.has(it.id);
+      // A card with nothing behind it is inert: no press feedback, no hint, and
+      // `.tool:not(.more)` drops the pointer cursor, matching a TUI block that
+      // "publishes a zone only to be copyable".
+      const more = rows.length > COLLAPSED_OUTPUT_ROWS;
+      /* `formatExpandHint` — never dropped while collapsed, because nothing else on
+         the card says that it opens. `⟦collapse⟧` when open is this surface's
+         addition: the terminal can drop the hint because its hover fill still marks
+         the card as live, and a touch screen has no hover. */
+      const hint = more
+        ? `<span class="tool-hint">${open ? "⟦collapse⟧" : "⟦click to expand⟧"}</span>`
+        : "";
+      const shown = open ? rows.slice(0, EXPANDED_OUTPUT_ROWS) : rows.slice(0, COLLAPSED_OUTPUT_ROWS);
+      const hidden = rows.length - shown.length;
+      // Spans, not divs, and blocked out in CSS: `<button>` takes phrasing content
+      // only, and a div inside one costs text selection in Chrome — which on a card
+      // whose whole point is a path and a command is the thing a reader wants most.
+      const output = shown.length ? `<span class="tool-body">${esc(shown.join("\n"))}</span>` : "";
+      // `… N more lines`, the row the terminal leaves where it clipped a tail. Only
+      // an EXPANDED card can show it: a collapsed one draws no body at all, and a
+      // count of lines beside `⟦click to expand⟧` would state the same fact twice.
+      const rest = open && hidden > 0
+        ? `<span class="tool-more-lines">… ${hidden} more line${hidden === 1 ? "" : "s"}</span>`
+        : "";
+      // An inert card keeps its button element (so focus order and copy behave the
+      // same on every card) but carries no `data-toggle`, so the delegated handler
+      // ignores it — the TUI's `onZoneClick` returns false for exactly this case.
+      return (
+        `<div class="turn"><button type="button" class="tool${it.isError ? " err" : ""}${more ? " more" : ""}"` +
+        `${more ? ` data-toggle="${esc(it.id)}" aria-expanded="${open}"` : ""}>` +
+        `<span class="tool-head"><span class="tool-id">${toolIdentity(it)}</span>${hint}</span>` +
+        `${output}${rest}</button></div>`
+      );
+    })
+    .join("");
+}
+
+/* The transcript as last received, so a tap that changes nothing but the expanded
+   set can repaint from it. Keeping the array is what lets the toggle be one
+   DELEGATED listener installed once (see below) instead of a handler per card
+   rebound on every frame: a fan-out repaints several times a second, and rebinding
+   there dropped the identity of whichever card the last render happened to close
+   over. */
+let lastTranscript = [];
+
+/* Paint `lastTranscript`. `keepBottom` is the answer to "was the reader at the
+   latest line before this changed" — a phone reads this from the bottom, and a
+   repaint must not move someone who had scrolled up to read something. */
+function paintTranscript(keepBottom) {
+  const html = renderTranscript(lastTranscript);
+  // Emptiness is decided on the RENDERED transcript, not on the item count: a tail
+  // made only of thinking items renders to nothing, and testing the array left the
+  // log blank with no explanation of why.
+  if (!html) renderEmptyLog();
+  else {
+    $("log").innerHTML = html;
+    $("msg").placeholder = PLACEHOLDER_STEER;
+  }
+  if (keepBottom) main.scrollTop = main.scrollHeight;
 }
 
 let current = null, es = null;
@@ -1067,19 +1548,119 @@ function ensureSpinner() {
   if (!spinTimer && document.querySelector(".spin")) spinTimer = setInterval(tickSpinners, 80);
 }
 
-/* The TUI's working line: spinner + the current tool-call intent, with the live
-   thinking trace under it. omp falls back to "Working…" before any intent
-   arrives, so the phone shows motion from the first token rather than a blank. */
+/* The TUI's working line: `<spinner> <intent> ⟦esc⟧`, one canvas row above the
+   composer. omp falls back to `Working…` before any intent arrives, so the phone
+   shows motion from the first token rather than a blank, and the trailing bracketed
+   `esc` is `interruptHint()` — a real affordance here, since the composer's `stop`
+   is what it names.
+
+   The streamed thinking trace this used to show underneath is deliberately gone:
+   this surface hides reasoning everywhere, and a live trace under the intent was
+   the loudest instance of it. `activity.thinking` still arrives and is still part
+   of the projection; nothing renders it. */
 function renderWorking(activity) {
   const box = $("working");
   if (!activity?.working) { box.hidden = true; box.innerHTML = ""; return; }
   box.hidden = false;
   box.innerHTML =
-    `<span class="spin">${SPINNER[0]}</span><div class="txt">` +
-    `<span class="what">${esc(activity.intent || "Working…")}</span>` +
-    (activity.thinking ? `<span class="trace">${esc(activity.thinking)}</span>` : "") +
-    `</div>`;
+    `<span class="spin">${SPINNER[0]}</span>` +
+    `<span class="what">${esc(activity.intent || "Working…")}<span class="esc"> ⟦esc⟧</span></span>`;
   ensureSpinner();
+}
+
+/* ── the composer's status line ───────────────────────────────────────────
+   The TUI's own segments, in the TUI's own order, with `▶`/`◀` between them and
+   `sep.dot` (" · ") inside the model segment. Left: `π ▶ ⬢ <model> · <thinking> ▶
+   <folder> <cwd>`. Right: `◀ 👥 N agents ◫ <pct>%/<window> ⏱ <age>`.
+
+   Three knowing departures from `segments.ts`, each because the wire or the screen
+   is narrower than the terminal's own:
+
+   - `time_spent` measures the union of the host's `agent_start`→`agent_end`
+     windows. That number is not published, so this shows the session's age from
+     its collab record — the same glyph over a different quantity, which is the one
+     thing in this row that is not the terminal's own number.
+   - `session_name` is omitted. It is the tail of the right group, which is the
+     first thing the terminal pops when the bar does not fit, and this bar never
+     fits a session title on a 390px screen. The header states it instead, in full.
+   - `git`, `pr`, `mode` and `cost` have no wire fields at all and are simply
+     absent, exactly as the TUI omits a segment whose `visible` is false.
+
+   Overflow is resolved by DROPPING segments, not by squeezing them: with every
+   segment shrinkable, a narrow screen produced a row of four ellipses that named
+   nothing (`Qwen3.8 Max Pr… ~/t… Align hyperplane-cpp w…`). The terminal pops right
+   segments from the tail, then shrinks `path`, then drops left segments while
+   preserving `path` — so this measures the painted row and removes the least
+   valuable remaining segment until it fits, leaving `path` elastic as the one
+   segment allowed to end in `…`. */
+const THINKING_LABEL = {
+  minimal: "○ min", low: "◔ low", medium: "◑ med",
+  high: "◒ high", xhigh: "◕ xhigh", max: "◉ max",
+};
+/* `SCRATCH_ROOTS`: a cwd under a temp root gets `icon.scratchFolder` rather than
+   `icon.folder`. Matched on the shortened path, which is the form this page holds. */
+const isScratchPath = value => /^(?:~\/tmp|\/tmp|\/var\/tmp|\/private\/tmp|\/private\/var\/tmp)(?:\/|$)/.test(value);
+
+/* Drop order, cheapest first, and it is the terminal's: left segments are dropped
+   from the tail with `path` preserved longest, so the cwd is the LAST thing to go
+   here too — it never appears in this list. `π` is not droppable either; it is one
+   column and it is what marks this row as omp's status line rather than a caption.
+   The thinking tail leads because it is seven columns of nicety inside a segment
+   whose name is the part that matters. */
+const STATUS_DROP_ORDER = ["time", "agents", "thinking", "context", "model"];
+
+function renderStatusLine() {
+  const bar = $("statusline");
+  if (current === null) { bar.innerHTML = ""; return; }
+  const level = THINKING_LABEL[openThinking];
+  const cwd = openCwd ? shortenPath(openCwd) : "";
+  const ctx = contextText(openContext);
+  const age = openStartedAt ? durationText(Date.now() - Date.parse(openStartedAt)) : "";
+  // `dropped` is a set of segment keys this pass has given up on. Rebuilt from
+  // scratch on every render so a rotated phone or a closed keyboard gets its
+  // segments back rather than staying permanently trimmed to the narrowest width
+  // the row was ever measured at.
+  const dropped = new Set();
+  const paint = () => {
+    const left = [`<span class="pi">π</span>`];
+    if (openModel && !dropped.has("model")) {
+      left.push(
+        `<span class="model">⬢ ${esc(openModel)}` +
+          (level && !dropped.has("thinking") ? `<span class="sdot"> · ${esc(level)}</span>` : "") +
+          `</span>`,
+      );
+    }
+    if (cwd && !dropped.has("path")) {
+      left.push(`<span class="path">${isScratchPath(cwd) ? "🗑" : "📁"} ${esc(cwd)}</span>`);
+    }
+    const right = [];
+    if (openAgents > 0 && !dropped.has("agents")) {
+      right.push(`<span class="agents">👥 ${openAgents} agent${openAgents === 1 ? "" : "s"}</span>`);
+    }
+    if (ctx && !dropped.has("context")) {
+      right.push(`<span class="ctx-icon">◫ <span class="ctx ${contextClass(openContext)}">${esc(ctx)}</span></span>`);
+    }
+    if (age && !dropped.has("time")) right.push(`<span class="time">⏱ ${esc(age)}</span>`);
+    bar.innerHTML =
+      `<span class="left">${left.join(`<span class="sep" aria-hidden="true">▶</span>`)}</span>` +
+      (right.length
+        ? `<span class="right"><span class="sep" aria-hidden="true">◀</span>${right.join(" ")}</span>`
+        : "");
+  };
+  paint();
+  // `scrollWidth` exceeds `clientWidth` only because every segment but `path` is
+  // `flex: none` — with all of them shrinkable the row always "fits" and this loop
+  // would never run. One column of slack absorbs sub-pixel layout widths.
+  // A zero width is "not laid out yet", not "nothing fits": the composer is hidden
+  // while the list is on screen, and dropping against that measurement stripped the
+  // row to a bare `π` on the frame that opened a session. The next render re-derives
+  // `dropped` from scratch, so skipping here costs nothing.
+  if (bar.clientWidth === 0) return;
+  for (const key of STATUS_DROP_ORDER) {
+    if (bar.scrollWidth <= bar.clientWidth + 1) break;
+    dropped.add(key);
+    paint();
+  }
 }
 
 /* Sessions as of the last refresh, so a start can tell an arriving session from
@@ -1131,7 +1712,6 @@ async function refresh() {
   sessions.sort((a, b) => rank(a) - rank(b) || String(b.startedAt ?? "").localeCompare(String(a.startedAt ?? "")));
   $("list").innerHTML = sessions.length
     ? sessions.map(s => {
-        const pct = s.context ? s.context.percent : 0;
         // A live fan-out gets the pulsing dot too: the dot is the most prominent mark on
         // the card, and leaving it neutral said nothing was happening on a session with
         // agents still running, contradicting both the word and the chip beside it.
@@ -1149,9 +1729,10 @@ async function refresh() {
            string. `bun run check` does not parse this file's inline script, so the only
            thing that catches it is loading the page. */
         const work = s.needsAttention ? "needs answer" : s.streaming ? "working" : s.subagents ? "waiting" : "idle";
+        const ctx = contextText(s.context);
         return `<button class="card" data-pid="${s.pid}">
           <div class="card-top">
-            <span class="dot ${state}"></span>
+            <span class="dot ${state}" aria-hidden="true">●</span>
             <span class="card-name">${esc(s.name)}</span>
             <span class="card-cwd">${esc(s.cwd)}</span>
           </div>
@@ -1164,15 +1745,15 @@ async function refresh() {
                  which also made it invisible: three sessions and ten minutes later
                  nothing said that one of them still holds a sentence you meant to
                  send. Beside the queued chip because both are something waiting to
-                 reach that session, and carrying the composer's own sigil so the
-                 mark and the control it points at share a glyph.
+                 reach that session.
                  No backticks in this block: it is inside a template literal. -->
-            ${drafts.has(s.pid) ? `<span class="k draft">› draft</span>` : ""}
+            ${drafts.has(s.pid) ? `<span class="k draft">draft</span>` : ""}
             ${s.subagents ? `<span class="k ag-run">⟳ ${s.subagents} agent${s.subagents === 1 ? "" : "s"}</span>` : ""}
-            <span class="k" style="display:flex;align-items:center;gap:5px">
-              <span class="gauge"><i style="width:${Math.min(100, pct).toFixed(0)}%"></i></span>${pct.toFixed(1)}%
-            </span>
-            ${ageOf(s.startedAt) ? `<span class="k">${esc(ageOf(s.startedAt))} ago</span>` : ""}
+            <!-- The status line's own context segment, with the glyph outside the
+                 coloured span exactly as contextPctSegment builds it. No backticks
+                 in this block either: it is inside a template literal. -->
+            ${ctx ? `<span class="k">◫ <span class="ctx ${contextClass(s.context)}">${esc(ctx)}</span></span>` : ""}
+            ${ageOf(s.startedAt) ? `<span class="k">⏱ ${esc(ageOf(s.startedAt))}</span>` : ""}
             <span class="k">pid ${s.pid}</span>
           </div>
           ${
@@ -1212,16 +1793,33 @@ async function refresh() {
 /* Turn state for the open session, mirrored from the SSE frames so the header
    word, the turn control and the transcript marker all read the same truth. */
 let streaming = false, interrupted = false, openCwd = "";
+/* The rest of what the composer's status line states, from the same frames. Held
+   as flat variables rather than one object because each arrives on a different
+   frame — `state` carries the model, the thinking level, the cwd and the context;
+   `subagents` carries the running count — and a partial object would have to be
+   merged on every one of them.
+
+   `openStartedAt` and `openName` come from the session list instead: neither is on
+   the collab state frame, and `open()` reads them out of the last refresh so a card
+   tapped from the list carries them straight into the detail view. */
+let openModel = "", openThinking = "", openContext = null, openAgents = 0;
+let openStartedAt = "", openName = "";
 
 /* Header state word. Written from every path that changes the mirrors, not just
    the `state` frame: the activity frame is what sets `interrupted`, and it
    arrives after `state` on connect, so a header computed only there read "idle"
-   on a session the marker and the turn control both showed as stopped. */
+   on a session the marker and the turn control both showed as stopped.
+
+   The label is the session's own name when it has one, and its directory
+   otherwise — the status line at the other end of the screen already carries the
+   `~`-shortened path in its own segment, so repeating it here spent the only wide
+   line in the header on a fact stated twice. */
 function renderHeader() {
   if (current === null) return;
-  const label = innerWidth <= 640 ? (openCwd || "").split("/").pop() || String(current) : openCwd || String(current);
+  const dir = shortenPath(openCwd || "");
+  const fallback = innerWidth <= 640 ? dir.split("/").pop() || String(current) : dir || String(current);
   const state = streaming ? "working" : interrupted ? "stopped" : "idle";
-  $("sub").textContent = `${label} · ${state}`;
+  $("sub").textContent = `${openName || fallback} · ${state}`;
 }
 
 /* The seam now lives in the transcript itself (a `stopped` item derived from the
@@ -1361,6 +1959,15 @@ function open(pid) {
   // composer opened red, and announced itself invalid, in a session that never saw it.
   markSendFailed(false);
   streaming = false; interrupted = false; openCwd = "";
+  // The list is the only source for these two, so read them before the SSE opens:
+  // a card tapped from the list has them immediately, and a cold deep link fills
+  // them in on the next refresh once the detail view closes. `startedAt` also
+  // drives the status line's timer, which ticks on the shared spinner interval.
+  openModel = ""; openThinking = ""; openContext = null; openAgents = 0;
+  const listed = lastSessions.find(s => s.pid === pid);
+  openStartedAt = listed?.startedAt ?? "";
+  openName = listed?.name ?? "";
+  renderStatusLine();
   syncComposer();
   renderWorking(null);
   es = new EventSource(`/api/sessions/${pid}/events`);
@@ -1368,40 +1975,23 @@ function open(pid) {
     const s = JSON.parse(e.data);
     openCwd = s.cwd ?? "";
     streaming = Boolean(s.isStreaming);
+    // `model.name` before `model.id`, the precedence `modelSegment` uses, and the
+    // same `Claude ` strip: the vendor prefix is on every one of that family's
+    // names and spends nine columns saying nothing.
+    openModel = (s.model?.name || s.model?.id || "").replace(/^Claude /, "");
+    openThinking = s.thinkingLevel ?? "";
+    openContext = s.contextUsage ?? null;
+    if (s.sessionName) openName = s.sessionName;
     renderHeader();
+    renderStatusLine();
     renderTurnControl(streaming, interrupted && !streaming);
     // A `stopped` seam is content, not emptiness: it renders outside `.turn`, and
     // a tail consisting only of seams would otherwise be blanked by the guide.
     if (!$("log").querySelector(".turn, .stopped")) renderEmptyLog();
   });
   es.addEventListener("transcript", e => {
-    const atBottom = isAtBottom();
-    const items = JSON.parse(e.data);
-    if (items.length === 0) renderEmptyLog();
-    else {
-      $("log").innerHTML = renderTranscript(items);
-      $("msg").placeholder = PLACEHOLDER_STEER;
-    }
-    for (const b of $("log").querySelectorAll("[data-expand]")) {
-      b.onclick = () => {
-        // A toggle, not a one-way door: expanding inserts thousands of pixels of
-        // raw output mid-transcript, and on a phone an accidental tap otherwise
-        // costs a lot of scrolling with no undo. The set is what the next render
-        // reads, so the state survives the frame that follows.
-        const id = b.dataset.expand;
-        const body = b.closest(".tool")?.querySelector(".tool-body");
-        if (expandedTools.has(id)) {
-          expandedTools.delete(id);
-          body?.classList.add("clip");
-          b.textContent = "… expand";
-        } else {
-          expandedTools.add(id);
-          body?.classList.remove("clip");
-          b.textContent = "collapse";
-        }
-      };
-    }
-    if (atBottom) main.scrollTop = main.scrollHeight;
+    lastTranscript = JSON.parse(e.data);
+    paintTranscript(isAtBottom());
   });
   es.addEventListener("todos", e => {
     const atBottom = isAtBottom(60);
@@ -1456,6 +2046,10 @@ function open(pid) {
     // Same at-bottom guard as the todos panel: this block grows and shrinks under
     // the transcript, and a phone parked at the bottom must stay there.
     lastSubagents = JSON.parse(e.data);
+    // The status line's badge is the TUI's `#subagentBadgeText`, and it counts the
+    // same thing the panel header's `N/M running` does, so it reads the same frame.
+    openAgents = lastSubagents?.running ?? 0;
+    renderStatusLine();
     paintSubagents();
   });
   es.addEventListener("activity", e => {
@@ -1546,10 +2140,35 @@ function closeSession() {
   renderTurnControl(false, false);
   $("new").hidden = false;
   $("ask").hidden = true; $("todos").innerHTML = ""; $("subagents").innerHTML = ""; $("sub").textContent = "sessions";
+  $("statusline").innerHTML = "";
   streaming = false; interrupted = false; openCwd = "";
+  openModel = ""; openThinking = ""; openContext = null; openAgents = 0;
+  openStartedAt = ""; openName = "";
+  // The array outlives the view otherwise, and the next session's first tap would
+  // repaint the previous session's transcript before its own frame arrived.
+  lastTranscript = []; expandedTools = new Set();
   renderWorking(null);
   refresh();
 }
+/* One delegated listener for every tool card, ever. The transcript is replaced
+   wholesale on each frame, so per-card handlers would have to be rebound on every
+   repaint; this survives all of them because it is bound to the container. A press
+   that turns into a drag still selects text — the click only fires when the pointer
+   is released on the same element — which is the same property the TUI's own hit
+   zones have. */
+$("log").addEventListener("click", event => {
+  const card = event.target.closest?.("[data-toggle]");
+  if (!card) return;
+  const id = card.dataset.toggle;
+  // A toggle, not a one-way door: expanding inserts thousands of pixels of raw
+  // output mid-transcript, and on a phone an accidental tap otherwise costs a lot
+  // of scrolling with no undo.
+  if (expandedTools.has(id)) expandedTools.delete(id);
+  else expandedTools.add(id);
+  // Never force the scroll: opening a card is a request to read THAT card, and
+  // jumping to the newest line is the opposite of it.
+  paintTranscript(false);
+});
 $("back").onclick = () => {
   // A marked entry was pushed by open() and has the list directly under it, so
   // unwinding is safe even after Forward or reload. An unmarked hash arrived
@@ -1652,7 +2271,7 @@ function syncComposer() {
   measureComposer(msg);
   $("send").disabled = msg.value.trim().length === 0;
   const atBottom = isAtBottom();
-  const wrap = $("composer").querySelector(".wrap");
+  const wrap = $("composer").querySelector(".input-row");
   if (msg.value === "") {
     // An empty field is one row by definition, and WebKit will not say so: asked for
     // the `scrollHeight` of an empty textarea it answers about 1.5 rows (measured
@@ -1728,13 +2347,10 @@ $("msg").onkeydown = e => {
   e.preventDefault();
   $("send").click();
 };
-/* The sigil is 27px of composer at the very edge of the screen, exactly where a
-   thumb reaching for the start of the field lands, and it used to focus nothing.
-   `.field` has the same problem on the inside: its 10px of padding is chrome now that
-   the textarea holds only text, so an exact tap in the ring between the border and
-   the first character landed on nothing. Between them the whole 44px control is live,
-   which is what the tap-target floor was measured against in the first place. */
-$("composer").querySelector(".prompt").onclick = () => $("msg").focus();
+/* `.field` has 10px of vertical and one column of horizontal padding that is chrome
+   now that the textarea holds only text, so an exact tap in the ring around the
+   first character landed on nothing. With this the whole 44px control is live, which
+   is what the tap-target floor was measured against in the first place. */
 $("composer").querySelector(".field").onclick = () => $("msg").focus();
 
 /* The one turn control: stop while a turn runs, resume after one was stopped.
@@ -2117,6 +2733,12 @@ async function boot() {
 }
 boot();
 setInterval(refresh, 2000);
+/* The status line's `⏱` segment is the only thing on the page that moves without a
+   frame arriving, so it gets its own slow tick rather than riding `refresh` — which
+   returns early while a session is open, exactly when the clock is on screen. Ten
+   seconds is well under the resolution of every value `durationText` prints past a
+   minute, and `renderStatusLine` is a no-op with no session open. */
+setInterval(renderStatusLine, 10_000);
 </script>
 </body>
 </html>

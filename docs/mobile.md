@@ -327,18 +327,83 @@ button's hidden prompt, which describes an interruption rather than a task. The
 title lands asynchronously and rides the next state broadcast, so the card
 renames itself a moment after the first instruction.
 
-The phone view mirrors the TUI rather than inventing a web idiom: the spinner and
-its activity line come from the same `agent_start` / `tool_execution_start` /
-`message_update` / `agent_end` events the terminal titles its working line with,
-markdown tables render as box-drawn terminal tables, and tool calls stay
-structured cards instead of flattened text.
-
 **A session you resume stays attached.** An auto-started room is bound to the
 process, not to one session, so `/resume`, `/new`, `/fork` and `/tree` rebind it
 and re-welcome the portal into the session you moved to (see
 [collab](./collab.md#unattended-hosting)). The portal treats a fresh `welcome` as
 a full replacement and re-reads the republished record, so the card renames
 itself instead of describing a session the host already left.
+
+### The phone view is the TUI
+
+The phone does not have a web idiom of its own. It paints omp's **fullscreen
+viewport**, down to the palette, and every departure below is named and reasoned.
+
+**The palette is the host's own theme.** `mobile/theme-css.ts` resolves whatever
+`theme.dark` / `theme.light` this machine is configured with and injects it as a
+`<style>` block ahead of `</head>` on both the app and the login form, overriding
+the built-in `dark`/`light` values `portal-ui.html` ships with so the file still
+renders standalone. The collab protocol carries session state, not appearance, and
+it is shared with `collab-web` — but the portal runs on the same machine as every
+session it serves, as the same user, from the same binary, so it can read the same
+settings and theme files the sessions do. Resolved once per portal process: a theme
+switch needs `omp mobile restart`, the same lifetime as the port and the credential.
+
+**Four flat surfaces, no borders, no rounded corners.** The fullscreen viewport
+derives a "surface ladder" from one theme key (`statusLineBg`), stepping every RGB
+channel by +10 per rung on a dark theme and −5 on a light one: canvas, panel,
+element, overlay. Those fills are the only thing that marks a boundary anywhere in
+the transcript — the terminal replaced every `╭──╮` with a filled row — so the page
+has no rule and no radius on it either, and the canvas-to-panel contrast is
+load-bearing rather than decorative. Geometry follows the same source: a 2-column
+viewport gutter, 2 columns of card inset, one filled row above and below a card's
+content, and exactly one unpainted canvas row between blocks.
+
+**A tool call is one row until you tap it.** A settled call in the fullscreen
+viewport collapses to the identity line `renderStatusLine` built for it — sigil,
+title, the argument it is recognised by — with `⟦click to expand⟧` flush right, and
+the whole card is the hit zone because "the fill is what the pointer sees, so the
+fill is the target". Write and edit carry the language icon and the `⟦+N/-M⟧` change
+badge their terminal headers carry; read carries its `:start-end` selector; an edit
+in hashline mode has its path recovered from the patch's own `[PATH#TAG]` header,
+because that mode's arguments are only `{ i, input }`. A card that hides nothing is
+inert, as it is in the terminal. Two touch-screen departures: an expanded card says
+`⟦collapse⟧` (the terminal can drop the hint because its hover fill still marks the
+card as live, and a phone has no hover), and the expanded body is capped at 200 rows
+rather than the terminal's 10 — a tap is an explicit request to read that call, but a
+tool result is unbounded and a build log through `innerHTML` is a several-second
+freeze.
+
+**Reasoning is never drawn.** Not the thinking blocks in the transcript, not the
+live trace that used to sit under the working line. It is what `hideThinkingBlock`
+does in the TUI, chosen unconditionally here because a phone screen is the one place
+where a paragraph of reasoning per turn buries the work. The items still cross the
+wire and are still projected; nothing renders them.
+
+**The status line is the composer's last row**, exactly where the fullscreen
+viewport puts it: `π ▶ ⬢ <model> · <thinking> ▶ <folder> <cwd>` on the left,
+`◀ 👥 N agents ◫ <pct>%/<window> ⏱ <age>` on the right, on the panel fill with no
+rule between the groups. Overflow is resolved by **dropping** segments in the
+terminal's own precedence — right group first, `path` preserved longest — rather than
+by squeezing them, because a squeezed row on a 390px screen was four ellipses naming
+nothing. Symbols are omp's `unicode` preset throughout, never `nerd`: a phone browser
+cannot be assumed to have a patched font. Two segments differ from `segments.ts`:
+`⏱` is the session's age rather than the host's active-agent milliseconds, which are
+not published, and the session name is omitted because it is the first segment the
+terminal pops and the header states it in full instead.
+
+Everything else already followed the terminal and still does: the spinner and its
+intent line come from the same `agent_start` / `tool_execution_start` /
+`message_update` / `agent_end` events the terminal titles its working line with,
+markdown tables render as box-drawn terminal tables, the todos panel draws roman-
+numbered phases over `├─`/`└─` guides with the terminal's checkbox glyphs, and tool
+calls stay structured cards instead of flattened text.
+
+One thing is knowingly inherited along with the palette: omp's theme tokens are
+tuned for a terminal, not measured against WCAG, so the `dim` role that carries the
+expand hint sits near 3.4:1 on the dark panel. Parity is the point here, and the
+hint is redundant with the card's own affordance; a portal-only override would make
+the phone and the terminal disagree about what `dim` means.
 
 ### Session discovery
 

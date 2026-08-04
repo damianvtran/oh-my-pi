@@ -186,7 +186,27 @@ export type TranscriptItem =
 	 * agent ignoring the prompt above it.
 	 */
 	| { kind: "stopped" }
-	| { kind: "tool"; id: string; name: string; args: Record<string, unknown>; output?: string; isError?: boolean };
+	| {
+			kind: "tool";
+			id: string;
+			name: string;
+			args: Record<string, unknown>;
+			output?: string;
+			isError?: boolean;
+			/**
+			 * Lines added and removed, for the `⟦+N/-M⟧` badge omp's edit and write
+			 * headers carry (`formatChangeStatsSuffix`).
+			 *
+			 * Only an edit needs it on the wire: a write's badge is the line count of
+			 * the `content` it was given, which the phone already has in `args`, but an
+			 * edit's counts come from the diff the tool computed against the file on
+			 * disk and exist nowhere else. Extracted from the result's `details.diff`
+			 * rather than shipping that diff whole — a large edit's unified diff is
+			 * bigger than the rest of a transcript frame, and the phone renders two
+			 * integers from it.
+			 */
+			stats?: { added: number; removed: number };
+	  };
 
 /**
  * Todo panel state, reusing the todo tool's own shape rather than a parallel

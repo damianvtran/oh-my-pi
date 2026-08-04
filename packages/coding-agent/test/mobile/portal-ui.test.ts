@@ -36,6 +36,29 @@ interface PortalSubagentRow {
 	startedAt: number;
 }
 
+interface PortalTranscriptItem {
+	kind: string;
+	text?: string;
+	name?: string;
+	id?: string;
+	args?: Record<string, unknown>;
+	output?: string;
+	isError?: boolean;
+	stats?: { added: number; removed: number };
+	from?: string;
+}
+
+interface PortalTodoPhase {
+	name: string;
+	tasks: { content: string; status: string }[];
+}
+
+interface PortalContextUsage {
+	tokens?: number | null;
+	contextWindow?: number | null;
+	percent?: number | null;
+}
+
 interface PortalUi {
 	/**
 	 * Every count is optional here even though `PortalSubagents` requires them: this
@@ -56,6 +79,13 @@ interface PortalUi {
 	elapsedOf(row: { durationMs?: number; startedAt?: number }): string;
 	setAgentsOpen(open: boolean | null): void;
 	keyboardInsetOf(layoutHeight: number, viewport: { height: number; offsetTop: number; scale: number } | null): number;
+	renderTranscript(items: PortalTranscriptItem[]): string;
+	renderTodos(phases: PortalTodoPhase[] | null): string;
+	toolIdentity(item: PortalTranscriptItem): string;
+	contextText(usage: PortalContextUsage | null): string;
+	contextClass(usage: PortalContextUsage | null): string;
+	durationText(ms: number): string;
+	setExpandedTools(ids: string[]): void;
 }
 
 function portalScript(): string {
@@ -110,7 +140,14 @@ function loadPortalUi(): PortalUi {
 			esc,
 			elapsedOf,
 			keyboardInsetOf,
+			renderTranscript,
+			renderTodos,
+			toolIdentity,
+			contextText,
+			contextClass,
+			durationText,
 			setAgentsOpen: value => { agentsOpen = value; },
+			setExpandedTools: ids => { expandedTools = new Set(ids); },
 		}; }`,
 	) as (env: typeof stubs) => PortalUi;
 	return load(stubs);
@@ -136,6 +173,14 @@ interface PortalElementStub {
 	clientHeight: number;
 	scrollHeight: number;
 	onclick?: () => void;
+	/**
+	 * Delegated listeners the script installs, keyed by event type, so a test can
+	 * fire one. The transcript's tool cards are toggled through exactly one such
+	 * listener on `#log`.
+	 */
+	listeners: Map<string, ((event: unknown) => void)[]>;
+	addEventListener(type: string, handler: (event: unknown) => void): void;
+	dispatch(type: string, event: unknown): void;
 	setAttribute(name: string, value: string): void;
 	removeAttribute(name: string): void;
 	getAttribute(name: string): string | null;
@@ -167,9 +212,9 @@ function loadPortalNavigation(options: { hash?: string; state?: unknown } = {}):
 	/*
 	 * `querySelector` answers with a stub rather than `null`, cached per selector so
 	 * two lookups of the same child are the same object. The composer's chrome lives
-	 * on wrapper elements the script reaches for by class (`.wrap`, `.field`,
-	 * `.prompt`), and a `null` there is not a faithful stand-in for the real DOM — it
-	 * is a missing element, which the script is right to fail on.
+	 * on wrapper elements the script reaches for by class (`.input-row`, `.field`),
+	 * and a `null` there is not a faithful stand-in for the real DOM — it is a
+	 * missing element, which the script is right to fail on.
 	 */
 	const makeElement = (): PortalElementStub => {
 		const attributes = new Map<string, string>();
@@ -201,6 +246,15 @@ function loadPortalNavigation(options: { hash?: string; state?: unknown } = {}):
 			scrollTop: 0,
 			clientHeight: 0,
 			scrollHeight: 0,
+			listeners: new Map(),
+			addEventListener: (type, handler) => {
+				const existing = element.listeners.get(type);
+				if (existing) existing.push(handler);
+				else element.listeners.set(type, [handler]);
+			},
+			dispatch: (type, event) => {
+				for (const handler of element.listeners.get(type) ?? []) handler(event);
+			},
 			setAttribute: (name, value) => attributes.set(name, value),
 			removeAttribute: name => attributes.delete(name),
 			getAttribute: name => attributes.get(name) ?? null,
@@ -727,5 +781,261 @@ describe("portal UI subagents panel", () => {
 		// With neither field, `Date.now() - undefined` is NaN and every comparison below
 		// it is false, so the row printed `NaNh`. An empty string drops out of the join.
 		expect(ui.elapsedOf({})).toBe("");
+	});
+});
+
+/**
+ * The transcript's TUI parity. These renderers are what makes a card on the phone
+ * read like the row the terminal drew for the same call, and every one of the
+ * assertions below stands for a shape that was wrong at some point during the port:
+ * an edit card with no path, a card that wrapped to three rows, a transcript blanked
+ * because its tail was all reasoning.
+ */
+describe("portal UI transcript cards", () => {
+	const tool = (over: Partial<PortalTranscriptItem> = {}): PortalTranscriptItem => ({
+		kind: "tool",
+		id: "call-1",
+		name: "bash",
+		args: { command: "ls -la" },
+		...over,
+	});
+
+	it("renders a settled card as its identity row plus the expand hint", () => {
+		const ui = loadPortalUi();
+		const html = ui.renderTranscript([tool({ output: "a\nb\nc" })]);
+		expect(html).toContain("❯");
+		expect(html).toContain("Bash");
+		expect(html).toContain("ls -la");
+		// The whole card is the hit zone, so it is the button.
+		expect(html).toContain('data-toggle="call-1"');
+		expect(html).toContain('aria-expanded="false"');
+		expect(html).toContain("⟦click to expand⟧");
+		// Collapsed means the identity ALONE: `OUTPUT_SETTLED` drops even the one
+		// preview row the terminal keeps.
+		expect(html).not.toContain("tool-body");
+	});
+
+	it("shows the output and offers a collapse once expanded", () => {
+		const ui = loadPortalUi();
+		ui.setExpandedTools(["call-1"]);
+		const html = ui.renderTranscript([tool({ output: "first\nsecond" })]);
+		expect(html).toContain('aria-expanded="true"');
+		expect(html).toContain("first\nsecond");
+		// The terminal drops the hint when open because its hover fill still marks the
+		// card as live; a touch screen has no hover, so the label has to say so.
+		expect(html).toContain("⟦collapse⟧");
+		expect(html).not.toContain("⟦click to expand⟧");
+	});
+
+	it("leaves a card with no output inert rather than silently untappable", () => {
+		const ui = loadPortalUi();
+		const html = ui.renderTranscript([tool({ output: "" })]);
+		expect(html).not.toContain("data-toggle");
+		expect(html).not.toContain("⟦click to expand⟧");
+		// Still a card, still identified.
+		expect(html).toContain("Bash");
+	});
+
+	it("names the expanded remainder instead of pushing an unbounded body at the phone", () => {
+		const ui = loadPortalUi();
+		ui.setExpandedTools(["call-1"]);
+		const rows = Array.from({ length: 260 }, (_, i) => `line ${i}`).join("\n");
+		const html = ui.renderTranscript([tool({ output: rows })]);
+		expect(html).toContain("line 199");
+		expect(html).not.toContain("line 200");
+		expect(html).toContain("… 60 more lines");
+	});
+
+	it("does not render reasoning at all", () => {
+		const ui = loadPortalUi();
+		// The item still crosses the wire and is still projected; this surface simply
+		// draws nothing for it, which is what `hideThinkingBlock` does in the TUI.
+		expect(ui.renderTranscript([{ kind: "thinking", text: "weighing the options" }])).toBe("");
+		// And a tail made only of reasoning renders to nothing, which is what lets the
+		// caller fall back to the empty-log guide.
+		expect(
+			ui.renderTranscript([
+				{ kind: "thinking", text: "one" },
+				{ kind: "thinking", text: "two" },
+			]),
+		).toBe("");
+	});
+
+	it("draws a user prompt as a filled bubble with no chevron", () => {
+		const ui = loadPortalUi();
+		const html = ui.renderTranscript([{ kind: "user", text: "ship it" }]);
+		expect(html).toContain("user-line");
+		expect(html).toContain("ship it");
+		// The `❯ ` this used to print was a portal invention: the terminal separates a
+		// prompt from the prose around it with `userMessageBg` alone.
+		expect(html).not.toContain("❯");
+	});
+
+	it("counts a write's own content as the change badge", () => {
+		const ui = loadPortalUi();
+		const html = ui.toolIdentity(tool({ name: "write", args: { path: "/tmp/x/a.ts", content: "one\ntwo\nthree" } }));
+		expect(html).toContain("Write");
+		expect(html).toContain("+3");
+		expect(html).not.toContain("-0");
+		// The language icon the TUI puts in front of the path.
+		expect(html).toContain("🟦");
+	});
+
+	it("recovers an edit's path from the hashline patch it was given", () => {
+		const ui = loadPortalUi();
+		// The hashline edit mode's arguments are `{ i, input }` — there is no `path`
+		// field at all, and without parsing the section header every edit card in a
+		// transcript read `✎ Edit` and nothing else.
+		const html = ui.toolIdentity(
+			tool({
+				name: "edit",
+				args: { input: "[/Users/someone/proj/src/main.rs#C051]\nCUT 83.=83\n" },
+				stats: { added: 4, removed: 11 },
+			}),
+		);
+		expect(html).toContain("~/proj/src/main.rs");
+		expect(html).toContain("+4");
+		expect(html).toContain("-11");
+		expect(html).toContain("🦀");
+	});
+
+	it("names every file a multi-file patch touches by count", () => {
+		const ui = loadPortalUi();
+		const html = ui.toolIdentity(
+			tool({
+				name: "edit",
+				args: { input: "[a/one.ts#AAAA]\nCUT 1.=1\n[b/two.ts#BBBB]\nCUT 2.=2\n" },
+			}),
+		);
+		expect(html).toContain("a/one.ts +1 more");
+	});
+
+	it("takes an edit's path straight from the patch and replace modes", () => {
+		const ui = loadPortalUi();
+		// `patch` and `replace` modes carry `path` outright; which mode a host runs is a
+		// setting, so both shapes have to work.
+		expect(ui.toolIdentity(tool({ name: "edit", args: { path: "/tmp/p/x.py", edits: [] } }))).toContain(
+			"/tmp/p/x.py",
+		);
+	});
+
+	it("appends a read's line range and omits the colon the terminal omits", () => {
+		const ui = loadPortalUi();
+		const ranged = ui.toolIdentity(tool({ name: "read", args: { path: "/tmp/p/f.txt", offset: 1295, limit: 8 } }));
+		expect(ranged).toContain(":1295-1302");
+		// `read-tool-group.ts` builds `● Read <path>` — a space, not `Read:`.
+		expect(ranged).not.toContain("Read</span>:");
+		// A spec that already carries its own selector is left alone.
+		expect(ui.toolIdentity(tool({ name: "read", args: { path: "/tmp/p/f.txt:10-20" } }))).toContain(":10-20");
+	});
+
+	it("summarises a task batch by the names it spawned", () => {
+		const ui = loadPortalUi();
+		const batch = ui.toolIdentity(
+			tool({ name: "task", args: { context: "…", tasks: [{ name: "ScoutOne" }, { name: "ScoutTwo" }] } }),
+		);
+		expect(batch).toContain("ScoutOne · ScoutTwo");
+		// A single spawn is titled by its agent type, the way `formatAgentHeaderLabel` does.
+		expect(ui.toolIdentity(tool({ name: "task", args: { agent: "scout" } }))).toContain("scout");
+	});
+
+	it("marks an errored call with the error glyph", () => {
+		const ui = loadPortalUi();
+		const html = ui.renderTranscript([tool({ isError: true, output: "boom" })]);
+		expect(html).toContain("✘");
+		expect(html).toContain("tool err");
+	});
+});
+
+describe("portal UI todos panel", () => {
+	const phases = [
+		{ name: "Scout", tasks: [{ content: "read the repo", status: "completed" }] },
+		{
+			name: "Implement",
+			tasks: [
+				{ content: "write it", status: "in_progress" },
+				{ content: "waiting on review", status: "blocked" },
+			],
+		},
+		{ name: "Land", tasks: [{ content: "merge", status: "pending" }] },
+	];
+
+	it("labels phases with roman numerals and marks the active one", () => {
+		const ui = loadPortalUi();
+		const html = ui.renderTodos(phases);
+		expect(html).toContain("I. Scout");
+		expect(html).toContain("II. Implement");
+		expect(html).toContain("III. Land");
+		// `#getActivePhase`: the first phase with work left. Scout is done, so Implement
+		// carries the accent and Scout does not.
+		expect(html).toContain('class="tree-body phase now">II. Implement');
+		expect(html).toContain('class="tree-body phase">I. Scout');
+	});
+
+	it("states which phase is active, not how many tasks are done", () => {
+		const ui = loadPortalUi();
+		// The TUI header answers "which stage" (`activeIdx + 1`/total); the per-phase
+		// rows answer "how much of it".
+		expect(ui.renderTodos(phases)).toContain('Todos<span class="count"> · 2/3</span>');
+		// A single-phase plan has no stage progression to state.
+		expect(ui.renderTodos([phases[0]!])).toContain('<div class="todos-h">Todos</div>');
+	});
+
+	it("carries the checkbox glyphs and the status palette", () => {
+		const ui = loadPortalUi();
+		const html = ui.renderTodos(phases);
+		expect(html).toContain("☑ read the repo");
+		expect(html).toContain("☐ write it");
+		expect(html).toContain("task done");
+		expect(html).toContain("task now");
+		// `formatTodoLine` appends the word, it does not only recolour the row.
+		expect(html).toContain("☐ waiting on review (blocked)");
+	});
+
+	it("draws the two-character tree guides the terminal draws", () => {
+		const ui = loadPortalUi();
+		const html = ui.renderTodos(phases);
+		expect(html).toContain("├─");
+		expect(html).toContain("└─");
+		// `getTreeContinuePrefix`: `│  ` under a branch, three spaces under the last.
+		expect(html).toContain("│  ├─");
+	});
+
+	it("renders nothing for an empty or taskless plan", () => {
+		const ui = loadPortalUi();
+		expect(ui.renderTodos(null)).toBe("");
+		expect(ui.renderTodos([])).toBe("");
+		expect(ui.renderTodos([{ name: "Empty", tasks: [] }])).toBe("");
+	});
+});
+
+describe("portal UI status-line formatters", () => {
+	it("formats context usage the way the status line does", () => {
+		const ui = loadPortalUi();
+		expect(ui.contextText({ percent: 22.1, contextWindow: 984_000, tokens: 217_000 })).toBe("22.1%/984K");
+		// An unknown window degrades to `<tokens>/?` rather than claiming `0.0%/0`.
+		expect(ui.contextText({ percent: null, contextWindow: null, tokens: 1500 })).toBe("1.5K/?");
+		expect(ui.contextText(null)).toBe("");
+	});
+
+	it("colours context by whichever bound is reached first", () => {
+		const ui = loadPortalUi();
+		// On a 984K window the TOKEN bounds dominate: 150K is 15.2%, so 22.1% is
+		// already `warning` even though it is far below the 50% flat threshold.
+		expect(ui.contextClass({ percent: 22.1, contextWindow: 984_000 })).toBe("warn");
+		expect(ui.contextClass({ percent: 10, contextWindow: 984_000 })).toBe("");
+		expect(ui.contextClass({ percent: 30, contextWindow: 984_000 })).toBe("high");
+		expect(ui.contextClass({ percent: 60, contextWindow: 984_000 })).toBe("crit");
+		// With no window the flat percentages are all there is.
+		expect(ui.contextClass({ percent: 60, contextWindow: null })).toBe("warn");
+	});
+
+	it("formats durations without a space, dropping a zero unit", () => {
+		const ui = loadPortalUi();
+		expect(ui.durationText(44 * 60_000 + 58_000)).toBe("44m58s");
+		expect(ui.durationText(8 * 60_000)).toBe("8m");
+		expect(ui.durationText(2 * 3_600_000 + 30 * 60_000)).toBe("2h30m");
+		expect(ui.durationText(3 * 86_400_000 + 2 * 3_600_000)).toBe("3d2h");
+		expect(ui.durationText(0)).toBe("");
 	});
 });
