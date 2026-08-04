@@ -15,6 +15,7 @@ import {
 } from "../../advisor";
 import { reset as resetCapabilities } from "../../capability";
 import {
+	formatActiveModelSelector,
 	formatModelSelectorValue,
 	resolveAdvisorRoleSelection,
 	resolveModelRoleValue,
@@ -395,6 +396,7 @@ export class SelectorController {
 		const activeModel = this.ctx.session.model;
 		const activeModelPattern = activeModel ? `${activeModel.provider}/${activeModel.id}` : undefined;
 		const defaultModelPattern = this.ctx.settings.getModelRole("default");
+		const activeModelSelector = formatActiveModelSelector(activeModel, this.ctx.session.thinkingLevel);
 		let overlayHandle: OverlayHandle | undefined;
 		let hub: AgentsHubComponent | undefined;
 		let closed = false;
@@ -413,6 +415,7 @@ export class SelectorController {
 			{
 				modelRegistry: this.ctx.session.modelRegistry,
 				activeModelPattern,
+				activeModelSelector,
 				defaultModelPattern,
 			},
 			{ onCancel: () => done() },

@@ -391,6 +391,9 @@
 ### Changed
 
 - Upgraded the bundled omptype schema engine: intersection and pipe operators, bigint and RegExp literals in the string DSL, Standard Schema V1 interop, JSON Schema import via fromJsonSchema(), and richer union/collection error reporting.
+### Added
+
+- Added the fork-only `task.inheritSessionModel` setting (default off): when enabled, every subagent spawn — task tool, eval bridge, vibe workers, and the agent dashboard preview — starts on the session's live model selector (model plus active thinking level) instead of resolving the agent definition's model role, so retry-fallbacks and manual model/effort switches track into newly spawned subagents. Explicit per-spawn `model` overrides and `task.agentModelOverrides` still win.
 
 ## [17.2.7] - 2026-08-03
 

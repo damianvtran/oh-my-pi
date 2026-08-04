@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { formatModelString } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	artifactsDirsFromRegistry,
@@ -35,9 +39,12 @@ function session(
 		planMode?: boolean;
 		outputSchema?: unknown;
 		maxDepth?: number;
+		inheritSessionModel?: boolean;
+		activeModel?: Model;
+		activeThinkingLevel?: ThinkingLevel;
+		modelRoles?: Record<string, string>;
 		isolationMode?: "none" | "worktree";
 		isolationApply?: boolean;
-		modelRoles?: Record<string, string>;
 	} = {},
 ): ToolSession {
 	return {
@@ -50,7 +57,14 @@ function session(
 			"task.enableLsp": true,
 			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
+			...(options.inheritSessionModel !== undefined
+				? { "task.inheritSessionModel": options.inheritSessionModel }
+				: {}),
+			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
 		}),
+		getActiveModel: () => options.activeModel,
+		getActiveModelString: () => (options.activeModel ? formatModelString(options.activeModel) : undefined),
+		getActiveThinkingLevel: () => options.activeThinkingLevel,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
@@ -119,6 +133,40 @@ describe("structured subagent primitive", () => {
 		inheritedSession.outputSchemaMode = "strict";
 		const inherited = await resolveEffectiveSubagentPolicy(request({ session: inheritedSession }));
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
+	});
+
+	it("inherits the session's live model selector when task.inheritSessionModel is on", async () => {
+		mockDiscovery({ ...AGENT, model: ["@slow"] });
+		const activeModel = buildModel({
+			provider: "kimi-code",
+			id: "k3",
+			name: "K3",
+			api: "openai-completions",
+			baseUrl: "http://127.0.0.1:9/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 4096,
+		});
+		const inherited = session({
+			inheritSessionModel: true,
+			activeModel,
+			activeThinkingLevel: ThinkingLevel.High,
+			modelRoles: { slow: "local/llama" },
+		});
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: inherited }));
+		expect(policy.modelOverride).toEqual(["kimi-code/k3:high"]);
+		expect(policy.parentActiveModelPattern).toBe("kimi-code/k3:high");
+
+		// Flag off: the agent's role resolves as before.
+		const plain = session({ activeModel, modelRoles: { slow: "local/llama" } });
+		const plainPolicy = await resolveEffectiveSubagentPolicy(request({ session: plain }));
+		expect(plainPolicy.modelOverride).toEqual(["local/llama"]);
+
+		// Explicit per-spawn override still wins over inheritance.
+		const overridden = await resolveEffectiveSubagentPolicy(request({ session: inherited, model: "openai/gpt-4o" }));
+		expect(overridden.modelOverride).toEqual(["openai/gpt-4o"]);
 	});
 
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {

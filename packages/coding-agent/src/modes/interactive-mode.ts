@@ -2349,6 +2349,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// the primary fallback in resolveAgentModelPatterns, so the `good` worker's
 			// pi/task inheritance tracks the reopened session's model.
 			getActiveModelString: () => (this.session.model ? formatModelString(this.session.model) : undefined),
+			// Live model + effort getters so `task.inheritSessionModel` applies to
+			// rehydrated workers exactly as it does to spawn-path ToolSessions.
+			getActiveModel: () => this.session.model,
+			getActiveThinkingLevel: () => this.session.thinkingLevel,
 		};
 	}
 

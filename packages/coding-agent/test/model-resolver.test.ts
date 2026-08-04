@@ -1001,6 +1001,65 @@ describe("resolveAgentModelPatterns", () => {
 		expect(resolveAgentModelPatterns({ agentModel: "@designer", settings })).toEqual(["local/llama"]);
 	});
 
+	test("inheritSessionModel makes the live session selector win over the agent role", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			agentModel: "@slow",
+			settings,
+			activeModelPattern: "kimi-code/k3:high",
+			inheritSessionModel: true,
+		});
+
+		expect(result).toEqual(["kimi-code/k3:high"]);
+	});
+
+	test("inheritSessionModel never beats an explicit per-spawn override", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			settingsOverride: "openai/gpt-4o",
+			agentModel: "@slow",
+			settings,
+			activeModelPattern: "kimi-code/k3:high",
+			inheritSessionModel: true,
+		});
+
+		expect(result).toEqual(["openai/gpt-4o"]);
+	});
+
+	test("inheritSessionModel without a live model falls through to role resolution", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5", slow: "local/llama" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			agentModel: "@slow",
+			settings,
+			inheritSessionModel: true,
+		});
+
+		expect(result).toEqual(["local/llama"]);
+	});
+
+	test("without inheritSessionModel the agent role still resolves", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "anthropic/claude-sonnet-4-5", slow: "local/llama" },
+		});
+
+		const result = resolveAgentModelPatterns({
+			agentModel: "@slow",
+			settings,
+			activeModelPattern: "kimi-code/k3:high",
+		});
+
+		expect(result).toEqual(["local/llama"]);
+	});
+
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "@slow", slow: "anthropic/claude-sonnet-4-5" },

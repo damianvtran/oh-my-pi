@@ -121,6 +121,13 @@ interface GeneratedAgentSpec {
 export interface AgentsHubModelContext {
 	modelRegistry?: ModelRegistry;
 	activeModelPattern?: string;
+	/**
+	 * Live selector including the session's active thinking suffix. Preview
+	 * source for `task.inheritSessionModel` (fork feature): with that flag on, a
+	 * spawn resolves the session's model AND effort, so the hub has to preview
+	 * the same string or it advertises a model the spawn will not use.
+	 */
+	activeModelSelector?: string;
 	defaultModelPattern?: string;
 }
 
@@ -378,12 +385,17 @@ export class AgentsHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#effectiveModelPatterns(agent: HubAgent): string[] {
+		const inheritSessionModel = this.#settings.get("task.inheritSessionModel") === true;
 		return resolveAgentModelPatterns({
 			settingsOverride: agent.overrideModel,
 			agentModel: agent.model,
 			settings: this.#settings,
-			activeModelPattern: this.#modelContext.activeModelPattern,
+			activeModelPattern:
+				inheritSessionModel && this.#modelContext.activeModelSelector
+					? this.#modelContext.activeModelSelector
+					: this.#modelContext.activeModelPattern,
 			fallbackModelPattern: this.#modelContext.defaultModelPattern,
+			inheritSessionModel,
 		});
 	}
 
