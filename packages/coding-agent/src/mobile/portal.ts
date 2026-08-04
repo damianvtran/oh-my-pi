@@ -137,7 +137,26 @@ class Portal implements PortalHandle {
 	#themeStyle = "";
 
 	static async start(options: PortalOptions): Promise<Portal> {
+		/*
+		 * Resolve the host's theme BEFORE the constructor, because the constructor
+		 * calls `Bun.serve`: the port is listening for everything that follows, and a
+		 * phone reconnecting after `omp mobile restart` (it polls every 2s and its
+		 * EventSource retries on its own) can load the whole page in that window and
+		 * get the built-in palette with no signal and no recovery short of a reload.
+		 *
+		 * A failure is not fatal — `portalThemeStyle` answers `""` and the pages fall
+		 * back to their own built-in palette, the same one a stock omp paints — but it
+		 * is logged, because a portal silently running on the wrong palette (a typo in
+		 * `theme.dark`, a deleted custom theme file) otherwise has no diagnostic at
+		 * all. The success line names what it resolved, since `omp mobile restart` is
+		 * the operation this value's freshness depends on.
+		 */
+		const theme = await portalThemeStyle();
 		const portal = new Portal(options);
+		portal.#themeStyle = theme.style;
+		portal.#log(
+			theme.style ? `theme resolved: ${theme.resolved.join(", ")}` : "theme unresolved, using the built-in palette",
+		);
 		// Create the link directory before watching it. Hosts create it when they
 		// publish, but a portal that starts first would otherwise have nothing to
 		// watch and would discover the first session only on the next poll — the
@@ -160,13 +179,6 @@ class Portal implements PortalHandle {
 			const reaped = await reapStaleSessionJobs(SESSION_JOB_LABEL_PREFIX).catch(() => []);
 			if (reaped.length > 0) portal.#log(`reaped ${reaped.length} stale session job label(s)`);
 		}
-		// Resolve the host's theme before the first request can arrive. A failure is
-		// not fatal: `portalThemeStyle` answers "" and the pages fall back to their
-		// own built-in palette, which is the same one a stock omp would paint.
-		portal.#themeStyle = await portalThemeStyle().catch(err => {
-			portal.#log(`theme unresolved, using the built-in palette: ${String(err)}`);
-			return "";
-		});
 		// One scan before returning so `omp mobile status` and the phone's first
 		// load see the sessions that were already running.
 		await portal.#scan();
@@ -182,7 +194,16 @@ class Portal implements PortalHandle {
 	 */
 	#themed(html: string): string {
 		if (!this.#themeStyle) return html;
-		return html.replace(HEAD_END, `${this.#themeStyle}${HEAD_END}`);
+		if (!html.includes(HEAD_END)) {
+			this.#log("page has no </head>; serving it on the built-in palette");
+			return html;
+		}
+		// Function replacer: with a string, `$&`/`` $` ``/`$'`/`$$` inside the
+		// REPLACEMENT carry substitution meaning, and `$'` would splice the whole
+		// remainder of the document into the style block. A `$` cannot reach here
+		// now that `paletteFor` validates every value as hex, but the splice should
+		// not depend on a validator two files away.
+		return html.replace(HEAD_END, () => `${this.#themeStyle}${HEAD_END}`);
 	}
 
 	/**

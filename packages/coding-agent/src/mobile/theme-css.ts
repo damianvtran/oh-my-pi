@@ -41,12 +41,22 @@ import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { getResolvedThemeColors, isLightTheme } from "../modes/theme/theme";
 
 /**
- * Per-channel step between ladder rungs, mirroring `SURFACE_STEP_DARK` /
- * `SURFACE_STEP_LIGHT`. Dark themes step up (a card is lighter than its canvas),
- * light themes step down.
+ * Per-channel step between ladder rungs. Dark mirrors the terminal's
+ * `SURFACE_STEP_DARK` exactly; light does NOT mirror `SURFACE_STEP_LIGHT`, and that
+ * is the one deliberate numeric divergence in this file.
+ *
+ * The fills are the only boundary anywhere in this design — every border and rule is
+ * gone, as in the fullscreen viewport — so the rung separation IS the card. At the
+ * terminal's 5, a light palette measured 1.049:1 between canvas and panel, below the
+ * 1.5:1 floor the theme module's own `SELECTION_MIN_CONTRAST` comment sets for "two
+ * surfaces read as two surfaces", and a tool card was a rumour rather than a card.
+ * A terminal gets away with it because it is a dark room; the phone is the one omp
+ * surface used in daylight, where auto-brightness and True Tone compress exactly
+ * this range. 14 puts canvas→overlay at 1.54:1 and canvas→panel at 1.145:1 — the
+ * most the lightness axis gives without inventing a rule the terminal does not draw.
  */
 const SURFACE_STEP_DARK = 10;
-const SURFACE_STEP_LIGHT = 5;
+const SURFACE_STEP_LIGHT = 14;
 
 /**
  * Theme tokens the portal renders, mapped to the CSS custom property that
@@ -128,10 +138,55 @@ function luma({ r, g, b }: Rgb): number {
 }
 
 export interface PortalPalette {
-	/** Theme name this palette came from, for the log line and the status header. */
+	/** Theme name this palette came from. Read by the start-up log line. */
 	name: string;
 	/** CSS declarations (`--token: value;`) for one `:root`-level block. */
 	declarations: string[];
+}
+
+/**
+ * The four surface declarations for one theme, from its `statusLineBg` anchor.
+ *
+ * Exported for the tests: the anchor's rejection rules are the part of this module
+ * that a wrong answer makes invisible rather than broken — a bad anchor still
+ * produces four valid colours, just the wrong four — and they cannot be reached
+ * through {@link portalThemeStyle} without writing a custom theme file into the
+ * developer's `~/.omp`.
+ *
+ * `getResolvedThemeColors` substitutes the HTML-export default text colour for any
+ * token the theme left at "terminal default" (`""`), which is right for every
+ * foreground token and wrong for this one background: a theme that omits it would
+ * hand us a near-white anchor to build a dark ladder from.
+ *
+ * That substitution is detected by its own two output values rather than inferred
+ * from luminance. `getHtmlDefaultTextForSurface` returns exactly `#000000` or
+ * `#e5e5e7`, and a luminance test only catches the case where the substituted value
+ * DISAGREES with the mode: a theme that omits `statusLineBg` but whose export
+ * surface is light gets `#000000`, which `isLightTheme` still classifies as dark
+ * (`colorLuma("")` is undefined), so `luma 0 > 0.5 === false` matched and the whole
+ * phone painted a pure-black ladder for a light theme. Neither sentinel is a
+ * meaningful anchor anyway.
+ *
+ * A hex that survives both checks still has to agree with the theme's own mode: a
+ * light anchor under a dark theme is a mis-declared token, not an intent, and
+ * building a ladder from it would inverse the whole page.
+ */
+export function surfaceDeclarations(anchorHex: string, light: boolean): string[] {
+	const hex = anchorHex.toLowerCase();
+	const substituted = hex === "#000000" || hex === "#e5e5e7";
+	const parsed = substituted ? undefined : parseHex(hex);
+	// The built-in themes' own anchors, which is what makes the fallback invisible
+	// on a stock install rather than a visible downgrade.
+	const anchor = parsed && luma(parsed) > 0.5 === light ? parsed : parseHex(light ? "#e0e0e0" : "#121212");
+	if (!anchor) return [];
+	const step = light ? -SURFACE_STEP_LIGHT : SURFACE_STEP_DARK;
+	return [
+		`color-scheme: ${light ? "light" : "dark"};`,
+		`--canvas: ${toHex(anchor)};`,
+		`--panel: ${stepChannels(anchor, step)};`,
+		`--element: ${stepChannels(anchor, step * 2)};`,
+		`--overlay: ${stepChannels(anchor, step * 3)};`,
+	];
 }
 
 /**
@@ -150,59 +205,61 @@ async function paletteFor(name: string): Promise<PortalPalette | undefined> {
 		return undefined;
 	}
 	const light = isLightTheme(name);
-	/*
-	 * `getResolvedThemeColors` substitutes the HTML-export default text colour
-	 * for any token the theme left at "terminal default" (`""`), which is exactly
-	 * right for every foreground token — and wrong for `statusLineBg`, the one
-	 * background this palette needs, because a theme that omits it would hand us
-	 * a near-white anchor to build a dark ladder from. The luminance test is the
-	 * only signal left at this layer that the substitution happened, so it stands
-	 * in for the theme module's own `statusLineBg === ""` check; a mismatch falls
-	 * back to the built-in anchor for the matching mode.
-	 */
-	const anchorHex = colors.statusLineBg ?? "";
-	const parsedAnchor = parseHex(anchorHex);
-	const anchor =
-		parsedAnchor && luma(parsedAnchor) > 0.5 === light ? parsedAnchor : parseHex(light ? "#e0e0e0" : "#121212");
-	if (!anchor) return undefined;
-
-	const step = light ? -SURFACE_STEP_LIGHT : SURFACE_STEP_DARK;
-	const declarations = [
-		`color-scheme: ${light ? "light" : "dark"};`,
-		`--canvas: ${toHex(anchor)};`,
-		`--panel: ${stepChannels(anchor, step)};`,
-		`--element: ${stepChannels(anchor, step * 2)};`,
-		`--overlay: ${stepChannels(anchor, step * 3)};`,
-	];
+	const declarations = surfaceDeclarations(colors.statusLineBg ?? "", light);
+	// No anchor and no fallback means `parseHex` rejected a built-in constant, which
+	// is a code defect rather than a theme problem — leave the page on its own
+	// palette rather than emitting a ladder-less block whose tokens half-apply.
+	if (!declarations.length) return undefined;
 	for (const [token, cssVar] of Object.entries(TOKEN_VARS)) {
 		const value = colors[token];
-		// A theme may omit an optional token (`thinkingMax` is the documented
-		// case); leaving the variable unset keeps the stylesheet's own default.
-		if (value) declarations.push(`${cssVar}: ${value};`);
+		/*
+		 * A theme may omit an optional token (`thinkingMax` is the documented
+		 * case); leaving the variable unset keeps the stylesheet's own default.
+		 *
+		 * `parseHex` is a validator here, not a conversion: this string is spliced
+		 * into a `<style>` element on an authenticated surface that steers live
+		 * agents, and the only guarantee upstream is `resolveVarRefs`' leading-`#`
+		 * check — the settings schema puts no `pattern` behind it. `#000}` would
+		 * close the `:root` block and drop every declaration after it, and
+		 * `#000</style><script>` would close the element outright.
+		 */
+		if (value && parseHex(value)) declarations.push(`${cssVar}: ${value};`);
 	}
 	return { name, declarations };
 }
 
 /** Theme names the host is configured to use, in `[dark, light]` order. */
 async function themeNames(): Promise<[string, string]> {
-	// The portal is a service, not a session: nothing has opened settings storage
-	// in this process. Opening it here rather than in the CLI entry keeps the
-	// dependency with the one feature that needs it, and the guard makes a
-	// second call (or a test that pre-initialized) a no-op.
-	if (!isSettingsInitialized()) {
-		try {
-			await Settings.init();
-		} catch (err) {
-			logger.debug("mobile portal could not open settings for theme resolution", { error: String(err) });
-			return ["dark", "light"];
-		}
+	/*
+	 * A read, not an initialization. `Settings.init()` opens `agent.db`, runs
+	 * legacy migration and seeds marker files, and installs a process-global
+	 * singleton scoped to `process.cwd()` — which under launchd is launchd's
+	 * directory, not a project. Nothing in the portal ever closes that handle, so
+	 * this daemon would hold the database open for its whole lifetime to have read
+	 * two strings once at start. `loadReadOnly` is documented for exactly this.
+	 *
+	 * The already-initialized singleton is preferred when one exists, so a host
+	 * process that shares this module reads the same settings it is running on.
+	 */
+	try {
+		const resolved = isSettingsInitialized() ? settings : await Settings.loadReadOnly();
+		return [resolved.get("theme.dark") ?? "dark", resolved.get("theme.light") ?? "light"];
+	} catch (err) {
+		logger.debug("mobile portal could not read settings for theme resolution", { error: String(err) });
+		return ["dark", "light"];
 	}
-	return [settings.get("theme.dark") ?? "dark", settings.get("theme.light") ?? "light"];
+}
+
+/** What the portal resolved, for the log line and for `Portal.#themed`. */
+export interface PortalThemeStyle {
+	/** The `<style>` block, or `""` when neither theme could be resolved. */
+	style: string;
+	/** Theme names actually painted, `[dark, light]`, omitting any that failed. */
+	resolved: string[];
 }
 
 /**
- * The `<style>` block the portal injects into every page it serves, or `""` when
- * neither configured theme could be resolved.
+ * The `<style>` block the portal injects into every page it serves.
  *
  * Emitted after the stylesheet's own `:root` defaults and with the same selector
  * specificity, so later-wins ordering does the overriding — no `!important`, and
@@ -210,11 +267,16 @@ async function themeNames(): Promise<[string, string]> {
  * The light block is duplicated under an explicit `[data-theme="light"]` and the
  * system media query for the same reason the base stylesheet does: `?theme=`
  * pins the palette, otherwise the OS decides.
+ *
+ * `names` exists for the tests: it lets them pin the built-in `dark`/`light`
+ * palettes and assert literals, instead of asserting against whatever theme the
+ * developer running the suite happens to have configured.
  */
-export async function portalThemeStyle(): Promise<string> {
-	const [darkName, lightName] = await themeNames();
+export async function portalThemeStyle(names?: [string, string]): Promise<PortalThemeStyle> {
+	const [darkName, lightName] = names ?? (await themeNames());
 	const [dark, light] = await Promise.all([paletteFor(darkName), paletteFor(lightName)]);
-	if (!dark && !light) return "";
+	const resolved = [dark?.name, light?.name].filter((name): name is string => name !== undefined);
+	if (!dark && !light) return { style: "", resolved };
 	const blocks: string[] = [];
 	if (dark) blocks.push(`:root{${dark.declarations.join("")}}`);
 	if (light) {
@@ -222,5 +284,5 @@ export async function portalThemeStyle(): Promise<string> {
 		blocks.push(`[data-theme="light"]{${body}}`);
 		blocks.push(`@media(prefers-color-scheme:light){:root:not([data-theme="dark"]){${body}}}`);
 	}
-	return `<style id="omp-theme">${blocks.join("")}</style>`;
+	return { style: `<style id="omp-theme">${blocks.join("")}</style>`, resolved };
 }

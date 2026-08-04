@@ -45,7 +45,7 @@
    palette and otherwise the OS decides. */
 [data-theme="light"] {
   color-scheme: light;
-  --canvas: #e0e0e0; --panel: #dbdbdb; --element: #d6d6d6; --overlay: #d1d1d1;
+  --canvas: #e0e0e0; --panel: #d2d2d2; --element: #c4c4c4; --overlay: #b6b6b6;
   --fg: #000000; --muted: #6c6c6c; --dim: #767676;
   --accent: #5a8080; --success: #588458; --error: #aa5555; --warning: #9a7326;
   --border-muted: #b0b0b0; --thinking: #6c6c6c; --tool-output: #6c6c6c;
@@ -58,7 +58,7 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
     color-scheme: light;
-    --canvas: #e0e0e0; --panel: #dbdbdb; --element: #d6d6d6; --overlay: #d1d1d1;
+    --canvas: #e0e0e0; --panel: #d2d2d2; --element: #c4c4c4; --overlay: #b6b6b6;
     --fg: #000000; --muted: #6c6c6c; --dim: #767676;
     --accent: #5a8080; --success: #588458; --error: #aa5555; --warning: #9a7326;
     --border-muted: #b0b0b0; --thinking: #6c6c6c; --tool-output: #6c6c6c;
@@ -149,7 +149,14 @@ header {
 .brand { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 /* `π`, the TUI status line's own leading badge (`icon.pi`, in `accent`). */
 .brand b { color: var(--accent); font-weight: 650; letter-spacing: 0.01em; }
-.brand .sub { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* `muted`, not `dim`: this is the app's only persistent statement of what the open
+   session is doing, and at the `dim` tier it sat at the same contrast as the
+   decoration around it. */
+.brand .sub { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A pending approval outranks every other state here — the host is blocked on the
+   reader — and takes the `warning` role the prompt itself uses, so the header and the
+   panel agree at a glance. */
+.brand .sub.ask { color: var(--warning); }
 /* One control scale for the whole app. 44px is the iOS minimum and this surface
    is phone-only, so the control keeps its dense look while the tap target is a
    thumb's worth of it — the header buttons used to be 26px tall and 6px apart,
@@ -200,7 +207,18 @@ main { overflow-y: auto; overscroll-behavior: contain; background: var(--canvas)
 .card-top { display: flex; align-items: baseline; gap: 8px; }
 .card-name { font-weight: 650; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-cwd { color: var(--sl-path); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.meta { display: flex; flex-wrap: wrap; gap: 3px 14px; margin-top: 4px; font-size: 11px; color: var(--muted); }
+/* Fixed columns rather than a free wrap. This surface has no TUI counterpart, so
+   nothing constrains it — and with `flex-wrap` over variable-length values, `◫`,
+   `⏱` and `pid` landed at a different x on every card, so comparing context or age
+   down a list of look-alike sessions (the whole job of this screen) became a
+   per-card read. Two rows of three, so the second row's numbers line up: model /
+   state / agents, then context / age / pid. `min-content` on the last column lets a
+   long model name take the space rather than wrapping the row. */
+.meta {
+  display: grid; grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 3px 14px; margin-top: 4px; font-size: 11px; color: var(--muted);
+}
+.meta > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta .k { color: var(--dim); }
 /* The subagent chip, emphasised against its neighbours because on a session that is
    `idle` with agents still running it is the only thing on the card explaining why.
@@ -211,7 +229,12 @@ main { overflow-y: auto; overscroll-behavior: contain; background: var(--canvas)
 /* Same two-selector reason as `.ag-run` above, and the same accent: an unsent draft
    is the reader's own business on a card that is otherwise all about the agent. */
 .meta .k.draft { color: var(--accent); }
-.empty { padding: 24px var(--card-pad-x); color: var(--dim); text-align: center; }
+/* An empty transcript is an INSTRUCTION, not a hint, so it takes the body colour and
+   the text column every other row starts at. Centred dim text was the only centred
+   text in the app, and the one row that has to be read on a session with nothing
+   else on screen was also its faintest. */
+.empty { padding: var(--block-gap) var(--card-pad-x); color: var(--fg); }
+.empty .card-cwd { color: var(--sl-path); }
 
 /* status dot — the TUI's ● run-state marker (`status.enabled`), drawn as the
    glyph itself rather than a CSS circle so nothing on the page is round. */
@@ -219,6 +242,15 @@ main { overflow-y: auto; overscroll-behavior: contain; background: var(--canvas)
 .dot.run { color: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
 .dot.ask { color: var(--warning); animation: pulse 1s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+/* Two infinite animations run on this page — this dot and the working line's
+   spinner. Both mean "still live", and both are decoration over a fact the row
+   already states in words, so a reader who has asked the OS to stop moving things
+   loses nothing by holding them still. The spinner's frame ticks in JS, so it also
+   checks this query; the dot is pure CSS and stops here. */
+@media (prefers-reduced-motion: reduce) {
+  .dot.run, .dot.ask { animation: none; }
+}
 
 /* context usage — the status line's `◫ 22.1%/984K`, verbatim. It used to be a
    rounded progress pill, which is the one shape the TUI never draws; the
@@ -234,9 +266,14 @@ main { overflow-y: auto; overscroll-behavior: contain; background: var(--canvas)
 pre.tbl {
   margin: 8px 0; padding: 0; overflow-x: auto; overscroll-behavior-x: contain;
   background: none; border: 0; border-radius: 0;
-  font: inherit; line-height: 1.35; color: var(--muted); white-space: pre;
+  /* The BORDERS are the muted tier — the grid is chrome — and the cells are body
+     text, which is what they are: a table is somewhere the agent put an answer, and
+     the numbers in it were rendering at the same contrast as the box drawing around
+     them. `.tbl-rule` carries the glyphs; everything else inherits. */
+  font: inherit; line-height: 1.35; color: var(--fg); white-space: pre;
   -webkit-overflow-scrolling: touch;
 }
+.tbl-rule { color: var(--muted); }
 /* The box-drawn grid only lines up if every glyph shares one advance width, and
    the UA stylesheet gives <code> its own `monospace` family — a different font
    from the body stack, which shears the right border wherever a cell contains
@@ -335,16 +372,20 @@ pre.tbl code { padding: 0; background: none; color: var(--code); }
    status glyph and the text colour, exactly as `tool-execution.ts` documents.
 
    The whole card is the hit zone ("the fill is what the pointer sees, so the fill
-   is the target"), so it is a <button>: one tap toggles collapsed/expanded. The
-   press lifts it to `--element`, which is the same rung the terminal's hover uses
-   — a phone has no hover, so the press is where that feedback has to land. */
+   is the target"), so it is a <button>: one tap toggles collapsed/expanded.
+
+   The press goes one rung PAST the terminal's hover (`--overlay`, not `--element`)
+   and does it with no transition. A mouse hover is a sustained state that a 1.1:1
+   fill change can afford to announce gently; a tap is ~100ms, and behind a 140ms
+   ease the fill never reached its target before the finger left. Release keeps the
+   ease, so the card settles rather than snapping. */
 .tool {
   display: block; width: 100%; text-align: left;
   padding: var(--card-pad-y) var(--card-pad-x);
   background: var(--panel); color: var(--fg);
   transition: background .14s ease;
 }
-.tool:active { background: var(--element); }
+.tool:active { background: var(--overlay); transition: none; }
 /* A card that hides nothing is inert in the TUI: no hover fill, no pointer
    cursor, and a click does nothing rather than toggling invisibly. */
 .tool:not(.more) { cursor: default; }
@@ -358,30 +399,60 @@ pre.tbl code { padding: 0; background: none; color: var(--code); }
    three-row block, which is most of a phone screen spent on a call that has
    already finished — the opposite of what collapsing is for. Expanding releases
    the clamp, so the full command is one tap away. */
+/* Three flex children, and the split is what keeps the badge on screen: `.tool-id`
+   is the only elastic one, so the identity gives up columns first and the trailing
+   metadata — the `⟦+N/-M⟧` change badge, the expand hint — never does. Inside one
+   span the badge was the FIRST thing an ellipsis ate, which made the row an edit
+   card with no line counts on every phone-width screen. */
 .tool-head { display: flex; gap: 1ch; align-items: baseline; }
 .tool-id { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool[aria-expanded="true"] .tool-id { overflow-wrap: anywhere; white-space: normal; }
 .tool-head .sigil { color: var(--accent); }
 .tool-head .title { color: var(--accent); }
-.tool-head .arg { color: var(--muted); }
+/* The argument is the payload, not a hint: it is the path or the command, and a
+   phone shows a fifth of the characters a terminal row does. `muted` is the TUI's
+   colour for it, and on this surface it put the one identifying string in the row
+   at the same contrast as the decoration around it. */
+.tool-head .arg { color: var(--fg); }
 /* The language icon `getLangIcon` puts in front of a write/edit path, and the
    accent path itself. */
 .tool-head .lang { color: var(--muted); }
 .tool-head .path { color: var(--accent); }
 /* `formatChangeStatsSuffix`: ` ⟦+N/-M⟧`, brackets and the slash in `dim`, the
-   counts in the diff palette. */
-.tool-head .stat-add { color: var(--diff-add); }
-.tool-head .stat-del { color: var(--diff-del); }
-.tool-head .bracket { color: var(--dim); }
-/* `formatExpandHint` — `⟦click to expand⟧` in `interactiveHint` (the `dim` role),
-   flush right with at least one space before it, and never dropped: nothing else
-   on a collapsed card says that it opens.
+   counts in the diff palette. `flex: none` for the reason above. */
+.tool-stats { flex: none; }
+.tool-stats .stat-add { color: var(--diff-add); }
+.tool-stats .stat-del { color: var(--diff-del); }
+.tool-stats .bracket { color: var(--dim); }
+/* `formatExpandHint` in `interactiveHint` (the `dim` role), flush right with at
+   least one space before it, and never dropped: nothing else on a collapsed card
+   says that it opens.
 
-   `⟦collapse⟧` on an expanded card is this surface's one addition to that
-   vocabulary. The terminal can drop the hint once open because the hover fill
-   still marks the card as live; a touch screen has no hover, so without a label
-   an expanded card is a dead end. */
+   The WORDING is this surface's own, and it has to be. `formatExpandHint` already
+   keys its text to the surface it draws on (`⌥↩: Expand` in append mode,
+   `click to expand` in the viewport), and neither fits: "click" is not the gesture
+   a phone has, and at 390px the viewport's phrasing measured 16.4 of the row's
+   44.6 columns — 39% of the line spent on boilerplate, leaving 19 characters of a
+   131-character command, which is not enough to tell two adjacent cards apart.
+   `⟦tap⟧` is 5 columns and says the same thing in the right verb.
+
+   `⟦collapse⟧` on an expanded card is the one addition to the vocabulary. The
+   terminal can drop the hint once open because the hover fill still marks the card
+   as live; a touch screen has no hover, so without a label an expanded card is a
+   dead end. */
 .tool-hint { flex: none; color: var(--dim); }
+/* While a card is open its head is the ONLY collapse target, and it stays on
+   screen. A mouse click cannot be confused with a scroll; a touch CAN — a flick
+   that fails the movement threshold is a tap — and collapsing a 200-row card drops
+   the reader thousands of pixels from where they were with no undo. Sticky because
+   the label and the target have to coincide: `⟦collapse⟧` at the top of a body four
+   screens tall is a control the reader cannot reach without scrolling back. */
+.tool[aria-expanded="true"] { cursor: default; }
+.tool[aria-expanded="true"]:active { background: var(--panel); }
+.tool[aria-expanded="true"] .tool-head {
+  position: sticky; top: 0; z-index: 1; cursor: pointer;
+  background: var(--panel); padding: var(--card-pad-y) 0; margin-top: calc(-1 * var(--card-pad-y));
+}
 /* The output body, flush under the identity row at the same column — the
    fullscreen viewport zeroes the block's own padding because the card supplies
    the whole inset, and it draws no `├─ Output ─┤` divider, just a blank row.
@@ -419,12 +490,18 @@ pre.tbl code { padding: 0; background: none; color: var(--code); }
    with roman numerals, each with its own ` · done/total`. The active phase is bold
    accent; the others are muted. Task rows carry `☐`/`☑` and the status palette. */
 .todos { margin: 0 0 var(--block-gap); padding-left: var(--card-pad-x); }
-/* Same min-height as the subagents header, which is a button: a 14px difference
-   between two adjacent panel headers reads as inconsistent spacing, not affordance.
+/* A control, exactly as `.agents-h` below is, and for the same reason: the collapsed
+   panel is a summary and the reader needs a way to ask for the whole plan. Same
+   32px, same layout, same caret placement — two adjacent panel headers that behave
+   the same have to look the same.
    `gap` rather than trusting the count's own leading space: flex blockifies its
    items, which trims leading whitespace, and the header rendered `Todos· 2/5`. */
-.todos-h { display: flex; align-items: center; gap: 6px; min-height: 32px; font-weight: 650; color: var(--accent); }
+.todos-h {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 32px;
+  text-align: left; font-weight: 650; color: var(--accent);
+}
 .todos-h .count { color: var(--dim); font-weight: 400; }
+.todos-h .caret { color: var(--dim); font-weight: 400; }
 .phase { color: var(--muted); overflow-wrap: anywhere; }
 .phase.now { color: var(--accent); font-weight: 650; }
 .phase .count { color: var(--dim); font-weight: 400; }
@@ -503,28 +580,46 @@ pre.tbl code { padding: 0; background: none; color: var(--code); }
    An approval is an overlay in the terminal, so it takes the overlay rung — the
    one surface above a card — instead of a warning-coloured border. The fullscreen
    viewport paints overlays with `overlayBg` and drops their rules entirely
-   (`overlay-box.ts` returns blank filled rows where it used to draw `╭──╮`). */
+   (`overlay-box.ts` returns blank filled rows where it used to draw `╭──╮`).
+
+   It is STICKY to the bottom of the scroll area, which is where the terminal pins
+   its overlay (`bottom-center`). Sitting at the top of the transcript, the further
+   into a session the further up the one blocking control lived: `scrollIntoView`
+   caught it on arrival, and the next repaint on a bottom-parked view took it away
+   again. An approval the reader has to go find is an agent waiting on a user who is
+   waiting on the agent. */
 #ask {
+  position: sticky; bottom: 0; z-index: 2;
   margin: 0 0 var(--block-gap); padding: var(--card-pad-y) var(--card-pad-x);
   background: var(--overlay);
 }
 /* This is the highest-stakes sentence in the app, in the `warning` role the TUI
    uses for a pending approval. */
 #ask .q { color: var(--warning); font-weight: 650; margin-bottom: 8px; }
-/* Same 44px floor as `.btn`: these authorise a tool call, and a mis-tap here —
-   "yes, and don't ask again" is one row from "no" — is not recoverable the way a
-   mis-tapped stop is. A row in a TUI select list is a fill, not a box: at rest it
-   is the surface it sits on, and the hovered/selected row lifts one rung. */
+/* Same 44px floor as `.btn`: these authorise a tool call, and a mis-tap here is not
+   recoverable the way a mis-tapped stop is.
+
+   A row in a TUI select list is a fill at rest and lifts one rung when selected or
+   hovered — but a terminal ALWAYS has exactly one row selected, and a touch screen
+   never does. Painting these on the panel they sit in left four sentences at 1.00:1
+   against their container with no affordance at all, and `❯` (`nav.cursor`) on every
+   row says "four selected rows" in omp's own vocabulary. So: the inset rung, which
+   is the "field in an overlay" idiom the new-session form already uses, pressing UP
+   to `--element` (on the overlay, `--element` is one rung toward the canvas, so the
+   old press made a light-theme option lighten while every other press darkens), and
+   no cursor glyph. */
 #ask .opt {
-  display: flex; align-items: center; gap: 6px; min-height: 44px; width: 100%;
+  display: flex; align-items: center; min-height: 44px; width: 100%;
   text-align: left; padding: 6px 1ch; margin-top: 2px;
-  background: var(--overlay);
+  background: var(--canvas); color: var(--fg);
 }
-#ask .opt:hover, #ask .opt:active { background: var(--element); }
-/* `nav.cursor`, the glyph omp puts in front of a selectable row. No trailing space
-   in it: a flex item trims it, which collided the chevron with the label. The gap
-   above does that job instead. */
-#ask .opt::before { content: "❯"; color: var(--accent); }
+#ask .opt:active { background: var(--element); }
+/* An irreversible option — "and don't ask again" writes a permanent allowlist entry
+   — 2px below the reversible one it looks like is a mis-tap waiting to happen. A
+   full row of separation and the warning role say which is which; 44px of height
+   protects a control from a fat finger, not from a neighbour that means something
+   much bigger. */
+#ask .opt.always { margin-top: var(--line-height); color: var(--warning); }
 .ask-err { margin-top: 8px; font-size: 11px; color: var(--error); }
 
 /* ── new-session form ─────────────────────────────────────────────────────
@@ -632,14 +727,20 @@ footer .wrap {
 .field {
   flex: 1; min-width: 0; display: flex; min-height: 44px; padding: 10px 1ch;
   background: none; border: 0; border-radius: 0; cursor: text;
-  transition: background .14s ease;
 }
 .field:focus-within { background: var(--element); }
 /* A steer the portal could not deliver: the text is put back in the field, the line
    at the end of the transcript names the failure, and the fill says which control it
    belongs to. A tint rather than a rule, in the spirit of `toolErrorBg` — and it
    has to survive focus, because tapping `send` on iOS does not blur the textarea,
-   so the field is still focused when the failure paints. */
+   so the field is still focused when the failure paints.
+
+   NO transition on this element, and that is load-bearing rather than a style
+   preference: with `transition: background .14s` here, WebKit latched the START of an
+   interpolation whose target is a `color-mix()` and left the computed background at
+   `transparent` indefinitely on the FIRST failure in a page's life — measured stuck
+   at 2s in Safari 26.2. The first dropped steer over a flaky tunnel is exactly the
+   one that has to paint. An instant fill is also the better focus indicator. */
 .field.err, .field.err:focus-within { background: color-mix(in srgb, var(--error) 18%, var(--panel)); }
 #msg {
   flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--fg);
@@ -857,7 +958,10 @@ function renderTable(header, aligns, rows, inline) {
     const left = align === "right" ? slack : align === "center" ? Math.floor(slack / 2) : 0;
     return " ".repeat(left) + inline(text) + " ".repeat(slack - left);
   };
-  const line = (l, mid, r) => l + widths.map(w => "─".repeat(w + 2)).join(mid) + r;
+  // The grid glyphs, wrapped so they can take the muted tier while the cells stay
+  // body text — see `pre.tbl`. A whole row of box drawing is one span.
+  const line = (l, mid, r) =>
+    `<span class="tbl-rule">${l}${widths.map(w => "─".repeat(w + 2)).join(mid)}${r}</span>`;
   const body = (cells, bold) => {
     const wrapped = cells.map((cell, c) => wrapCell(cell, widths[c]));
     const height = Math.max(...wrapped.map(w => w.length));
@@ -871,7 +975,8 @@ function renderTable(header, aligns, rows, inline) {
         const rendered = pad(cell, widths[c], aligns[c]);
         return bold ? `<b>${rendered}</b>` : rendered;
       });
-      out.push(`│ ${parts.join(" │ ")} │`);
+      const bar = `<span class="tbl-rule">│</span>`;
+      out.push(`${bar} ${parts.join(` ${bar} `)} ${bar}`);
     }
     return out;
   };
@@ -1007,13 +1112,23 @@ const TOOL_TITLE = {
    Anything with a single obvious string field stays in the table. */
 const TOOL_ARG = { read: "path", write: "path", bash: "command", glob: "path", grep: "pattern", todo: "op", hub: "op", web_search: "query", eval: "title" };
 /* Section headers of a hashline / apply_patch payload, which is where those two
-   modes name the files they touch. */
+   modes name the files they touch. Two different grammars: hashline writes
+   `[path#TAG]`, and the apply_patch envelope writes `*** Update File: path`
+   (`edit/apply-patch/parser.ts`). `apply_patch` is a real wire tool name — the
+   custom-tool spelling GPT-5-class providers get — and its schema is `{ input }`
+   with no `path` at all, so without the second pattern every patch card on such a
+   session rendered a bare `Patch` with no path, no language icon and no change
+   badge: the exact unidentifiable row this identity code exists to remove. */
 const HASHLINE_HEADER = /^\[([^\]\n]+?)#[0-9A-Fa-f]{4}\]$/gm;
+const APPLY_PATCH_HEADER = /^\*\*\* (?:Add|Delete|Update) File: *(.+)$/gm;
 function editPathsOf(input) {
   if (typeof input !== "string") return [];
   const paths = [];
-  for (const match of input.matchAll(HASHLINE_HEADER)) {
-    if (!paths.includes(match[1])) paths.push(match[1]);
+  for (const re of [HASHLINE_HEADER, APPLY_PATCH_HEADER]) {
+    for (const match of input.matchAll(re)) {
+      const path = match[1].trim();
+      if (path && !paths.includes(path)) paths.push(path);
+    }
   }
   return paths;
 }
@@ -1072,10 +1187,31 @@ function statsSuffix(added, removed) {
   return ` <span class="bracket">⟦</span>${parts.join(slash)}<span class="bracket">⟧</span>`;
 }
 
-/* The card's identity row as HTML: sigil, title, and the description the tool is
-   recognised by. Write and edit carry a language icon and a change badge the way
-   their TUI headers do; read carries the `:start-end` selector its path spec or
-   its `offset`/`limit` args imply, in the same accent as the path. */
+/* `clampPathLength` (`segments.ts`): a path over budget keeps its TAIL and takes
+   the ellipsis at the front. The filename and its directory are what identify a
+   card; the repo root above them is the same on every row of a session and is
+   already in the status line. A tail-clamped `~/oss/oh-my-pi/packages/coding-ag…`
+   identifies nothing. 34 is the widest that leaves room for the sigil, the title
+   and the badge on a 390px screen. */
+const PATH_MAX = 34;
+const clampPath = value => (value.length <= PATH_MAX ? value : `…${value.slice(-(PATH_MAX - 1))}`);
+
+/* A `cd <dir> && real command` prefix, which agents write constantly and which is
+   pure noise on this surface: the cwd is in the status line one row below, and at
+   19 visible characters the prefix WAS the whole visible row — five adjacent cards
+   all reading `❯ Bash: cd ~/hyperplane-wt-…` and telling each other apart nowhere.
+   Only a leading `cd`, and only up to the first `&&`, so a `cd` in the middle of a
+   pipeline is left alone. */
+const stripLeadingCd = value => value.replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&|;]+)\s*&&\s*/, "");
+
+/* The card's identity row, split into the elastic part and the fixed trailing
+   badge: `{ id, stats }` rather than one string, because inside a single
+   ellipsised span the badge is the first thing lost and an edit card at phone
+   width never showed its line counts at all.
+
+   Write and edit carry a language icon and a change badge the way their TUI
+   headers do; read carries the `:start-end` selector its path spec or its
+   `offset`/`limit` args imply, in the same accent as the path. */
 function toolIdentity(item) {
   const args = item.args ?? {};
   const name = item.name;
@@ -1087,7 +1223,7 @@ function toolIdentity(item) {
   // Read is the one row with no colon: `read-tool-group.ts` builds it as
   // `● Read <path>`, and the grouped rows are what a transcript mostly shows.
   if (name === "read") {
-    if (!arg) return head;
+    if (!arg) return { id: head, stats: "" };
     // A `path:sel` spec already carries its range; `offset`/`limit` are the other
     // way to ask for one, and the renderer prints them in the same `:a-b` form.
     let path = shortenPath(arg);
@@ -1096,9 +1232,17 @@ function toolIdentity(item) {
       const end = Number.isFinite(args.limit) ? start + args.limit - 1 : "";
       path += `:${start}${end === "" ? "" : `-${end}`}`;
     }
-    return `${head} <span class="path">${esc(path)}</span>`;
+    // The range is the only thing distinguishing two reads of one file, so it goes
+    // in the fixed half where an ellipsis cannot reach it.
+    const cut = path.search(/:[\d,\-]+$/);
+    const sel = cut < 0 ? "" : path.slice(cut);
+    const body = cut < 0 ? path : path.slice(0, cut);
+    return {
+      id: `${head} <span class="path">${esc(clampPath(body))}</span>`,
+      stats: sel ? `<span class="path">${esc(sel)}</span>` : "",
+    };
   }
-  if (!arg) return head;
+  if (!arg) return { id: head, stats: "" };
   if (name === "write" || name === "edit" || name === "ast_edit" || name === "apply_patch") {
     // The lang icon keys off the FIRST path, which is the one the header names; a
     // multi-file patch carries its own ` +N more` tail from `toolArgOf`.
@@ -1112,9 +1256,13 @@ function toolIdentity(item) {
       : name === "write" && typeof args.content === "string"
         ? statsSuffix(args.content.split("\n").length, 0)
         : "";
-    return `${head}: <span class="lang">${esc(icon)}</span> <span class="path">${esc(path)}</span>${stats}`;
+    return {
+      id: `${head}: <span class="lang">${esc(icon)}</span> <span class="path">${esc(clampPath(path))}</span>`,
+      stats,
+    };
   }
-  return `${head}: <span class="arg">${esc(arg)}</span>`;
+  const text = name === "bash" ? stripLeadingCd(arg) : arg;
+  return { id: `${head}: <span class="arg">${esc(text)}</span>`, stats: "" };
 }
 
 /* `checkbox.checked` / `checkbox.unchecked`. Every non-completed status shares the
@@ -1143,10 +1291,45 @@ function romanNumeral(oneBased) {
    stage", and the per-phase rows answer "how much of it"), then a `├─`/`└─` tree
    of roman-numbered phases with the active one in accent and the rest muted.
 
-   Every phase and every task is listed. The terminal caps both because it is
-   spending rows of a fixed screen directly above the composer; this panel is in a
-   scroll area, and a plan the reader has to scroll to see in full is better than
-   one that silently hides the phase they were looking for. */
+   COLLAPSED is the default, and it is the terminal's own policy, not a phone
+   invention: `#renderTodoList` draws a non-active phase as its header ALONE, caps
+   the stages after the active one at 4 (`subsequentStageCap`), and runs the active
+   phase's tasks through `selectCollapsedTodos(tasks, isMatched, 5)` — completed and
+   abandoned rows omitted, active work pulled to the head, following pending tasks
+   filling the remainder, and a `… N more` summary for the rest.
+
+   Rendering every phase and every task instead was not "more information on a
+   scrolling surface": measured on a 12-task plan it took 58% of a 390×844 viewport,
+   nine of its rows struck-through completions, sitting between the newest transcript
+   row and the composer — so every send scrolled past mostly-finished work. The full
+   plan is one tap away, exactly as `todoExpanded` is one key away in the TUI. */
+const TODO_ACTIVE_CAP = 5;
+const TODO_STAGE_CAP = 4;
+/* `null` until the reader decides, like `agentsOpen`: the default is the collapsed
+   policy, and a choice made in one session does not belong to the next. */
+let todosOpen = null;
+
+/* `selectCollapsedTodos` (src/tools/todo.ts). Open work only, unless nothing is
+   open — a settled phase still renders, which is the HUD's closed-todo persistence
+   — then the active row first and its successors after it, capped. */
+function selectCollapsedTodos(tasks, cap) {
+  const open = tasks.filter(t => t.status === "pending" || t.status === "in_progress" || t.status === "blocked");
+  const base = open.length > 0 ? open : tasks;
+  if (base.length <= cap) return { items: base, hidden: 0 };
+  // `isActiveTodo` without the subagent-description matching the TUI adds: the phone
+  // has no subagent descriptions to match against, so `in_progress` is the signal.
+  const active = base.filter(t => t.status === "in_progress");
+  if (active.length > cap) return { items: active.slice(0, cap), hidden: active.length - cap };
+  const firstActive = active.length > 0 ? base.indexOf(active[0]) : 0;
+  const fill = [];
+  for (let i = firstActive; i < base.length && active.length + fill.length < cap; i++) {
+    if (base[i].status === "in_progress") continue;
+    fill.push(base[i]);
+  }
+  const items = [...active, ...fill];
+  return { items, hidden: base.length - items.length };
+}
+
 function renderTodos(phases) {
   const kept = (phases ?? []).filter(p => p.tasks?.length);
   if (!kept.length) return "";
@@ -1154,8 +1337,14 @@ function renderTodos(phases) {
   // `#getActivePhase`: the first phase with work left, else the last one.
   const open = kept.findIndex(p => p.tasks.some(t => t.status === "pending" || t.status === "in_progress"));
   const activeIdx = open === -1 ? kept.length - 1 : open;
-  const rows = kept.map((p, pi) => {
-    const last = pi === kept.length - 1;
+  const expanded = todosOpen === true;
+  // The stage window: the active phase and the four after it, which is what keeps a
+  // 9-phase plan from pushing the composer off a phone screen. The header's `i/N`
+  // states what the window is hiding.
+  const shownPhases = expanded ? kept : kept.slice(activeIdx, activeIdx + 1 + TODO_STAGE_CAP);
+  const rows = shownPhases.map((p, si) => {
+    const pi = expanded ? si : activeIdx + si;
+    const last = si === shownPhases.length - 1;
     const pdone = p.tasks.filter(t => t.status === "completed").length;
     const label = multi ? `${romanNumeral(pi + 1)}. ${p.name}` : p.name;
     // `.tree-row`/`.tree-body` and the `aria-hidden` guide are shared with the
@@ -1166,21 +1355,43 @@ function renderTodos(phases) {
       `<div class="tree-row"><span class="guide" aria-hidden="true">${last ? "└─" : "├─"} </span>` +
       `<span class="tree-body phase${pi === activeIdx ? " now" : ""}">${esc(label)}` +
       `<span class="count"> · ${pdone}/${p.tasks.length}</span></span></div>`;
-    const tasks = p.tasks.map((t, ti) => {
-      const cls = TODO_CLASS[t.status] ?? "";
-      const glyph = TODO_GLYPH[t.status] ?? "☐";
+    // A non-active phase is its header alone while collapsed: its progress count is
+    // the answer, and its tasks are either finished or not started.
+    if (!expanded && pi !== activeIdx) return head;
+    const sel = expanded ? { items: p.tasks, hidden: 0 } : selectCollapsedTodos(p.tasks, TODO_ACTIVE_CAP);
+    const tasks = sel.items.map((t, ti) => {
+      // `hasOwn` for the same reason `AGENT_STATE` uses it below: a status of
+      // `toString` resolves through Object.prototype, and `??` does not catch a
+      // function, so the row printed a native-code string as its checkbox and as
+      // part of its class list.
+      const cls = Object.hasOwn(TODO_CLASS, t.status) ? TODO_CLASS[t.status] : "";
+      const glyph = Object.hasOwn(TODO_GLYPH, t.status) ? TODO_GLYPH[t.status] : "☐";
       const blocked = t.status === "blocked" ? " (blocked)" : "";
       // `getTreeContinuePrefix`: three spaces under a `└─`, `│  ` under a `├─`.
-      const branch = ti === p.tasks.length - 1 ? "└─" : "├─";
+      const lastTask = ti === sel.items.length - 1 && sel.hidden === 0;
+      const branch = lastTask ? "└─" : "├─";
       return (
         `<div class="tree-row"><span class="guide" aria-hidden="true">${last ? "   " : "│  "}${branch} </span>` +
-        `<span class="tree-body task ${cls}">${glyph} ${esc(t.content)}${blocked}</span></div>`
+        // `aria-hidden` on the glyph: a screen reader announced "ballot box with
+        // check" once per row, and the row's own class already carries the state.
+        `<span class="tree-body task ${cls}"><span aria-hidden="true">${glyph}</span> ` +
+        `${esc(t.content)}${blocked}</span></div>`
       );
     }).join("");
-    return head + tasks;
+    // `trailingSummary`, the row `renderTreeList` adds under a capped list.
+    const summary = sel.hidden > 0
+      ? `<div class="tree-row"><span class="guide" aria-hidden="true">${last ? "   " : "│  "}└─ </span>` +
+        `<span class="tree-body task">… ${sel.hidden} more todo${sel.hidden === 1 ? "" : "s"}</span></div>`
+      : "";
+    return head + tasks + summary;
   }).join("");
   const count = multi ? `<span class="count"> · ${activeIdx + 1}/${kept.length}</span>` : "";
-  return `<div class="todos"><div class="todos-h">Todos${count}</div>${rows}</div>`;
+  // The same disclosure button the subagents panel is, for the same reason: the
+  // collapsed form is a summary and the reader needs a way to ask for the rest.
+  return (
+    `<div class="todos"><button type="button" class="todos-h" id="todostoggle" aria-expanded="${expanded}">` +
+    `<span class="caret" aria-hidden="true">${expanded ? "▾" : "▸"}</span>Todos${count}</button>${rows}</div>`
+  );
 }
 
 /* ── status-line formatters ───────────────────────────────────────────────
@@ -1431,15 +1642,24 @@ let expandedTools = new Set();
    and one click brings the rest back". This surface follows that: nothing but the
    identity row until it is tapped. */
 const COLLAPSED_OUTPUT_ROWS = 0;
-/* Rows an EXPANDED card shows. The terminal caps its expanded view too
+/* Rows an EXPANDED card shows per page. The terminal caps its expanded view too
    (`PREVIEW_LIMITS.OUTPUT_EXPANDED` is 10) because it is spending rows of a fixed
    screen; a phone is scrolling, and a tap on a card is an explicit request to read
-   that call, so the cap here is generous rather than tight. It exists at all
+   that call, so the page here is generous rather than tight. It exists at all
    because a tool result is unbounded — a build log or a full-file read can be tens
    of thousands of lines, and pushing that through `innerHTML` on a phone is a
-   several-second freeze. The remainder is named with the terminal's own
-   `… N more lines` marker rather than silently dropped. */
+   several-second freeze.
+
+   The remainder is named with the terminal's own `… N more lines` marker, and here
+   that marker is a CONTROL: each tap adds another page. The terminal can leave it
+   inert because a laptop is one keystroke from the raw result; a phone is not, so an
+   inert marker made everything past row 200 unreachable from the only device the
+   reader has. */
 const EXPANDED_OUTPUT_ROWS = 200;
+/* Extra pages a card has been asked for, by tool call id. Same lifetime and same
+   reason as `expandedTools`: the transcript repaints wholesale, so a count that
+   lived in the DOM would reset on the next token. */
+let toolPages = new Map();
 
 function renderTranscript(items) {
   return items
@@ -1470,31 +1690,39 @@ function renderTranscript(items) {
       // "publishes a zone only to be copyable".
       const more = rows.length > COLLAPSED_OUTPUT_ROWS;
       /* `formatExpandHint` — never dropped while collapsed, because nothing else on
-         the card says that it opens. `⟦collapse⟧` when open is this surface's
-         addition: the terminal can drop the hint because its hover fill still marks
-         the card as live, and a touch screen has no hover. */
-      const hint = more
-        ? `<span class="tool-hint">${open ? "⟦collapse⟧" : "⟦click to expand⟧"}</span>`
-        : "";
-      const shown = open ? rows.slice(0, EXPANDED_OUTPUT_ROWS) : rows.slice(0, COLLAPSED_OUTPUT_ROWS);
+         the card says that it opens. `⟦tap⟧` rather than the viewport's
+         `⟦click to expand⟧`: that phrasing cost 16.4 of a 390px row's 44.6 columns
+         and named a gesture a phone does not have. `⟦collapse⟧` when open is this
+         surface's other addition — the terminal can drop the hint because its hover
+         fill still marks the card as live, and a touch screen has no hover. */
+      const hint = more ? `<span class="tool-hint">${open ? "⟦collapse⟧" : "⟦tap⟧"}</span>` : "";
+      const cap = EXPANDED_OUTPUT_ROWS * (1 + (toolPages.get(it.id) ?? 0));
+      const shown = open ? rows.slice(0, cap) : rows.slice(0, COLLAPSED_OUTPUT_ROWS);
       const hidden = rows.length - shown.length;
       // Spans, not divs, and blocked out in CSS: `<button>` takes phrasing content
       // only, and a div inside one costs text selection in Chrome — which on a card
       // whose whole point is a path and a command is the thing a reader wants most.
       const output = shown.length ? `<span class="tool-body">${esc(shown.join("\n"))}</span>` : "";
-      // `… N more lines`, the row the terminal leaves where it clipped a tail. Only
-      // an EXPANDED card can show it: a collapsed one draws no body at all, and a
-      // count of lines beside `⟦click to expand⟧` would state the same fact twice.
+      /* `… N more lines`, the row the terminal leaves where it clipped a tail, as a
+         control: `data-page` asks the delegated handler for another page. Only an
+         EXPANDED card can show it — a collapsed one draws no body at all, and a count
+         of lines beside `⟦tap⟧` would state the same fact twice.
+
+         A <span role="button"> rather than a nested <button>, which is invalid inside
+         the card's own button and gets flattened by the parser. */
       const rest = open && hidden > 0
-        ? `<span class="tool-more-lines">… ${hidden} more line${hidden === 1 ? "" : "s"}</span>`
+        ? `<span class="tool-more-lines" role="button" tabindex="0" data-page="${esc(it.id)}">` +
+          `… ${hidden} more line${hidden === 1 ? "" : "s"} · tap for ${Math.min(hidden, EXPANDED_OUTPUT_ROWS)}</span>`
         : "";
       // An inert card keeps its button element (so focus order and copy behave the
       // same on every card) but carries no `data-toggle`, so the delegated handler
       // ignores it — the TUI's `onZoneClick` returns false for exactly this case.
+      const { id, stats } = toolIdentity(it);
       return (
         `<div class="turn"><button type="button" class="tool${it.isError ? " err" : ""}${more ? " more" : ""}"` +
         `${more ? ` data-toggle="${esc(it.id)}" aria-expanded="${open}"` : ""}>` +
-        `<span class="tool-head"><span class="tool-id">${toolIdentity(it)}</span>${hint}</span>` +
+        `<span class="tool-head"><span class="tool-id">${id}</span>` +
+        `${stats ? `<span class="tool-stats">${stats}</span>` : ""}${hint}</span>` +
         `${output}${rest}</button></div>`
       );
     })
@@ -1525,6 +1753,26 @@ function paintTranscript(keepBottom) {
   if (keepBottom) main.scrollTop = main.scrollHeight;
 }
 
+/* Todos as last received, for the same reason `lastTranscript` exists: the panel's
+   own disclosure toggle has to repaint from it, and on a settled session the next
+   push may never come. */
+let lastTodos = null;
+
+function paintTodos() {
+  const atBottom = isAtBottom(60);
+  $("todos").innerHTML = renderTodos(lastTodos);
+  const toggle = $("todostoggle");
+  // Rebound on every paint because the panel's HTML is replaced wholesale. Unlike
+  // the subagents header this is safe: todos push on a tool result, not several times
+  // a second under a fan-out, so there is no focus to lose mid-interaction.
+  if (toggle) {
+    toggle.onclick = () => {
+      todosOpen = !(todosOpen === true);
+      paintTodos();
+    };
+  }
+  if (atBottom) main.scrollTop = main.scrollHeight;
+}
 let current = null, es = null;
 /* The history entry created when a card opens carries its provenance with it.
    Memory-only state is not enough: Forward and a reload restore the entry but
@@ -1544,7 +1792,12 @@ function tickSpinners() {
   const frame = SPINNER[spinTick++ % SPINNER.length];
   for (const n of nodes) n.textContent = frame;
 }
+/* The one animation this page drives from JS, so it checks the query the CSS branch
+   above checks: a reader who asked the OS to hold still gets the first braille frame
+   as a static glyph, and the working line still says what is running in words. */
+const reducedMotion = () => matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
 function ensureSpinner() {
+  if (reducedMotion()) return;
   if (!spinTimer && document.querySelector(".spin")) spinTimer = setInterval(tickSpinners, 80);
 }
 
@@ -1571,18 +1824,33 @@ function renderWorking(activity) {
 /* ── the composer's status line ───────────────────────────────────────────
    The TUI's own segments, in the TUI's own order, with `▶`/`◀` between them and
    `sep.dot` (" · ") inside the model segment. Left: `π ▶ ⬢ <model> · <thinking> ▶
-   <folder> <cwd>`. Right: `◀ 👥 N agents ◫ <pct>%/<window> ⏱ <age>`.
+   ▤ <cwd> ▶ ◫ <pct>%/<window>`. Right: `◀ ◈ N agents ⏱ <age>`.
 
-   Three knowing departures from `segments.ts`, each because the wire or the screen
-   is narrower than the terminal's own:
+   Segment PLACEMENT follows `presets.default`, which puts `context_pct` in the LEFT
+   group after `path` — not in the right group. That matters on this screen rather
+   than in a terminal: the left group survives, so a phone measured at 390px kept the
+   two facts that never change (the model name and the cwd) and dropped all four that
+   do. Context is the number a reader opens the phone to check.
+
+   Four knowing departures from `segments.ts`, each because the wire or the screen is
+   narrower than the terminal's own:
 
    - `time_spent` measures the union of the host's `agent_start`→`agent_end`
      windows. That number is not published, so this shows the session's age from
      its collab record — the same glyph over a different quantity, which is the one
-     thing in this row that is not the terminal's own number.
+     thing in this row that is not the terminal's own number. It is printed with
+     `ageOf`'s coarseness, not `formatDuration`'s: a seconds-precision `37m53s`
+     churned on every tick and disagreed with the same session's `37m` on its list
+     card, for a quantity nobody reads to the second.
    - `session_name` is omitted. It is the tail of the right group, which is the
      first thing the terminal pops when the bar does not fit, and this bar never
      fits a session title on a 390px screen. The header states it instead, in full.
+   - The folder and agent glyphs are geometric (`▤`/`▥`, `◈`), not `icon.folder`'s
+     `📁`/`🗑` or `👥`. Line 1963 states the rule this follows: an emoji breaks the
+     monospace grid every other glyph in this app keeps — one cell in a terminal,
+     1.6 cells of Apple Color Emoji with its own baseline in a browser — and it is
+     worst in the row that is always on screen. `🗑` beside a path also reads as a
+     delete affordance in a UI that has buttons.
    - `git`, `pr`, `mode` and `cost` have no wire fields at all and are simply
      absent, exactly as the TUI omits a segment whose `visible` is false.
 
@@ -1609,38 +1877,50 @@ const isScratchPath = value => /^(?:~\/tmp|\/tmp|\/var\/tmp|\/private\/tmp|\/pri
    whose name is the part that matters. */
 const STATUS_DROP_ORDER = ["time", "agents", "thinking", "context", "model"];
 
-function renderStatusLine() {
-  const bar = $("statusline");
-  if (current === null) { bar.innerHTML = ""; return; }
+/* The row's composition, split from the measuring loop below so it can be tested
+   without a layout: `dropped` in, the two segment arrays out. Reads the same
+   `open*` state the loop does — the split is about testability, not purity. */
+function statusSegments(dropped) {
   const level = THINKING_LABEL[openThinking];
   const cwd = openCwd ? shortenPath(openCwd) : "";
   const ctx = contextText(openContext);
-  const age = openStartedAt ? durationText(Date.now() - Date.parse(openStartedAt)) : "";
+  // `ageOf`'s coarseness, not `durationText`'s: see this section's own note.
+  const age = openStartedAt ? ageOf(openStartedAt) : "";
+  const left = [`<span class="pi">π</span>`];
+  if (openModel && !dropped.has("model")) {
+    left.push(
+      `<span class="model">⬢ ${esc(openModel)}` +
+        (level && !dropped.has("thinking") ? `<span class="sdot"> · ${esc(level)}</span>` : "") +
+        `</span>`,
+    );
+  }
+  if (cwd && !dropped.has("path")) {
+    // `▥` for a scratch root, `▤` otherwise — `icon.scratchFolder`'s distinction in
+    // the geometric vocabulary the rest of the row uses.
+    left.push(`<span class="path">${isScratchPath(cwd) ? "▥" : "▤"} ${esc(cwd)}</span>`);
+  }
+  // Context in the LEFT group, where `presets.default` puts `context_pct`.
+  if (ctx && !dropped.has("context")) {
+    left.push(`<span class="ctx-icon">◫ <span class="ctx ${contextClass(openContext)}">${esc(ctx)}</span></span>`);
+  }
+  const right = [];
+  if (openAgents > 0 && !dropped.has("agents")) {
+    right.push(`<span class="agents">◈ ${openAgents} agent${openAgents === 1 ? "" : "s"}</span>`);
+  }
+  if (age && !dropped.has("time")) right.push(`<span class="time">⏱ ${esc(age)}</span>`);
+  return { left, right };
+}
+
+function renderStatusLine() {
+  const bar = $("statusline");
+  if (current === null) { bar.innerHTML = ""; return; }
   // `dropped` is a set of segment keys this pass has given up on. Rebuilt from
   // scratch on every render so a rotated phone or a closed keyboard gets its
   // segments back rather than staying permanently trimmed to the narrowest width
   // the row was ever measured at.
   const dropped = new Set();
   const paint = () => {
-    const left = [`<span class="pi">π</span>`];
-    if (openModel && !dropped.has("model")) {
-      left.push(
-        `<span class="model">⬢ ${esc(openModel)}` +
-          (level && !dropped.has("thinking") ? `<span class="sdot"> · ${esc(level)}</span>` : "") +
-          `</span>`,
-      );
-    }
-    if (cwd && !dropped.has("path")) {
-      left.push(`<span class="path">${isScratchPath(cwd) ? "🗑" : "📁"} ${esc(cwd)}</span>`);
-    }
-    const right = [];
-    if (openAgents > 0 && !dropped.has("agents")) {
-      right.push(`<span class="agents">👥 ${openAgents} agent${openAgents === 1 ? "" : "s"}</span>`);
-    }
-    if (ctx && !dropped.has("context")) {
-      right.push(`<span class="ctx-icon">◫ <span class="ctx ${contextClass(openContext)}">${esc(ctx)}</span></span>`);
-    }
-    if (age && !dropped.has("time")) right.push(`<span class="time">⏱ ${esc(age)}</span>`);
+    const { left, right } = statusSegments(dropped);
     bar.innerHTML =
       `<span class="left">${left.join(`<span class="sep" aria-hidden="true">▶</span>`)}</span>` +
       (right.length
@@ -1793,6 +2073,10 @@ async function refresh() {
 /* Turn state for the open session, mirrored from the SSE frames so the header
    word, the turn control and the transcript marker all read the same truth. */
 let streaming = false, interrupted = false, openCwd = "";
+/* A pending approval. Its own flag rather than a derivation, because the host is
+   still `working` while it waits on one — the tool call has not returned — so the
+   header could not tell the two states apart from the activity frame alone. */
+let pendingAsk = false;
 /* The rest of what the composer's status line states, from the same frames. Held
    as flat variables rather than one object because each arrives on a different
    frame — `state` carries the model, the thinking level, the cwd and the context;
@@ -1818,8 +2102,15 @@ function renderHeader() {
   if (current === null) return;
   const dir = shortenPath(openCwd || "");
   const fallback = innerWidth <= 640 ? dir.split("/").pop() || String(current) : dir || String(current);
-  const state = streaming ? "working" : interrupted ? "stopped" : "idle";
+  /* `needs answer` outranks `working`, and that ordering is the point: while an
+     approval is pending the host's `working` flag is still true — it is inside the
+     tool call — so the header said "working" on a session that was blocked on the
+     reader. The list card already computes this word for the same state
+     (`needsAttention`), and the two views should not disagree about which session
+     wants something. */
+  const state = pendingAsk ? "needs answer" : streaming ? "working" : interrupted ? "stopped" : "idle";
   $("sub").textContent = `${openName || fallback} · ${state}`;
+  $("sub").classList.toggle("ask", pendingAsk);
 }
 
 /* The seam now lives in the transcript itself (a `stopped` item derived from the
@@ -1867,9 +2158,10 @@ function renderTurnControl(isStreaming, isInterrupted) {
    row with `stop` and `send`. That leaves it 153px of content on a 375px iPhone and
    168px on a 390px one, and the face advances 9.891px: 15 characters at 375px and
    16 at 390px, the narrower being the one that binds. The two rules that set the
-   budget are `#turn, #send`'s `min-width` and `.prompt`'s `font-size` — both moved in
-   this change, which is how copy measured at 390px ended up wrapping at 375px.
-   Change either and re-measure the strings against the widest that fits.
+   budget are `#turn, #send`'s `min-width` and `.field`'s horizontal padding (the
+   `.prompt` element that used to own the second half is gone — the field is a
+   textarea now and carries the chrome itself). Change either and re-measure the
+   strings against the widest that fits.
 
    Longer copy does not ellipsise: a textarea wraps it to a second line that the
    one-row field then hides, so the resting composer read `steer the` and nobody could
@@ -1925,7 +2217,16 @@ function open(pid) {
   // hashchange listener now routes through here) left both streams live, and the
   // old session's frames kept overwriting the view the URL and header claimed.
   es?.close(); es = null;
-  expandedTools = new Set();
+  // The array belongs to the session it was received for, exactly as in
+  // `closeSession()` — which documents why: the next session's first repaint would
+  // otherwise paint the previous session's transcript before its own frame arrived.
+  // A hash-driven switch reaches here without closing first, so the reset has to be
+  // on both paths and not just the one that goes back to the list.
+  lastTranscript = [];
+  expandedTools = new Set(); toolPages = new Map();
+  // Panel disclosure choices belong to the session they were made in, exactly as
+  // `agentsOpen` does: another plan has a different shape.
+  lastTodos = null; todosOpen = null; pendingAsk = false;
   // A collapse choice belongs to the session it was made in; another session's
   // fan-out is a different size and deserves the size-based default again.
   agentsOpen = null;
@@ -1993,10 +2294,12 @@ function open(pid) {
     lastTranscript = JSON.parse(e.data);
     paintTranscript(isAtBottom());
   });
+  /* Todos, and the panel's own state. Kept as `lastTodos` for the same reason the
+     transcript is: the toggle has to repaint from what was last received rather than
+     wait for the next push, which on a settled session may never come. */
   es.addEventListener("todos", e => {
-    const atBottom = isAtBottom(60);
-    $("todos").innerHTML = renderTodos(JSON.parse(e.data));
-    if (atBottom) main.scrollTop = main.scrollHeight;
+    lastTodos = JSON.parse(e.data);
+    paintTodos();
   });
   /* The panel is re-rendered on every push, and the expanded state therefore lives
      outside the DOM (`agentsOpen`) — the same reason `expandedTools` exists for tool
@@ -2076,16 +2379,27 @@ function open(pid) {
   };
 }
 
+/* An option that writes a permanent allowlist entry rather than answering once.
+   The TUI's own wording for these ("yes, and don't ask again", "always allow"), and
+   the phone gives them a row of separation and the warning role — see `#ask .opt`. */
+// Both spellings the TUI emits: "yes, and don't ask again" and "yes, and do not ask
+// again", plus "always allow".
+const isAlwaysOption = label => /\b(?:don'?t ask again|do not ask again|always)\b/i.test(label);
+
 function showAsk(req) {
   const box = $("ask");
   box.hidden = false;
-  // An approval renders above the transcript, which on a long session is off the
-  // top of the screen: the agent waits on the user while the user waits on the
-  // agent, with only the working line's disappearance as a hint.
-  box.scrollIntoView({ block: "center" });
+  // The panel is sticky to the bottom of the scroll area, so it cannot leave the
+  // screen while a question is pending and needs no scrolling to reach. The header
+  // says so too: `needs answer` is a distinct state from `working`, because the host
+  // is not working — it is blocked on this.
+  pendingAsk = true;
+  renderHeader();
   const opts = (req.options ?? []).map(o => (typeof o === "string" ? o : o.label));
   box.innerHTML = `<div class="q">${esc(req.title)}</div>` +
-    opts.map(o => `<button class="opt" data-v="${esc(o)}">${esc(o)}</button>`).join("");
+    opts
+      .map(o => `<button class="opt${isAlwaysOption(o) ? " always" : ""}" data-v="${esc(o)}">${esc(o)}</button>`)
+      .join("");
   for (const b of box.querySelectorAll("button")) {
     b.onclick = async () => {
       const res = await post(`/api/sessions/${current}/ui/${req.reqId}`, { value: b.dataset.v }).catch(() => null);
@@ -2093,6 +2407,8 @@ function showAsk(req) {
       // request leaves the agent waiting on an approval the phone believes it gave.
       if (res?.ok) {
         box.hidden = true;
+        pendingAsk = false;
+        renderHeader();
         return;
       }
       const failed = document.createElement("div");
@@ -2146,7 +2462,8 @@ function closeSession() {
   openStartedAt = ""; openName = "";
   // The array outlives the view otherwise, and the next session's first tap would
   // repaint the previous session's transcript before its own frame arrived.
-  lastTranscript = []; expandedTools = new Set();
+  lastTranscript = []; expandedTools = new Set(); toolPages = new Map();
+  lastTodos = null; todosOpen = null; pendingAsk = false;
   renderWorking(null);
   refresh();
 }
@@ -2157,14 +2474,33 @@ function closeSession() {
    is released on the same element — which is the same property the TUI's own hit
    zones have. */
 $("log").addEventListener("click", event => {
+  // The `… N more lines` control, checked first: it sits INSIDE the card, so the
+  // card's own toggle would otherwise swallow it and collapse the card the reader
+  // just asked to see more of.
+  const pager = event.target.closest?.("[data-page]");
+  if (pager) {
+    const id = pager.dataset.page;
+    toolPages.set(id, (toolPages.get(id) ?? 0) + 1);
+    paintTranscript(false);
+    return;
+  }
   const card = event.target.closest?.("[data-toggle]");
   if (!card) return;
   const id = card.dataset.toggle;
-  // A toggle, not a one-way door: expanding inserts thousands of pixels of raw
-  // output mid-transcript, and on a phone an accidental tap otherwise costs a lot
-  // of scrolling with no undo.
-  if (expandedTools.has(id)) expandedTools.delete(id);
-  else expandedTools.add(id);
+  /* While a card is OPEN only its head collapses it. On a touch screen the scroll
+     gesture starts as a touch on the content, and a flick that fails the movement
+     threshold is delivered as a click — which collapsed a 200-row card and dropped
+     the reader thousands of pixels from where they were reading, with no undo. The
+     head is sticky while open (see `.tool[aria-expanded="true"] .tool-head`), so the
+     target is always on screen and always the row carrying `⟦collapse⟧`. Closed, the
+     whole card stays the hit zone, exactly as in the terminal. */
+  if (expandedTools.has(id)) {
+    if (!event.target.closest?.(".tool-head")) return;
+    expandedTools.delete(id);
+    // Paging is a property of one reading session, not of the card: re-opening it
+    // later should start from one page again rather than re-inflating everything.
+    toolPages.delete(id);
+  } else expandedTools.add(id);
   // Never force the scroll: opening a card is a request to read THAT card, and
   // jumping to the newest line is the opposite of it.
   paintTranscript(false);

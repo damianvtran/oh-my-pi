@@ -351,28 +351,41 @@ switch needs `omp mobile restart`, the same lifetime as the port and the credent
 
 **Four flat surfaces, no borders, no rounded corners.** The fullscreen viewport
 derives a "surface ladder" from one theme key (`statusLineBg`), stepping every RGB
-channel by +10 per rung on a dark theme and −5 on a light one: canvas, panel,
-element, overlay. Those fills are the only thing that marks a boundary anywhere in
-the transcript — the terminal replaced every `╭──╮` with a filled row — so the page
-has no rule and no radius on it either, and the canvas-to-panel contrast is
-load-bearing rather than decorative. Geometry follows the same source: a 2-column
+channel by +10 per rung on a dark theme. The light theme steps −14 rather than the
+terminal's −5, the one deliberate numeric divergence: at −5 a light card measured
+1.049:1 against its canvas, below the 1.5:1 floor the theme module itself sets for
+"two surfaces read as two surfaces", and the phone is the one omp surface used in
+daylight, where auto-brightness compresses exactly that range. The fills are the
+only thing that marks a boundary anywhere in the transcript — the terminal replaced
+every `╭──╮` with a filled row — so the page has no rule and no radius on it either,
+and the rung separation is load-bearing rather than decorative. Geometry follows the same source: a 2-column
 viewport gutter, 2 columns of card inset, one filled row above and below a card's
 content, and exactly one unpainted canvas row between blocks.
 
 **A tool call is one row until you tap it.** A settled call in the fullscreen
 viewport collapses to the identity line `renderStatusLine` built for it — sigil,
-title, the argument it is recognised by — with `⟦click to expand⟧` flush right, and
-the whole card is the hit zone because "the fill is what the pointer sees, so the
-fill is the target". Write and edit carry the language icon and the `⟦+N/-M⟧` change
-badge their terminal headers carry; read carries its `:start-end` selector; an edit
-in hashline mode has its path recovered from the patch's own `[PATH#TAG]` header,
-because that mode's arguments are only `{ i, input }`. A card that hides nothing is
-inert, as it is in the terminal. Two touch-screen departures: an expanded card says
-`⟦collapse⟧` (the terminal can drop the hint because its hover fill still marks the
-card as live, and a phone has no hover), and the expanded body is capped at 200 rows
-rather than the terminal's 10 — a tap is an explicit request to read that call, but a
-tool result is unbounded and a build log through `innerHTML` is a several-second
-freeze.
+title, the argument it is recognised by — and the whole card is the hit zone because
+"the fill is what the pointer sees, so the fill is the target". Write and edit carry
+the language icon and the `⟦+N/-M⟧` change badge their terminal headers carry; read
+carries its `:start-end` selector; an edit in hashline or apply_patch mode has its
+path recovered from the payload's own markers (`[PATH#TAG]`, `*** Update File:`),
+because those modes' arguments are only `{ i, input }` / `{ input }`. The identity
+is the row's only elastic part: the badge and the hint are fixed siblings, so a
+long path clamps from the front (`…/entities/EnemyFactory.cpp`, the terminal's own
+`clampPathLength` idiom) and an ellipsis can never eat the line counts. A card that
+hides nothing is inert, as it is in the terminal.
+
+Touch-screen departures, all because a phone has no hover and no laptop to fall back
+to: the hint is `⟦tap⟧` rather than `⟦click to expand⟧` — the viewport's phrasing
+cost 16.4 of a 390px row's 44.6 columns and named a gesture the device does not
+have — a leading `cd <dir> &&` is stripped from a bash identity (the cwd is in the
+status line; at 19 visible characters the prefix *was* the visible row), an expanded
+card says `⟦collapse⟧` and collapses from its sticky head ONLY (a flick that fails
+the movement threshold is delivered as a click, which collapsed a 200-row card and
+dropped the reader thousands of pixels with no undo), and the expanded body pages
+200 rows per tap of its `… N more lines` marker rather than capping at the
+terminal's 10 — a tap is an explicit request to read that call, but a tool result
+is unbounded and a build log through `innerHTML` is a several-second freeze.
 
 **Reasoning is never drawn.** Not the thinking blocks in the transcript, not the
 live trace that used to sit under the working line. It is what `hideThinkingBlock`
@@ -381,16 +394,40 @@ where a paragraph of reasoning per turn buries the work. The items still cross t
 wire and are still projected; nothing renders them.
 
 **The status line is the composer's last row**, exactly where the fullscreen
-viewport puts it: `π ▶ ⬢ <model> · <thinking> ▶ <folder> <cwd>` on the left,
-`◀ 👥 N agents ◫ <pct>%/<window> ⏱ <age>` on the right, on the panel fill with no
-rule between the groups. Overflow is resolved by **dropping** segments in the
-terminal's own precedence — right group first, `path` preserved longest — rather than
-by squeezing them, because a squeezed row on a 390px screen was four ellipses naming
-nothing. Symbols are omp's `unicode` preset throughout, never `nerd`: a phone browser
-cannot be assumed to have a patched font. Two segments differ from `segments.ts`:
+viewport puts it, in `presets.default`'s order: `π ▶ ⬢ <model> · <thinking> ▶ ▤
+<cwd> ▶ ◫ <pct>%/<window>` on the left — `context_pct` is a LEFT segment in the
+default preset, and keeping it in the right group meant a 390px screen dropped the
+number a reader opens the phone to check — `◀ ◈ N agents ⏱ <age>` on the right.
+Overflow is resolved by **dropping** segments in the terminal's own precedence —
+`path` preserved longest — rather than by squeezing them, because a squeezed row was
+four ellipses naming nothing. Symbols are omp's `unicode` preset, never `nerd` (a
+phone browser cannot be assumed to have a patched font), and geometric rather than
+colour emoji (`▤`/`▥` for folder/scratch, `◈` for agents): an emoji is one cell in
+a terminal and 1.6 cells of Apple Color Emoji in a browser, and it breaks the
+monospace grid the rest of the row keeps. Two segments differ from `segments.ts`:
 `⏱` is the session's age rather than the host's active-agent milliseconds, which are
-not published, and the session name is omitted because it is the first segment the
-terminal pops and the header states it in full instead.
+not published — printed with the list card's coarseness, since a seconds-precision
+age churned on every tick and disagreed with the same session's card — and the
+session name is omitted because it is the first segment the terminal pops and the
+header states it in full instead.
+
+**The todos panel defaults to the terminal's collapsed policy.** A non-active phase
+is its header alone, the phase window starts at the active one and spans five stages
+(`subsequentStageCap`), and the active phase's tasks run `selectCollapsedTodos`'s
+own selection — completed and abandoned rows omitted, active work promoted to the
+head, five rows capped, a `… N more todos` summary — because rendering the whole
+plan took 58% of a 390×844 viewport above the composer on a 12-task plan. The header
+is a disclosure button like `Subagents`, and the full plan is one tap away, exactly
+as `todoExpanded` is one key away in the TUI.
+
+**An approval cannot leave the screen.** The ask panel is sticky to the bottom of
+the scroll area, where the terminal pins its overlay, and the header gains a fourth
+state, `needs answer` in the warning role — the host's `working` flag is still true
+while it waits on the reader, so the two states could not share a word. Options are
+fields on the canvas rung with no selection cursor (a terminal always has one row
+selected; a touch screen never does), and an option that writes a permanent
+allowlist entry — "and don't ask again" — is separated by a full row and marked in
+the warning role.
 
 Everything else already followed the terminal and still does: the spinner and its
 intent line come from the same `agent_start` / `tool_execution_start` /
@@ -401,9 +438,15 @@ calls stay structured cards instead of flattened text.
 
 One thing is knowingly inherited along with the palette: omp's theme tokens are
 tuned for a terminal, not measured against WCAG, so the `dim` role that carries the
-expand hint sits near 3.4:1 on the dark panel. Parity is the point here, and the
-hint is redundant with the card's own affordance; a portal-only override would make
-the phone and the terminal disagree about what `dim` means.
+expand hint and the tree guides sits near 3.4:1 on the dark panel. Parity is the
+point there — a portal-only override would make the phone and the terminal disagree
+about what `dim` means — but CONTENT does not ride that tier: the tool card's
+argument, table cells, the empty-state instruction and the header's state word all
+take the body or muted tier, because on a phone they are information, not
+decoration. Two more states follow the terminal's vocabulary: `prefers-reduced-motion`
+still both infinite animations (the spinner's tick and the status dot's pulse), and
+the session list's meta rows use fixed columns so context, age and pid align down a
+list of look-alike sessions.
 
 ### Session discovery
 
