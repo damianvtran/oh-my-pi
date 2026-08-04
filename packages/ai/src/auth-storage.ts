@@ -8,7 +8,10 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
-import { $env, $envExact, extractRetryHint, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { $env, $envExact, extractRetryHint, getAgentDbPath, getDbBusyTimeoutMs, logger } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
@@ -2821,6 +2824,22 @@ export class AuthStorage {
 		const preferred = this.#resolveActiveOAuthCredential(provider, sessionId);
 		const accountId = preferred?.accountId;
 		return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
+	}
+
+	/**
+	 * Row id of the credential this session is currently pinned to, or
+	 * `undefined` before the session has resolved one.
+	 *
+	 * Works for both credential types, which is what api-key providers need:
+	 * {@link getOAuthAccountIdentity} can only identify an OAuth row, so a
+	 * provider holding several API keys had no way to say which one is live.
+	 * Read-only — it never advances selection or refreshes anything.
+	 */
+	getActiveCredentialId(provider: string, sessionId?: string): number | undefined {
+		const sticky = this.#getSessionCredential(provider, sessionId);
+		if (!sticky) return undefined;
+		const stored = this.#getStoredCredentials(provider)[sticky.index];
+		return stored?.credential.type === sticky.type ? stored.id : undefined;
 	}
 
 	/**
@@ -6229,6 +6248,13 @@ export class AuthStorage {
 		const error = options?.error;
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+		// The provider usually states when the window reopens — as a Retry-After
+		// header folded into the message, or as prose ("The quota will reset at
+		// 07-27 09:25:00 UTC", which is all Alibaba's Token Plan gives). Without
+		// it the credential is blocked for the short default and re-probed long
+		// before it can succeed, burning one doomed request per key per minute
+		// while a multi-key pool is genuinely exhausted.
+		const retryAfterMs = extractRetryHint(undefined, message);
 		if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
@@ -6283,7 +6309,7 @@ export class AuthStorage {
 			provider,
 			providerKey,
 			sessionCredential.index,
-			Date.now() + AuthStorage.#defaultBackoffMs,
+			Date.now() + (retryAfterMs ?? AuthStorage.#defaultBackoffMs),
 		);
 
 		if (target && AIError.isInvalidatedOAuthTokenError(error)) {

@@ -12,6 +12,22 @@ const RETRY_DELAY_FIELD_PATTERN = /"retryDelay":\s*"([0-9.]+)(ms|s)"/i;
 const TRY_AGAIN_PATTERN = /try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
 // "Your limit will reset in 13 minutes" / "reset in 13 minutes" / "will reset in 2h"
 const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
+// Absolute reset instants. Alibaba's Token Plan states the wall-clock reset
+// rather than a delay ("The quota will reset at 07-27 09:25:00 UTC"), and its
+// windows run 5 hours to 7 days — without this the caller falls back to a
+// short default backoff and re-probes an exhausted key every minute.
+// Full form first: an explicit year removes all ambiguity.
+const RESET_AT_ABSOLUTE_PATTERN =
+	/reset(?:s|ting)?\s+(?:at|on)\s+(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?\s*(?:UTC|Z|\+00:?00)?/i;
+// Year-less form, as Alibaba actually sends it.
+const RESET_AT_SHORT_PATTERN =
+	/reset(?:s|ting)?\s+(?:at|on)\s+(\d{2})-(\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?\s*(?:UTC|Z)/i;
+/**
+ * Ceiling for an absolute reset instant. Guards against a misparse (or a
+ * wrongly-inferred year) turning into an effectively permanent block; the
+ * longest real window this covers is Token Plan's 7 days.
+ */
+const MAX_ABSOLUTE_RESET_MS = 31 * 24 * 60 * 60 * 1000;
 
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
@@ -29,6 +45,8 @@ const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s
  *  - `Please retry in 250ms` / `Please retry in 12s`
  *  - `"retryDelay": "34.074824224s"` (JSON error detail field)
  *  - `try again in 250ms` / `try again in 12s` / `try again in 5 min` / `try again in ~158 min`
+ *  - `reset at 2026-07-27 09:25:00 UTC` / `reset at 07-27 09:25:00 UTC`
+ *    (absolute instant; the year-less form resolves to the next occurrence)
  *
  * Returns `undefined` if no signal is found.
  */
@@ -98,6 +116,51 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 				if (unitMs !== undefined) return value * unitMs;
 			}
 		}
+	}
+	const absoluteMs = parseAbsoluteResetHint(body);
+	if (absoluteMs !== undefined) return absoluteMs;
+	return undefined;
+}
+
+/**
+ * Delay until an absolute reset instant stated in the body, or `undefined`.
+ *
+ * The year-less form is resolved to the nearest sensible occurrence: a date
+ * that has already passed is read as next year, which is what makes a
+ * December-to-January rollover work instead of returning a negative delay.
+ */
+function parseAbsoluteResetHint(body: string): number | undefined {
+	const nowMs = Date.now();
+	const full = RESET_AT_ABSOLUTE_PATTERN.exec(body);
+	if (full) {
+		const targetMs = Date.UTC(
+			Number(full[1]),
+			Number(full[2]) - 1,
+			Number(full[3]),
+			Number(full[4]),
+			Number(full[5]),
+			full[6] ? Number(full[6]) : 0,
+		);
+		const delta = targetMs - nowMs;
+		if (delta > 0 && delta <= MAX_ABSOLUTE_RESET_MS) return delta;
+		return undefined;
+	}
+
+	const short = RESET_AT_SHORT_PATTERN.exec(body);
+	if (!short) return undefined;
+	const month = Number(short[1]) - 1;
+	const day = Number(short[2]);
+	const hour = Number(short[3]);
+	const minute = Number(short[4]);
+	const second = short[5] ? Number(short[5]) : 0;
+	if (month < 0 || month > 11 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return undefined;
+	const currentYear = new Date(nowMs).getUTCFullYear();
+	for (const year of [currentYear, currentYear + 1]) {
+		const targetMs = Date.UTC(year, month, day, hour, minute, second);
+		// Reject a roll-over that Date.UTC normalised away (e.g. 02-31).
+		if (new Date(targetMs).getUTCMonth() !== month) return undefined;
+		const delta = targetMs - nowMs;
+		if (delta > 0 && delta <= MAX_ABSOLUTE_RESET_MS) return delta;
 	}
 	return undefined;
 }

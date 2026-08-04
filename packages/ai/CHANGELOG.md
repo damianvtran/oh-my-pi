@@ -158,14 +158,17 @@
 
 - Replaced `arktype` with `@oh-my-pi/omptype` for schema validation, delivering up to 100x faster schema construction and 60-100x faster validation while maintaining full compatibility with existing `type`/`Type` exports and the `isArkSchema` contract.
 
+### Added
+
+- Added `AuthStorage.getActiveCredentialId`, the row id a session is currently pinned to, for either credential type. `getOAuthAccountIdentity` can only name an OAuth row, so a provider holding several API keys had no way to report which one is live — the credential picker consequently marked every api-key row active.
+
 ### Fixed
 
 - Fixed OpenAI-Codex (ChatGPT OAuth) requests failing with an `Unsupported service_tier: auto` error on default or legacy sessions by omitting the implicit `auto` service tier on the wire.
 - Fixed an issue where Cursor `kimi-k3` sessions would break permanently when a same-model assistant turn was persisted without thinking blocks, replacing hard errors with graceful warnings.
 - Fixed OpenAI-Codex (ChatGPT OAuth) requests failing with `Unsupported service_tier: auto` on default/legacy sessions. `shouldSendServiceTier` no longer forwards `auto` on the wire — it is OpenAI's implicit default, so omitting `service_tier` is equivalent, and the Codex endpoint rejects an explicit `auto`. Explicit `default`/`flex`/`scale`/`priority` are unaffected ([#7517](https://github.com/can1357/oh-my-pi/issues/7517)).
-### Fixed
-
 - Fixed several signed-in QwenCloud Token Plan credentials losing their per-account usage history, and with it the signal usage-based ranking load balances on. A Token Plan credential is a JSON blob holding both the `sk-sp-` key and a session-lived console `Cookie`; the usage cache identity hashed the whole blob, so every routine cookie re-paste minted a fresh identity and orphaned that account's cached report and quota history. The identity now derives from the stable `sk-sp-` token, so re-pasting a cookie keeps one account's history intact while distinct keys stay distinct.
+- Fixed `rotateSessionCredential` blocking an exhausted credential for a flat 60-second default even when the provider stated when the window reopens. The retry hint is now extracted from the failure and used as the block duration on both the usage-limit and hard-auth paths. Previously a genuinely exhausted pool was re-probed every minute, spending one doomed request per key per cycle; a QwenCloud Token Plan key whose 5-hour window is spent now stands down for the stated reset instead.
 
 ## [17.2.6] - 2026-08-03
 

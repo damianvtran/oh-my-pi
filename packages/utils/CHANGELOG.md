@@ -79,6 +79,9 @@
 
 - Honor the current process `PATH` when caching executable lookups, preventing stale tool paths after environment reloads.
 - Parsed account-cap reset windows such as “Your limit will reset in 13 minutes” so credential backoff honors the provider's full reset duration.
+### Added
+
+- Added absolute reset-instant parsing to `extractRetryHint`, which previously only understood relative delays. Providers that state a wall-clock reopen time rather than a delay — QwenCloud Token Plan answers an exhausted window with "The quota will reset at 07-27 09:25:00 UTC" — now yield a usable hint. Both the explicit-year form and Alibaba's year-less `MM-DD HH:MM:SS UTC` are accepted; a year-less stamp resolves to its next occurrence so a December-to-January rollover still produces a positive delay, an impossible calendar date is rejected rather than silently normalised, and anything beyond 31 days is discarded so a misparse cannot become a near-permanent block. Relative hints in the same body still win.
 
 ## [17.2.6] - 2026-08-03
 

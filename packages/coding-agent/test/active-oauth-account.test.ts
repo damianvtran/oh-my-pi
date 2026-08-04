@@ -242,3 +242,52 @@ describe("toLogoutAccounts org scoping", () => {
 		]);
 	});
 });
+
+describe("toLogoutAccounts api-key rows", () => {
+	function keyRow(id: number, key: string, source?: string): StoredAuthCredential {
+		return {
+			id,
+			provider: "alibaba-token-plan",
+			credential: { type: "api_key", key, ...(source ? { source } : {}) },
+			disabledCause: null,
+		} as StoredAuthCredential;
+	}
+
+	test("masks each key to a distinguishable suffix instead of the row id", () => {
+		const accounts = toLogoutAccounts("alibaba-token-plan", [
+			keyRow(1, "sk-sp-HAAAAAAAAAAAAAAAAAAAAlpha"),
+			keyRow(2, "sk-sp-HBBBBBBBBBBBBBBBBBBBBeta"),
+		]);
+		expect(accounts.map(account => account.label).sort()).toEqual(["sk-sp-…Beta", "sk-sp-…lpha"]);
+	});
+
+	test("unwraps a JSON-enveloped credential so the key is masked, not the envelope", () => {
+		const key = JSON.stringify({
+			token: "sk-sp-HZZZZZZZZZZZZZZZZZZZGamma",
+			baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+		});
+		const [account] = toLogoutAccounts("alibaba-token-plan", [keyRow(3, key, "login")]);
+		expect(account?.label).toBe("sk-sp-…amma");
+		// The region has to show: two same-suffix keys in different regions are
+		// not interchangeable.
+		expect(account?.detail).toContain("cn-beijing");
+		expect(account?.detail).toContain("api key #3");
+		// The secret itself must never reach the picker.
+		expect(account?.label).not.toContain("ZZZZ");
+		expect(account?.detail).not.toContain("ZZZZ");
+	});
+
+	test("marks only the session's own key active", () => {
+		const rows = [keyRow(1, "sk-sp-one1111111111"), keyRow(2, "sk-sp-two2222222222"), keyRow(3, "sk-sp-three33333")];
+		const accounts = toLogoutAccounts("alibaba-token-plan", rows, { activeCredentialId: 2 });
+		expect(accounts.filter(account => account.active).map(account => account.credentialId)).toEqual([2]);
+	});
+
+	test("marks nothing active when the session has not pinned a credential yet", () => {
+		const accounts = toLogoutAccounts("alibaba-token-plan", [
+			keyRow(1, "sk-sp-one1111111111"),
+			keyRow(2, "sk-sp-two2222222222"),
+		]);
+		expect(accounts.some(account => account.active)).toBe(false);
+	});
+});
