@@ -46,6 +46,9 @@ function environment(overrides: Partial<CmuxResumeEnvironment> = {}): CmuxResume
 		// A restore re-runs this, so the guard keys on its basename; the file need
 		// not exist because the stub CLI never executes it.
 		executable: "/opt/omp/bin/omp",
+		// The common case for this fallback: no cmux omp integration installed, so
+		// the binder is the only thing that will tell cmux about the session.
+		hookExtensionInstalled: false,
 		...overrides,
 	};
 }
@@ -123,6 +126,18 @@ describe("CmuxResumeBinder", () => {
 		// restore strictly worse than leaving the surface unbound.
 		const cli = await writeStubCli("cmux-ok", 0);
 		const binder = new CmuxResumeBinder(environment({ cli, executable: "/opt/homebrew/bin/bun" }));
+
+		binder.register("session-a");
+		await binder.settled();
+		expect(await recorded()).toEqual([]);
+	});
+
+	it("stands down when cmux's own omp hooks own the binding", async () => {
+		// Both writers target the same surface, and cmux pins a `cli` binding to
+		// the manual approval policy. Racing the hook's auto binding down to manual
+		// is the one outcome worse than not binding at all.
+		const cli = await writeStubCli("cmux-ok", 0);
+		const binder = new CmuxResumeBinder(environment({ cli, hookExtensionInstalled: true }));
 
 		binder.register("session-a");
 		await binder.settled();
