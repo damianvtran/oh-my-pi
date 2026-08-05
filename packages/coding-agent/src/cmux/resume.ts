@@ -20,16 +20,60 @@
  * `/resume`, `/new`, `/fork` and `/tree` all move the process to a different
  * session, and a binding that points at the one you left is worse than none.
  *
+ * This is the FALLBACK path. cmux ships its own omp integration
+ * (`cmux hooks omp install`), and where that is installed it owns the binding
+ * instead — see {@link cmuxHookExtensionInstalled} for why its binding is the
+ * better one and why the two must not both write.
+ *
  * Best-effort throughout: a resume binding is a convenience for the next reboot,
  * never a reason to warn on someone's terminal or to slow a launch down. Every
  * failure is swallowed at debug level.
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
-import { logger, ptree } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, ptree } from "@oh-my-pi/pi-utils";
 
 /** The CLI round-trips over a Unix socket to the app; a hang means the app is wedged. */
 const CLI_TIMEOUT_MS = 10_000;
+
+/**
+ * The extension `cmux hooks omp install` writes into omp's extension directory.
+ * cmux upgrades this file in place and keys its own uninstall on the same path.
+ */
+const CMUX_HOOK_EXTENSION = "cmux-omp-session.ts";
+
+/**
+ * Whether cmux's own omp integration is installed and active.
+ *
+ * That extension reports session lifecycle to cmux, and cmux answers by
+ * publishing an `agent-hook` resume binding for the surface. That binding beats
+ * the one written below on both counts that matter:
+ *
+ *   - cmux re-runs an `agent-hook` binding unattended when it reopens, gated
+ *     only by the `terminal.autoResumeAgentSessions` setting. A `cli` binding is
+ *     silently pinned to the "manual" approval policy — no prompt is ever
+ *     offered for one — so the workspace comes back with a Resume button to
+ *     click, which is the whole problem this file exists to solve.
+ *   - Its hook-store entry is what stops cmux's own newest-session-file guessing
+ *     from mislabelling a surface when several sessions share a directory.
+ *
+ * Both writers target the same surface over the same call, so the last one to
+ * land wins and the outcome would otherwise be a race between an auto binding
+ * and a manual one. Stand down when the extension is there; keep binding when it
+ * is not, so an install without cmux's integration still comes back to its
+ * session.
+ *
+ * `CMUX_OMP_HOOKS_DISABLED=1` makes the installed extension inert (it is the
+ * extension's own kill switch), so honour it here too rather than standing down
+ * for a hook that will never fire. The directory is resolved through
+ * {@link getAgentDir} so a non-default profile — whose extensions cmux never
+ * installed into, and never loads — correctly reads as "not installed".
+ */
+function cmuxHookExtensionInstalled(): boolean {
+	if (process.env.CMUX_OMP_HOOKS_DISABLED === "1") return false;
+	return fs.existsSync(path.join(getAgentDir(), "extensions", CMUX_HOOK_EXTENSION));
+}
 
 /**
  * Everything the binder reads from the outside world, in one injectable place so
@@ -49,6 +93,11 @@ export interface CmuxResumeEnvironment {
 	cli: string;
 	/** The binary a restore should re-run; see {@link CmuxResumeBinder.register}. */
 	executable: string;
+	/**
+	 * Whether cmux's own omp hooks own this surface's binding already; see
+	 * {@link cmuxHookExtensionInstalled}. When true the binder writes nothing.
+	 */
+	hookExtensionInstalled: boolean;
 }
 
 export function readCmuxResumeEnvironment(): CmuxResumeEnvironment {
@@ -57,6 +106,7 @@ export function readCmuxResumeEnvironment(): CmuxResumeEnvironment {
 		surfaceId: process.env.CMUX_SURFACE_ID,
 		cli: bundled !== undefined && bundled.length > 0 ? bundled : "cmux",
 		executable: process.execPath,
+		hookExtensionInstalled: cmuxHookExtensionInstalled(),
 	};
 }
 
@@ -92,6 +142,9 @@ export class CmuxResumeBinder {
 	register(sessionId: string): void {
 		if (sessionId.length === 0) return;
 		if (this.#env.surfaceId === undefined || this.#env.surfaceId.length === 0) return;
+		// cmux's own integration publishes a strictly better binding for this same
+		// surface; a second writer here would race it down to a manual one.
+		if (this.#env.hookExtensionInstalled) return;
 		// Only a compiled omp binary can be re-run as `<exe> --session <id>`. Under
 		// `bun run src/main.ts` the executable is bun itself, and binding
 		// `bun --session <id>` over the workspace would replace a working shell
