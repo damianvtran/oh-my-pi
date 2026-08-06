@@ -53,6 +53,13 @@ export interface NewSessionOptions {
 	drop?: boolean;
 	/** Additional workspace directories to seed on the new session. */
 	additionalDirectories?: string[];
+	/**
+	 * Session id to adopt instead of minting a fresh one. Set only when an
+	 * outside party already knows this session by that id — a supervisor
+	 * restoring `omp --session <id>` whose lazily-persisted JSONL never reached
+	 * disk — so the restored process answers to the id already bound to it.
+	 */
+	sessionId?: string;
 }
 
 export interface SessionEntryBase {
