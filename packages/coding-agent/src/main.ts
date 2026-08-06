@@ -793,6 +793,20 @@ export async function createSessionManager(
 		}
 		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
 		if (!match) {
+			// A supervisor restoring `omp --session <id>` (cmux binds exactly that
+			// argv to a surface) can legitimately name a session that has no file:
+			// persistence is lazy, so a session that crashed before its first
+			// assistant turn published its id and wrote nothing. There is no
+			// transcript to restore, but the id is still the one the surface is
+			// bound to — adopt it and come back as an empty session rather than
+			// failing the launch and dropping the workspace to a bare shell.
+			// Restricted to the full-id form so a mistyped prefix, which no
+			// supervisor ever produces, still errors instead of silently opening a
+			// session under a junk name.
+			if (parsed.adoptSession && SESSION_ID_ARG_RE.test(sessionArg)) {
+				logger.debug("session: adopting unresolved --session id", { sessionId: sessionArg });
+				return SessionManager.createWithId(cwd, sessionArg, parsed.sessionDir);
+			}
 			throw new SessionResolutionError(
 				`Session "${sessionArg}" not found.`,
 				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",

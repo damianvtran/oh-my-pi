@@ -51,6 +51,17 @@ export interface Args {
 	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
+	/**
+	 * The session was named with `--session <id>` rather than `--resume`/`-r`.
+	 *
+	 * `--session` is the machine-restore contract (cmux's vault template for omp
+	 * is literally `{{executable}} --session {{sessionId}}`), so a miss there
+	 * means "the supervisor is restoring a session that never reached disk",
+	 * which resolves to adopting the id rather than failing the launch. `--resume`
+	 * stays strict so a mistyped prefix still errors instead of silently opening
+	 * an empty session. See `createSessionManager`.
+	 */
+	adoptSession?: boolean;
 	fromClaude?: boolean;
 	fromCodex?: boolean;
 	help?: boolean;

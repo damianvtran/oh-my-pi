@@ -1087,7 +1087,7 @@ export class SessionManager {
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
-		this.#sessionId = mintSessionId();
+		this.#sessionId = options?.sessionId ?? mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -2605,6 +2605,33 @@ export class SessionManager {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#resetToNewSession();
+		return manager;
+	}
+
+	/**
+	 * Create a new session that answers to an id someone else already holds.
+	 *
+	 * Session files are written lazily — nothing lands on disk until the session
+	 * has durable output — so an id published at startup (to cmux's resume
+	 * binding, say) names no file at all until the first assistant turn. A
+	 * restore of such an id has nothing to load, but the id itself is still the
+	 * one the supervisor knows the surface by, and minting a different one would
+	 * strand every binding pointing at the old one. Adopt it instead and stay
+	 * lazy: the session is identical to a fresh one except for its name.
+	 *
+	 * @param sessionId Id to adopt. Callers must validate it (see
+	 *   `SESSION_ID_ARG_RE` in `main.ts`) — an arbitrary string becomes the
+	 *   session's identity and part of its eventual filename.
+	 */
+	static createWithId(
+		cwd: string,
+		sessionId: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): SessionManager {
+		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const manager = new SessionManager(cwd, dir, true, storage);
+		manager.#resetToNewSession({ sessionId });
 		return manager;
 	}
 
