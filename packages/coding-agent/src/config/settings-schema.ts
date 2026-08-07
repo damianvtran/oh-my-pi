@@ -4749,7 +4749,7 @@ export const SETTINGS_SCHEMA = {
 	 */
 	"task.inheritSessionModel": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
