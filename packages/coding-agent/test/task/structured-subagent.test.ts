@@ -159,10 +159,15 @@ describe("structured subagent primitive", () => {
 		expect(policy.modelOverride).toEqual(["kimi-code/k3:high"]);
 		expect(policy.parentActiveModelPattern).toBe("kimi-code/k3:high");
 
-		// Flag off: the agent's role resolves as before.
-		const plain = session({ activeModel, modelRoles: { slow: "local/llama" } });
+		// Flag off (now explicit since the default flipped to on): the agent's role resolves as before.
+		const plain = session({ inheritSessionModel: false, activeModel, modelRoles: { slow: "local/llama" } });
 		const plainPolicy = await resolveEffectiveSubagentPolicy(request({ session: plain }));
 		expect(plainPolicy.modelOverride).toEqual(["local/llama"]);
+
+		// Default (flag unset) now inherits the session's live model, matching the flipped default.
+		const unset = session({ activeModel, modelRoles: { slow: "local/llama" } });
+		const unsetPolicy = await resolveEffectiveSubagentPolicy(request({ session: unset }));
+		expect(unsetPolicy.modelOverride).toEqual(["kimi-code/k3"]);
 
 		// Explicit per-spawn override still wins over inheritance.
 		const overridden = await resolveEffectiveSubagentPolicy(request({ session: inherited, model: "openai/gpt-4o" }));
