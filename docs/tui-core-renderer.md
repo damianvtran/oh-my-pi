@@ -20,6 +20,14 @@ app-layer file that is load-bearing for this contract is
 [`transcript-container.ts`](../packages/coding-agent/src/modes/components/transcript-container.ts),
 which implements the commit-boundary seam described below.
 
+> **Scope: `viewportMode: "append"` only.** Everything below — the commit
+> ledger, the seam, the emitters, the audit, and every invariant in §3 — exists
+> to protect native scrollback. In `viewportMode: "fullscreen"` the app owns
+> the alternate screen, none of that machinery runs, and there is no history to
+> protect, so these invariants are vacuous rather than merely relaxed. The
+> pointer, scroll, layout and selection contract for that mode is
+> [`tui-fullscreen.md`](./tui-fullscreen.md).
+
 ---
 
 ## 1. The one thing to understand first

@@ -4,7 +4,9 @@ import {
 	addKeyAliases,
 	canonicalKeyId,
 	Editor,
+	type EditorPanelSurface,
 	type EditorTheme,
+	type HitZoneSink,
 	type KeyId,
 	parseKey,
 	parseKittySequence,
@@ -13,6 +15,8 @@ import {
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
 import type { AppKeybinding } from "../../config/keybindings";
 import { isSettingsInitialized, settings } from "../../config/settings";
+import { isFullscreenViewport } from "../../tools/render-utils";
+import { copyToClipboard } from "../../utils/clipboard";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
 import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
@@ -39,7 +43,13 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
 	| "app.clipboard.copyPrompt"
+	| "app.session.parent"
+	| "app.session.sibling.next"
+	| "app.session.sibling.prev"
 >;
+
+/** Which way {@link CustomEditor.onSessionNavigate} should move the view. */
+export type SessionNavigationAction = "parent" | "sibling.next" | "sibling.prev";
 
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.interrupt": ["escape"],
@@ -61,6 +71,9 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.session.parent": ["alt+up"],
+	"app.session.sibling.next": ["alt+right"],
+	"app.session.sibling.prev": ["alt+left"],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -377,6 +390,28 @@ function isEditorTheme(value: unknown): value is EditorTheme {
 }
 
 /**
+ * The fullscreen composer surface: a lighter fill than the canvas with two
+ * columns of inset, matching the transcript cards above it so the prompt text
+ * shares their left edge. `theme` is read inside `fill` rather than captured so
+ * a `/theme` switch repaints against the new palette.
+ *
+ * The insets are equal. They were not while the status strip opened the panel:
+ * that row starts with a wide glyph, which made a symmetric inset read as
+ * heavier on the left. The strip now closes the panel instead, so the first
+ * thing on every row is ordinary text and the optical correction it needed
+ * would itself be the asymmetry.
+ *
+ * One blank row closes the panel under the status strip. A second is what the
+ * caret needed back when it could land on the last row; the strip is there now.
+ */
+const COMPOSER_PANEL: EditorPanelSurface = {
+	fill: (line, width) => theme.panelBg(line, width),
+	paddingLeft: 2,
+	paddingRight: 2,
+	paddingBottom: 1,
+};
+
+/**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
  */
 export class CustomEditor extends Editor {
@@ -414,6 +449,25 @@ export class CustomEditor extends Editor {
 	constructor(...args: readonly unknown[]) {
 		super(pickEditorTheme(args));
 		if (args[0] instanceof TUI) this.tui = args[0];
+		// Resolved per frame, not once: the viewport mode is a live setting that
+		// `toggleViewportMode` flips under a running composer. `theme` can be
+		// undefined when this module is loaded through a second module graph
+		// (issue #5366), and the box frame is the safe thing to fall back to.
+		this.setPanelSurface(() => (typeof theme !== "undefined" && isFullscreenViewport() ? COMPOSER_PANEL : undefined));
+		// Owning a pointer drag suppresses the engine's copy-on-release, so the
+		// composer puts its own selection on the clipboard the same way the
+		// transcript does. A host that wants a status toast reassigns this.
+		this.onCopy = text => void copyToClipboard(text);
+	}
+
+	/**
+	 * Append mode has no mouse reporting and no panel to click into, so the
+	 * composer publishes no pointer targets there and keeps its append-mode
+	 * rendering untouched.
+	 */
+	override publishHitZones(sink: HitZoneSink): void {
+		if (!isFullscreenViewport()) return;
+		super.publishHitZones(sink);
 	}
 
 	/** Clear the composer draft: optionally commit `historyText` to history, then
@@ -565,6 +619,13 @@ export class CustomEditor extends Editor {
 	onPasteTextRaw?: () => void;
 	/** Called when the configured dequeue shortcut is pressed. */
 	onDequeue?: () => void;
+	/**
+	 * Called when a session-navigation shortcut is pressed. Returns true when
+	 * the view consumed it. Alt+Up is shared with dequeue and Alt+Left/Right
+	 * with word motion, so the drill-down gets first refusal and declines
+	 * whenever the main session is on screen.
+	 */
+	onSessionNavigate?: (action: SessionNavigationAction) => boolean;
 	/** Called when the configured retry shortcut is pressed. */
 	onRetry?: () => void;
 	/** Called when Caps Lock is pressed. */
@@ -952,6 +1013,20 @@ export class CustomEditor extends Editor {
 			if (this.#matchesAction(canonical, "app.exit")) {
 				this.onExit?.();
 				return;
+			}
+
+			// Session navigation, checked ahead of dequeue and of the parent's word
+			// motion because it shares their chords. It declines unless a subagent
+			// view is open, so the shared keys keep their usual meaning otherwise.
+			if (this.onSessionNavigate) {
+				const navigation = this.#matchesAction(canonical, "app.session.parent")
+					? "parent"
+					: this.#matchesAction(canonical, "app.session.sibling.next")
+						? "sibling.next"
+						: this.#matchesAction(canonical, "app.session.sibling.prev")
+							? "sibling.prev"
+							: undefined;
+				if (navigation && this.onSessionNavigate(navigation)) return;
 			}
 
 			// Intercept configured dequeue shortcut (restore queued message to editor)

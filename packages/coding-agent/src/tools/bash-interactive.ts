@@ -14,6 +14,7 @@ import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type * as XtermModule from "@oh-my-pi/pi-utils/vterm";
 import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
 import { Settings } from "../config/settings";
+import { BlockCard, CARD_PADDING_X } from "../modes/components/collapsible-block";
 import type { Theme } from "../modes/theme/theme";
 import { OutputSink, type OutputSummary } from "../session/streaming-output";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
@@ -122,6 +123,7 @@ class BashInteractiveOverlayComponent implements Component {
 	#writeOffset = 0;
 	#flushResolvers: Array<() => void> = [];
 	#writing = false;
+	readonly #card = new BlockCard();
 
 	constructor(
 		private readonly command: string,
@@ -259,7 +261,7 @@ class BashInteractiveOverlayComponent implements Component {
 	}
 	render(width: number): readonly string[] {
 		const safeWidth = Math.max(20, width);
-		const innerWidth = Math.max(1, safeWidth - 2);
+		const innerWidth = Math.max(1, this.#card.active ? safeWidth - 2 * CARD_PADDING_X : safeWidth - 2);
 		const maxOverlayRows = Math.max(5, Math.floor(this.getTerminalRows() * 0.8));
 		const chromeRows = 4;
 		const maxContentRows = Math.max(1, maxOverlayRows - chromeRows);
@@ -297,6 +299,11 @@ class BashInteractiveOverlayComponent implements Component {
 				: truncateToWidth(this.uiTheme.fg("dim", "session finished"), innerWidth);
 		const visibleLines = this.#readViewport(innerWidth, maxContentRows);
 		const content = visibleLines.length > 0 ? visibleLines : [padding(innerWidth)];
+		// Fullscreen marks the console off with its own surface instead of a frame;
+		// the inset keeps the PTY rows on the same column the border held them at.
+		if (this.#card.active) {
+			return this.#card.paint([header, ...content, footer], safeWidth, false);
+		}
 		const borderHorizontal = this.uiTheme.fg("border", this.uiTheme.boxRound.horizontal.repeat(innerWidth));
 		const borderVertical = this.uiTheme.fg("border", this.uiTheme.boxRound.vertical);
 		const boxLine = (line: string) =>
@@ -310,7 +317,9 @@ class BashInteractiveOverlayComponent implements Component {
 		];
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.#card.invalidate();
+	}
 
 	dispose(): void {
 		this.#terminal.dispose();

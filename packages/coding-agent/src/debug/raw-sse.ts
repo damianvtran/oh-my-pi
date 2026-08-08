@@ -1,6 +1,6 @@
 import { type Component, matchesKey, parseSgrMouse, replaceTabs, ScrollView, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { bottomBorder, divider, row, topBorder } from "../modes/components/overlay-box";
+import { bottomBorder, divider, row, topBorder, topChromeRows } from "../modes/components/overlay-box";
 import { theme } from "../modes/theme/theme";
 import { copyToClipboard } from "../utils/clipboard";
 import {
@@ -194,11 +194,12 @@ export class RawSseViewerComponent implements Component {
 		});
 		sv.setScrollOffset(this.#scrollOffset);
 		const bodyRows = sv.render(contentWidth);
-		this.#bodyRowStart = 3;
+		// Top chrome, then the summary row and the divider above the body.
+		this.#bodyRowStart = topChromeRows() + 2;
 		this.#bodyRowCount = bodyHeight;
 
 		return [
-			topBorder(this.#lastRenderWidth, "Raw Provider Stream"),
+			...topBorder(this.#lastRenderWidth, "Raw Provider Stream"),
 			row(this.#summaryText(), this.#lastRenderWidth),
 			divider(this.#lastRenderWidth),
 			...bodyRows.map(line => row(line, this.#lastRenderWidth)),

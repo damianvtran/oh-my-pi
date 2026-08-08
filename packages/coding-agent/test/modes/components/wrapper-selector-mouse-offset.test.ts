@@ -12,7 +12,19 @@ beforeAll(async () => {
 });
 
 function leftClick(line: number): SgrMouseEvent {
-	return { button: 0, col: 0, row: line, release: false, wheel: null, motion: false, leftClick: true };
+	return {
+		button: 0,
+		col: 0,
+		row: line,
+		release: false,
+		wheel: null,
+		wheelX: null,
+		motion: false,
+		shift: false,
+		alt: false,
+		ctrl: false,
+		leftClick: true,
+	};
 }
 
 /**

@@ -184,7 +184,9 @@ describe("AgentTranscriptViewer", () => {
 
 	beforeEach(async () => {
 		resetSettingsForTest();
-		await Settings.init({ inMemory: true });
+		// Asserts append-mode rendering: the transcript is the terminal's own scrollback,
+		// with no card chrome around tool output.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		initTheme();
 		rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => 24, set: () => {} });
@@ -298,7 +300,10 @@ describe("AgentTranscriptViewer", () => {
 	});
 
 	it("renders tool-result images through the shared Kitty placeholder budget", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		await Settings.init({
+			inMemory: true,
+			overrides: { "terminal.showImages": true, "tui.viewport": "append" },
+		} as never);
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-image-"));
 		const file = path.join(dir, "__advisor.jsonl");
 		fs.writeFileSync(file, buildImageJsonl());

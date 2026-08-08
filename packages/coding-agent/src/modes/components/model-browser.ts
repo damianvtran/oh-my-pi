@@ -765,7 +765,7 @@ export class ModelBrowser implements Component {
 		// The bg band is reserved for the mouse: it marks hover, nothing else.
 		// Keyboard selection is the cursor glyph + accent name.
 		if (hovered) {
-			line = theme.bg("selectedBg", line);
+			line = theme.hoverBg(line);
 		}
 		return line;
 	}

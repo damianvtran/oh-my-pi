@@ -43,7 +43,15 @@ import {
 	sortModelItems,
 	thinkingLevelGlyph,
 } from "./model-browser";
-import { bottomBorder, dividerSplit, row, splitBodyWidth, splitRow, topBorderSplit } from "./overlay-box";
+import {
+	bottomBorder,
+	dividerSplit,
+	row,
+	splitBodyWidth,
+	splitRow,
+	topBorderSplit,
+	topChromeRows,
+} from "./overlay-box";
 import { renderSegmentTrack } from "./segment-track";
 
 /**
@@ -1631,7 +1639,7 @@ export class ModelHubComponent implements Component {
 				if (lineWidth < width) line += " ".repeat(width - lineWidth);
 			}
 			if (hovered) {
-				line = theme.bg("selectedBg", line);
+				line = theme.hoverBg(line);
 			}
 			lines.push(line);
 		}
@@ -1696,7 +1704,7 @@ export class ModelHubComponent implements Component {
 		if (hovered) {
 			const w = visibleWidth(out);
 			if (w < width) out += " ".repeat(width - w);
-			return theme.bg("selectedBg", out);
+			return theme.hoverBg(out);
 		}
 		return out;
 	}
@@ -1982,7 +1990,8 @@ export class ModelHubComponent implements Component {
 		const sidebarWidth = this.#sidebarWidth();
 		this.#sidebarWidthLast = sidebarWidth;
 		const bodyWidth = splitBodyWidth(width, sidebarWidth);
-		const contentRows = Math.max(10, height - 4);
+		// Top chrome, plus the section rule, the footer and the bottom row.
+		const contentRows = Math.max(10, height - 3 - topChromeRows());
 		this.#contentRowCount = contentRows;
 
 		const entry = this.#activeEntry();
@@ -2000,7 +2009,7 @@ export class ModelHubComponent implements Component {
 		const sidebarLines = this.#renderSidebar(sidebarWidth, contentRows);
 
 		const out: string[] = [];
-		out.push(topBorderSplit(width, "Models", sidebarWidth));
+		out.push(...topBorderSplit(width, "Models", sidebarWidth));
 		this.#contentRowStart = out.length;
 		for (let i = 0; i < contentRows; i++) {
 			out.push(splitRow(sidebarLines[i] ?? "", bodyLines[i] ?? "", width, sidebarWidth));

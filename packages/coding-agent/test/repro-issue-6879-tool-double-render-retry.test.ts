@@ -85,7 +85,14 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-issue-6879-");
-		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		// Asserts append-mode rendering: the bash card writes its `$ <command>` echo
+		// into the transcript, which is how this test counts renders. The fullscreen
+		// viewport collapses the card to a click-to-expand header and shows none.
+		await Settings.init({
+			inMemory: true,
+			cwd: tempDir.path(),
+			overrides: { "tui.viewport": "append" },
+		} as never);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");

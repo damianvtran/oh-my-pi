@@ -8,7 +8,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type ModelHubCallbacks,
 	ModelHubComponent,
@@ -138,6 +138,10 @@ const ESC = "\x1b";
 
 describe("ModelHub", () => {
 	beforeAll(async () => {
+		resetSettingsForTest();
+		// Asserts append-mode rendering: the hub paints its own two-pane frame into
+		// the terminal's scrollback, so the sidebar column sits behind the first `│`.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		testTheme = await getThemeByName("dark");
 		if (!testTheme) {
 			throw new Error("Failed to load dark theme for ModelHub tests");

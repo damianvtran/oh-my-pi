@@ -10,12 +10,12 @@ import {
 	matchesSelectUp,
 } from "../utils/keybinding-matchers";
 import { keyHint, rawKeyHint } from "./keybinding-hints";
-import { bottomBorder, divider, row, topBorder } from "./overlay-box";
+import { bottomBorder, divider, row, topBorder, topChromeRows } from "./overlay-box";
 
 /** Minimum rows reserved for the tree even on short terminals. */
 const MIN_TREE_ROWS = 3;
-/** Fixed chrome rows: top border, two dividers, footer, bottom border. */
-const CHROME_ROWS = 5;
+/** Fixed chrome rows besides the top: two dividers, footer, bottom border. */
+const CHROME_ROWS_BELOW_TOP = 4;
 
 export interface CopySelectorCallbacks {
 	/** A copy target was chosen — copy its `content`. */
@@ -194,7 +194,7 @@ export class CopySelectorComponent implements Component {
 		);
 		const selected = flat[cursorIdx]?.target;
 
-		const available = Math.max(MIN_TREE_ROWS + 1, height - CHROME_ROWS);
+		const available = Math.max(MIN_TREE_ROWS + 1, height - CHROME_ROWS_BELOW_TOP - topChromeRows());
 		const treeRows = Math.max(1, Math.min(flat.length, Math.floor(available / 2)));
 		this.#treeRows = treeRows;
 		const previewRows = Math.max(1, available - treeRows);
@@ -206,7 +206,7 @@ export class CopySelectorComponent implements Component {
 		].join(theme.fg("dim", " · "));
 
 		return [
-			topBorder(width, "Copy to clipboard"),
+			...topBorder(width, "Copy to clipboard"),
 			...this.#renderTree(width, flat, cursorIdx, treeRows),
 			divider(width),
 			...this.#renderPreview(width, selected, previewRows),

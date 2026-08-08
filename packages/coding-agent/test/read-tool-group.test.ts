@@ -22,7 +22,13 @@ function extractLinkTexts(text: string): string[] {
 describe("ReadToolGroupComponent", () => {
 	beforeAll(async () => {
 		resetSettingsForTest();
-		await Settings.init({ inMemory: true });
+		await Settings.init({
+			inMemory: true,
+			// Pinned: these assert tree gutters and the ctrl+o hint, and the worktree
+			// config selects the fullscreen viewport, where a block is a filled card
+			// and the hint names the click instead.
+			overrides: { "tui.viewport": "append" },
+		});
 		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 	});
 

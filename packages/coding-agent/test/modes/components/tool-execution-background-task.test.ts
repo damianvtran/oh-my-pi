@@ -77,7 +77,14 @@ function finalSnapshot(output: string): {
 // snapshots, and still applies the final (completed) snapshot.
 describe("ToolExecutionComponent detached task freeze", () => {
 	beforeAll(async () => {
-		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		await Settings.init({
+			inMemory: true,
+			cwd: process.cwd(),
+			// Pinned: this asserts freeze semantics on exact rows, and the worktree
+			// config selects the fullscreen viewport, whose collapsed cards are one
+			// summary row.
+			overrides: { "tui.viewport": "append" },
+		});
 		await initTheme();
 	});
 

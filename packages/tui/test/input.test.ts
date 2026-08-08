@@ -74,7 +74,7 @@ describe("Input component", () => {
 		const input = new Input();
 		input.focused = true;
 		input.setValue(text);
-		input.handleInput("\x01"); // Ctrl+A (start)
+		input.handleInput("\x1b[H"); // Home (start)
 
 		input.handleInput(wordRight);
 		input.handleInput("|");
@@ -206,7 +206,7 @@ describe("Input component", () => {
 		input.focused = true;
 		input.mask = true;
 		input.setValue("a😀e\u0301z");
-		input.handleInput("\x01"); // Ctrl+A (start)
+		input.handleInput("\x1b[H"); // Home (start)
 		input.handleInput("\x1b[C"); // after a
 		input.handleInput("\x1b[C"); // after emoji
 
@@ -281,7 +281,7 @@ describe("Input component", () => {
 		input.focused = true;
 		input.setUseTerminalCursor(true);
 		input.setValue("abc");
-		input.handleInput("\x01"); // Ctrl+A (start)
+		input.handleInput("\x1b[H"); // Home (start)
 
 		const [line] = input.render(20);
 		expect(line).toContain(CURSOR_MARKER);

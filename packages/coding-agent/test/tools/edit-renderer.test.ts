@@ -16,7 +16,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 
 beforeAll(async () => {
 	resetSettingsForTest();
-	await Settings.init({ inMemory: true, cwd: process.cwd() });
+	// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+	await Settings.init({ inMemory: true, cwd: process.cwd(), overrides: { "tui.viewport": "append" } } as never);
 });
 
 async function getUiTheme() {

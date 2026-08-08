@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { BashExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/bash-execution";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { sanitizeWithOptionalSixelPassthrough } from "@oh-my-pi/pi-coding-agent/utils/sixel";
@@ -146,6 +147,10 @@ describe("BashExecutionComponent expand footer", () => {
 	const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 
 	beforeEach(async () => {
+		resetSettingsForTest();
+		// Asserts append-mode rendering: the collapsed footer advertises the keyboard
+		// expand binding rather than the fullscreen click affordance.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();
 		setThemeInstance(theme!);
@@ -159,10 +164,15 @@ describe("BashExecutionComponent expand footer", () => {
 		return component;
 	};
 
+	// The footer now routes through formatExpandHint, so it names whatever key is
+	// bound rather than a hardcoded "ctrl+o" and adapts to the fullscreen click
+	// affordance. Assert the key label and the action, not the bracket glyphs,
+	// which come from the active theme.
 	it("advertises hidden lines while collapsed", () => {
 		const rendered = makeComponent().render(120).join("\n");
 		expect(rendered).toContain("more lines");
-		expect(rendered).toContain("ctrl+o to expand");
+		expect(rendered).toContain("Ctrl+O");
+		expect(rendered).toContain("Expand");
 	});
 
 	it("drops the hidden-lines footer once expanded", () => {
@@ -170,7 +180,7 @@ describe("BashExecutionComponent expand footer", () => {
 		component.setExpanded(true);
 		const rendered = component.render(120).join("\n");
 		expect(rendered).not.toContain("more lines");
-		expect(rendered).not.toContain("ctrl+o to expand");
+		expect(rendered).not.toContain("Expand");
 		// Every line is now present, including the previously hidden prefix.
 		expect(rendered).toContain("entry0");
 		expect(rendered).toContain("entry26");
@@ -182,6 +192,7 @@ describe("BashExecutionComponent expand footer", () => {
 		component.setExpanded(false);
 		const rendered = component.render(120).join("\n");
 		expect(rendered).toContain("more lines");
-		expect(rendered).toContain("ctrl+o to expand");
+		expect(rendered).toContain("Ctrl+O");
+		expect(rendered).toContain("Expand");
 	});
 });

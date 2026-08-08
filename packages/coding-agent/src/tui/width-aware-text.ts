@@ -16,7 +16,7 @@ import { type Component, getPaddingX, Text } from "@oh-my-pi/pi-tui";
  */
 export class WidthAwareText implements Component {
 	#format: (contentWidth: number) => string;
-	readonly #paddingX: number;
+	#paddingX: number;
 	#inner: Text;
 	#cachedContentWidth = -1;
 	#cachedText: string | undefined;
@@ -30,6 +30,17 @@ export class WidthAwareText implements Component {
 
 	setCustomBgFn(customBgFn?: (text: string) => string): void {
 		this.#inner.setCustomBgFn(customBgFn);
+	}
+
+	/** See {@link Text.setPadding}: the enclosing card owns the inset in the
+	 *  fullscreen transcript, and the viewport mode can change at runtime. */
+	setPadding(paddingX: number, paddingY: number): void {
+		this.#inner.setPadding(paddingX, paddingY);
+		// Only the horizontal inset changes the content width this reformats
+		// against, so the format cache survives a vertical-only change.
+		if (paddingX === this.#paddingX) return;
+		this.#paddingX = paddingX;
+		this.invalidate();
 	}
 
 	setIgnoreTight(ignore: boolean): this {

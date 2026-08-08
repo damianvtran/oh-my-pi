@@ -233,7 +233,7 @@ export class MoveOverlay implements Component, Focusable {
 		const w = width;
 		const lines: string[] = [];
 
-		lines.push(topBorder(w, "Move to directory"));
+		lines.push(...topBorder(w, "Move to directory"));
 		lines.push(row(this.#renderInput(), w));
 		lines.push(row("", w));
 

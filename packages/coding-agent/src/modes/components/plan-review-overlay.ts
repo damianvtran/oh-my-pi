@@ -49,6 +49,7 @@ import {
 	splitRow,
 	topBorder,
 	topBorderSplit,
+	topChromeRows,
 } from "./overlay-box";
 import { joinPlanSections, parsePlanSections, sectionDeletionSpan } from "./plan-toc";
 import { renderSegmentTrack } from "./segment-track";
@@ -928,7 +929,7 @@ export class PlanReviewOverlay implements Component {
 			// A pointer hovering an option paints a highlight band behind its label,
 			// distinct from the keyboard selection (cursor glyph + bold accent) which
 			// stays where it is. One space of padding gives the band a button shape.
-			if (hovered) text = theme.bg("selectedBg", ` ${text} `);
+			if (hovered) text = theme.hoverBg(` ${text} `);
 			return cursor + text;
 		});
 	}
@@ -1174,9 +1175,10 @@ export class PlanReviewOverlay implements Component {
 			? [theme.fg("dim", "Applying your selection — this can take a moment while context is prepared.")]
 			: this.#renderFooterLines(innerWidth);
 
-		// Chrome rows: top border, two dividers, bottom border, plus the
+		// Chrome rows: top chrome, two dividers, bottom border, plus the
 		// prompt/slider/option/footer rows between them.
-		const chrome = 4 + promptLines.length + sliderLines.length + optionLines.length + footerLines.length;
+		const chrome =
+			topChromeRows() + 3 + promptLines.length + sliderLines.length + optionLines.length + footerLines.length;
 		const regionRows = Math.max(MIN_BODY_ROWS, termHeight - chrome);
 
 		const bodyLines = this.#buildBody(bodyContentWidth);
@@ -1196,7 +1198,7 @@ export class PlanReviewOverlay implements Component {
 		const out: string[] = [];
 		if (sidebarShown) {
 			const { lines: sidebar, posForRow } = this.#renderSidebarLines(regionRows, sidebarWidth);
-			out.push(topBorderSplit(width, OVERLAY_TITLE, sidebarWidth));
+			out.push(...topBorderSplit(width, OVERLAY_TITLE, sidebarWidth));
 			for (let i = 0; i < regionRows; i++) {
 				const pos = posForRow[i];
 				if (pos !== undefined) this.#tocClickRows.set(out.length, pos);
@@ -1205,7 +1207,7 @@ export class PlanReviewOverlay implements Component {
 			}
 			out.push(dividerSplit(width, sidebarWidth));
 		} else {
-			out.push(topBorder(width, OVERLAY_TITLE));
+			out.push(...topBorder(width, OVERLAY_TITLE));
 			for (const line of body) {
 				this.#bodyClickRows.add(out.length);
 				out.push(row(line, width));

@@ -26,6 +26,7 @@ describe("buildHotkeysMarkdown", () => {
 			"app.clipboard.pasteImage": "Ctrl+V",
 			"app.stt.toggle": "Alt+H",
 			"app.live.toggle": "Ctrl+L",
+			"tui.editor.selectAll": "Alt+A",
 		};
 		const markdown = buildHotkeysMarkdown({
 			keybindings: {
@@ -43,6 +44,14 @@ describe("buildHotkeysMarkdown", () => {
 		expect(markdown).toContain("| `Alt+L` | Reset terminal display |");
 		expect(markdown).toContain("| `Ctrl+L` | Start/stop live voice mode (/live) |");
 		expect(markdown).toContain("| `Alt+R` | Retry last failed assistant turn |");
+		expect(markdown).toContain("| `Alt+A` | Select all — then Backspace or type to replace the draft |");
+		expect(markdown).toContain("**Mouse / Fullscreen viewport**");
+		expect(markdown).toContain("| `Wheel` / trackpad | Scroll the transcript |");
+		expect(markdown).toContain("| `Alt+click` a message or card | Copy that block's complete source");
+		expect(markdown).toContain("| Double-click prose | Copy the whole message");
+		expect(markdown).toContain(
+			"| `/viewport append` | Restore terminal scrollback, native selection, copy, and find |",
+		);
 		expect(markdown).toContain("| `Alt+Shift+P` | Toggle plan mode |");
 		expect(markdown).toContain("| `Ctrl+Shift+O` | Toggle tool activity visibility |");
 		expect(markdown).toContain("| `#<number>` | GitHub issue/PR reference");

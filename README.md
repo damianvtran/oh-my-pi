@@ -32,6 +32,57 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 > while we evaluate how open contributions go. Depending on the results, the
 > vouch system may return.
 
+## Fork changes
+
+This repository is a fork of [omp](https://github.com/can1357/oh-my-pi), which is itself the fork of Pi credited above. Everything from `## Install` down is upstream's README and still applies; this section is the delta, so you know which program you actually cloned. Seven feature branches sit on top of `upstream/main`, and this fork's `main` is rebuilt from `upstream/main` plus a merge of each of them — it is a moving integration branch, not a release. Full prose for every change is in `packages/coding-agent/CHANGELOG.md` under `## [Unreleased]`.
+
+### Two defaults differ from upstream
+
+These are the behaviours you notice in the first minute. Both are settings, so upstream's behaviour is one line of `~/.omp/agent/config.yml` away.
+
+- **`tui.viewport: fullscreen`.** Upstream has no viewport setting at all — the transcript always lives in the terminal's own scrollback. Here the fullscreen viewport is the default: omp takes the alternate screen, scrolls the transcript itself, and turns on mouse reporting. That costs native scrollback, native selection, and your terminal's find, which is why upstream's mode stays available. Set `tui.viewport: append` for it, or run `/viewport append` to switch without a restart.
+- **`display.collapseCompacted: false`.** Upstream defaults it on, hiding pre-compaction messages behind the summary divider. A compaction resets the model's context, not the reader's history, so here the transcript stays on screen with a `compacted` divider at the point each one fired. Set `display.collapseCompacted: true` for upstream's behaviour.
+
+### A fullscreen, mouse-driven transcript
+
+`feat/fullscreen-tui` — the bulk of the fork. The transcript scrolls inside omp with the status line and composer pinned to the bottom of the window. The pointer contract and what the mode trades away are documented in [`docs/tui-fullscreen.md`](docs/tui-fullscreen.md).
+
+- **Scrolling with trackpad-shaped momentum.** The step rises with how tightly wheel notches are packed and falls back as the OS thins them out, so a flick covers ground and coasts while a nudge still moves a line. Sub-row travel carries between notches, a direction change starts the gesture cold, and duplicate reports for one physical notch are collapsed. The wheel axis is decoded, so the horizontal notches a real two-finger swipe interleaves no longer cancel vertical ones.
+- **Click to expand or collapse** any tool call, edit, or read group. Settled output collapses to a one-line summary — carrying `+N` / `-N` counts for edits — and one click on the header restores it. Headers highlight as the pointer passes over them, and Kitty, Ghostty, and WezTerm get OSC 22 pointer shapes: a hand on interactive rows, a text cursor over the composer.
+- **Drag to select, release to copy**, replacing the terminal selection that mouse reporting takes away. The cut is bounded per row by the row's own text rather than the width of the window, so a card's two-column inset, its background fill, and a user card's accent rail stay out of the clipboard.
+- **Alt+click to copy any block; double click to copy prose.** User and assistant messages copy their source text. Tool and grouped-read cards copy a labeled block containing the tool name or path plus the complete output, even when the card shows only a collapsed preview. Activatable cards reserve double click for activation because click one can reflow the transcript; Alt+click copies them without changing expansion. Cmd+click is not offered because SGR mouse reporting has no super bit, and shift+click is not, because terminals reserve shift to bypass mouse reporting.
+- **Subagent drill-down.** Click an agent row in a task block, the Subagents HUD, or `hub wait` output to open that agent's live transcript; `Alt+Up`, `Alt+Left`, `Alt+Right`, or the footer buttons move to its parent or siblings.
+- **Select-all in the composer** on `Ctrl+A` and `Cmd+A` (`tui.editor.selectAll`), so a draft clears with select-all plus `Backspace` and is replaced by select-all plus the next character. `Ctrl+A` therefore no longer moves to the start of the line — `Home` does, and `tui.editor.cursorLineStart` can take the chord back.
+- **A compaction no longer throws away the visible transcript.** Both compaction paths used to rebuild the chat from scratch and force a scrollback-clearing repaint regardless of `display.collapseCompacted`, costing every card its expand state and the reader their scroll position while eliding nothing. With collapsing off they append the divider below what is already on screen.
+- **Supporting work**: a home screen for a session that starts empty, transient statuses folded into one pinned row instead of interleaving with the transcript, a scrollable `/usage` overlay, and the derived `Theme.hoverBg()` / `Theme.selectionBg()` roles so all 98 bundled themes get a legible hover band and selection wash without theme edits.
+
+> [!NOTE]
+> On macOS, `Cmd+A` only reaches omp if the emulator does not claim it first. Ghostty ships `keybind = super+a=select_all` as a default, so it needs `keybind = super+a=unbind` in `~/.config/ghostty/config`. `Ctrl+A` works regardless.
+
+### Sessions reachable from your phone, and rooms that stay up
+
+`feat/collab-auto-start` — `collab.autoStart` hosts a collab room as soon as an interactive session starts, and `collab.publishLink` publishes the active room to a file under `<config-root>/run/collab/` so a supervisor can discover every running omp without scraping the TUI. An auto-started room is scoped to the process, so `/resume`, `/new`, `/fork`, and `/tree` rebind it instead of ending it. `omp mobile` builds on that: a loopback relay plus a portal that joins every published room and re-serves them as one authenticated app, installed as macOS LaunchAgents. The same branch adds scheduled wakeups — a `wake` tool that schedules a self-prompt to arrive later in the same session, one-shot or recurring, rendered as a distinct card so it can never be mistaken for something you typed. **Breaking:** `collab.relayUrl` and `collab.webUrl` are now user-scoped and can no longer be set by project config, since a cloned repository could otherwise point a session's relay — and the deep link carrying its room key — anywhere.
+
+### Fallback chains that climb back toward the primary
+
+`feat/retry-fallback-cycle` — `retry.fallbackCycle` (on by default) lets an exhausted chain reverse onto an earlier entry instead of dead-ending on its last one, so `opus → kimi → codex` recovers when `codex` runs out and something earlier has cooled off. Between turns the session climbs partway home rather than only ever restoring the configured primary. Guards keep recovery from becoming a bounce: a model that fails again right after its cooldown lapsed gets a doubled window, and re-picking a model by hand forgets its flap history.
+
+### Titling that survives a rate-limited model
+
+`feat/title-retry-fallback` — the first-message title request used the resolved titling model once and gave up on any provider error, leaving a session unnamed whenever the primary answered with a 429. It now builds its attempt list from the same `retry.fallbackChains` machinery the turn path walks, skipping suppressed selectors and candidates without credentials, and records the same cooldown a turn would. A provider that answers but returns no usable title still stops without failover.
+
+### Sessions named by theme, and searchable
+
+`feat/session-theme-titling` — auto-titling names the conversation's overall theme instead of its latest turn: the refresh samples the whole trajectory, anchors on the existing title so a stable subject keeps a stable name, and is growth-gated to at most five re-titles. A keyword index records each session's title, topic terms, and a theme blurb, and the resume picker blends a stemmed search over it into a field-weighted ranking, so an exact title match is no longer displaced by a newer session that merely mentions the query. Existing sessions are backfilled in the background the first time the picker opens.
+
+### A ceiling on the compaction threshold
+
+`feat/compaction-threshold-ceiling` — `compaction.maxThresholdTokens` caps whichever mode resolved the threshold (`thresholdTokens`, `thresholdPercent`, or the reserve-based default). It only ever moves the trigger earlier, so a window whose threshold already sits below the ceiling keeps it. This is what bounds session size across mixed context windows, where a percentage tuned for a 1M window fires far too late on a 200k one.
+
+### MCP OAuth asks only for the scopes the resource needs
+
+`feat/mcp-oauth-resource-scopes` — discovery requested the authorization server's entire RFC 8414 `scopes_supported` universe even when the protected resource advertised its own RFC 9728 scopes. Against gitlab.com that meant consenting to all 26 GitLab scopes, `sudo` and `admin_mode` included, for a server that needs only `mcp`; the resource's list now wins. The same branch recovers the protected-resource identifier when the metadata returns `resource` as an array, so the stored credential carries a real audience instead of one synthesized from the server URL.
+
 ## Install
 
 **macOS · Linux**

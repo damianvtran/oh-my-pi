@@ -27,6 +27,7 @@ export interface Keybindings {
 	"tui.editor.yank": true;
 	"tui.editor.yankPop": true;
 	"tui.editor.undo": true;
+	"tui.editor.selectAll": true;
 	// Generic input actions
 	"tui.input.newLine": true;
 	"tui.input.submit": true;
@@ -74,7 +75,7 @@ export const TUI_KEYBINDINGS = {
 		description: "Move cursor word right",
 	},
 	"tui.editor.cursorLineStart": {
-		defaultKeys: ["home", "ctrl+a"],
+		defaultKeys: ["home"],
 		description: "Move to line start",
 	},
 	"tui.editor.cursorLineEnd": {
@@ -118,6 +119,14 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.yank": { defaultKeys: "ctrl+y", description: "Yank" },
 	"tui.editor.yankPop": { defaultKeys: "alt+y", description: "Yank pop" },
 	"tui.editor.undo": { defaultKeys: ["ctrl+-", "ctrl+_"], description: "Undo" },
+	// super+a is a default here even though most emulators eat Cmd+A themselves
+	// (Ghostty ships `super+a=select_all`): omp's parser decodes the kitty super
+	// bit, so the chord works in the hosts that do forward it and in the ones a
+	// user unbinds it in. See docs/keybindings.md.
+	"tui.editor.selectAll": {
+		defaultKeys: ["ctrl+a", "super+a"],
+		description: "Select all text in the editor",
+	},
 	"tui.input.newLine": { defaultKeys: ["shift+enter", "ctrl+j"], description: "Insert newline" },
 	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },
 	"tui.input.tab": { defaultKeys: "tab", description: "Tab / autocomplete" },

@@ -45,6 +45,8 @@ const defaultSymbols: SymbolTheme = {
 	},
 	quoteBorder: "│",
 	hrChar: "-",
+	disclosureCollapsed: "+",
+	disclosureExpanded: "-",
 	spinnerFrames: ["-", "\\", "|", "/"],
 };
 
