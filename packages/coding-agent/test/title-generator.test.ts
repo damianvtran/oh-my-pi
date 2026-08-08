@@ -331,6 +331,7 @@ describe("title generator", () => {
 				getApiKey: async () => {
 					throw new Error("credential lookup failed");
 				},
+				suppressSelector: () => {},
 			} as never,
 			createSettings(model),
 			"session-2",
@@ -579,7 +580,307 @@ describe("title generator", () => {
 	});
 });
 
-// The terminal title runtime is a module-global. `emitTerminalTitle()` composes
+// Failover: when the resolved title model's provider request fails (rate limit,
+// overload, missing credentials), the title path walks the same
+// `retry.fallbackChains` candidates the turn path would, instead of leaving the
+// session unnamed until the next user message retries.
+describe("title generator failover", () => {
+	interface FailoverHarness {
+		registry: never;
+		suppressCalls: Array<{ selector: string; untilMs: number }>;
+	}
+
+	function createFailoverRegistry(
+		models: Model<Api>[],
+		options?: { suppressed?: (selector: string) => boolean; apiKeys?: Record<string, string | null> },
+	): FailoverHarness {
+		const suppressCalls: Array<{ selector: string; untilMs: number }> = [];
+		const registry = {
+			getAvailable: () => models,
+			find: (provider: string, id: string) => models.find(m => m.provider === provider && m.id === id),
+			hasProvider: (provider: string) => models.some(m => m.provider === provider),
+			getApiKey: async (model: Model<Api>) => {
+				const key = `${model.provider}/${model.id}`;
+				if (options?.apiKeys && key in options.apiKeys) return options.apiKeys[key];
+				return "test-key";
+			},
+			getApiKeyForProvider: async () => "test-key",
+			authStorage: { rotateSessionCredential: async () => false },
+			resolver: () => async () => "test-key",
+			isSelectorSuppressed: (selector: string) => options?.suppressed?.(selector) ?? false,
+			suppressSelector: (selector: string, untilMs: number) => {
+				suppressCalls.push({ selector, untilMs });
+			},
+		} as never;
+		return { registry, suppressCalls };
+	}
+
+	function createFailoverSettings(
+		primary: Model<Api>,
+		options?: { modelFallback?: boolean; chains?: Record<string, string[]> },
+	) {
+		return {
+			get(path: string) {
+				if (path === "providers.tinyModel") return "online";
+				if (path === "retry.enabled") return true;
+				if (path === "retry.modelFallback") return options?.modelFallback ?? true;
+				if (path === "retry.fallbackChains") return options?.chains ?? {};
+				return undefined;
+			},
+			getModelRole(role: string) {
+				return role === "smol" ? `${primary.provider}/${primary.id}` : undefined;
+			},
+			getModelRoles() {
+				return {};
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+	}
+
+	it("walks the default fallback chain when the primary provider errors", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const fallback = getModelFor("kimi-code", "k3");
+		const { registry, suppressCalls } = createFailoverRegistry([primary, fallback]);
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({
+				stopReason: "error",
+				errorMessage: '429 {"type":"error","error":{"type":"rate_limit_error"}} retry-after-ms=7150000',
+				content: [],
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Fallback Title</title>" }],
+			} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary, { chains: { default: ["kimi-code/k3"] } }),
+		);
+
+		expect(title).toBe("Fallback Title");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(primary);
+		expect(completeSimpleMock.mock.calls[1]?.[0]).toBe(fallback);
+		// The failed selector is suppressed for the provider's retry-after hint so
+		// later title attempts skip it instead of paying another guaranteed 429.
+		expect(suppressCalls).toHaveLength(1);
+		expect(suppressCalls[0]?.selector).toContain("claude-sonnet-4-5");
+		expect(suppressCalls[0]?.untilMs).toBeGreaterThan(Date.now() + 7_000_000);
+	});
+
+	it("does not fail over when retry.modelFallback is disabled", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const fallback = getModelFor("kimi-code", "k3");
+		const { registry } = createFailoverRegistry([primary, fallback]);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "429 rate_limit_error",
+			content: [],
+		} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary, { modelFallback: false, chains: { default: ["kimi-code/k3"] } }),
+		);
+
+		expect(title).toBeNull();
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("skips a suppressed primary and goes straight to a healthy fallback", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const fallback = getModelFor("kimi-code", "k3");
+		const { registry } = createFailoverRegistry([primary, fallback], {
+			suppressed: selector => selector.includes("anthropic"),
+		});
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Skipped The Wall</title>" }],
+		} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary, { chains: { default: ["kimi-code/k3"] } }),
+		);
+
+		expect(title).toBe("Skipped The Wall");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(fallback);
+	});
+
+	it("does not fail over when the provider answered but produced no title", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const fallback = getModelFor("kimi-code", "k3");
+		const { registry, suppressCalls } = createFailoverRegistry([primary, fallback]);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "" }],
+		} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary, { chains: { default: ["kimi-code/k3"] } }),
+		);
+
+		expect(title).toBeNull();
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(suppressCalls).toHaveLength(0);
+	});
+
+	it("fails over to an authenticated candidate when the primary has no API key", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const fallback = getModelFor("kimi-code", "k3");
+		const { registry } = createFailoverRegistry([primary, fallback], {
+			apiKeys: { "anthropic/claude-sonnet-4-5": null },
+		});
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Authenticated Fallback</title>" }],
+		} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary, { chains: { default: ["kimi-code/k3"] } }),
+		);
+
+		expect(title).toBe("Authenticated Fallback");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(fallback);
+	});
+
+	// Same-model remediation ladder: two endpoint families defeat the default
+	// reasoning-disabled title request, and both must recover WITHOUT spending
+	// a failover candidate — the primary model is fine, only the request shape
+	// needs adjusting.
+	it("retries the same model with reasoning allowed when the endpoint makes reasoning mandatory", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const fallback = getModelFor("kimi-code", "k3");
+		const { registry, suppressCalls } = createFailoverRegistry([primary, fallback]);
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({
+				stopReason: "error",
+				errorMessage: "400 Reasoning is mandatory for this endpoint and cannot be disabled.",
+				content: [],
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Mandatory reasoning title</title>" }],
+			} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary, { chains: { default: ["kimi-code/k3"] } }),
+		);
+
+		expect(title).toBe("Mandatory reasoning title");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		// Both attempts stay on the primary — the fallback chain is untouched.
+		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(primary);
+		expect(completeSimpleMock.mock.calls[1]?.[0]).toBe(primary);
+		const firstOptions = completeSimpleMock.mock.calls[0]?.[2] as { disableReasoning?: boolean };
+		const secondOptions = completeSimpleMock.mock.calls[1]?.[2] as {
+			disableReasoning?: boolean;
+			maxTokens?: number;
+		};
+		expect(firstOptions?.disableReasoning).toBe(true);
+		expect(secondOptions?.disableReasoning).toBe(false);
+		// The retry raises the cap so a mandatory reasoning pass can't eat the
+		// whole budget before the title marker.
+		expect((secondOptions?.maxTokens ?? 0) > 1024).toBe(true);
+		// No cooldown: the model was never broken, only the request shape was.
+		expect(suppressCalls).toHaveLength(0);
+	});
+
+	it("retries the same model with a raised cap when reasoning truncates the response before the title marker", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const { registry } = createFailoverRegistry([primary]);
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({
+				stopReason: "length",
+				content: [],
+				usage: { output: 1026, reasoningTokens: 1024 },
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Truncation recovery</title>" }],
+			} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary),
+		);
+
+		expect(title).toBe("Truncation recovery");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(completeSimpleMock.mock.calls[1]?.[0]).toBe(primary);
+		const firstOptions = completeSimpleMock.mock.calls[0]?.[2] as { maxTokens?: number };
+		const secondOptions = completeSimpleMock.mock.calls[1]?.[2] as { maxTokens?: number };
+		expect((secondOptions?.maxTokens ?? 0) > (firstOptions?.maxTokens ?? 0)).toBe(true);
+	});
+
+	it("gives up after one truncation retry instead of looping", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const { registry, suppressCalls } = createFailoverRegistry([primary]);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "length",
+			content: [],
+		} as never);
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary),
+		);
+
+		expect(title).toBeNull();
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(suppressCalls).toHaveLength(0);
+	});
+
+	it("still fails over when the mandatory-reasoning retry itself errors", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const fallback = getModelFor("kimi-code", "k3");
+		const { registry, suppressCalls } = createFailoverRegistry([primary, fallback]);
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({
+				stopReason: "error",
+				errorMessage: "400 Reasoning is mandatory for this endpoint and cannot be disabled.",
+				content: [],
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "error",
+				errorMessage: "503 overloaded",
+				content: [],
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Recovered via fallback</title>" }],
+			} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary, { chains: { default: ["kimi-code/k3"] } }),
+		);
+
+		expect(title).toBe("Recovered via fallback");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(3);
+		expect(completeSimpleMock.mock.calls[2]?.[0]).toBe(fallback);
+		expect(suppressCalls).toHaveLength(1);
+	});
+});
 // the emitted OSC title from three inputs — an extension override, a run-state
 // separator (spinner frame, static Windows `:`, `>`, or `!` between the `π`
 // brand and the session label), and the session label — and writes it to
