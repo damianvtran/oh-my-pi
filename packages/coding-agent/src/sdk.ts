@@ -126,9 +126,11 @@ import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
 	deobfuscateToolArguments,
+	getSecretPlaceholderKeySync,
 	obfuscateMessages,
 	obfuscateProviderContext,
-	type SecretObfuscator,
+	SecretObfuscator,
+	SessionCredentials,
 } from "./secrets";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
@@ -1371,10 +1373,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	// Load and create secret obfuscator early so resumed session state and prompt warnings
 	// reflect actual loaded secrets, not just the setting toggle.
-	const obfuscator: SecretObfuscator | undefined = settings.get("secrets.enabled")
+	// The obfuscator is built UNCONDITIONALLY, even with zero configured entries
+	// and `secrets.enabled` off. `/credential` and `ask`'s secret mode register
+	// operator-supplied values at runtime, and every consumer captures this
+	// instance BY REFERENCE at session construction — so an obfuscator that does
+	// not exist yet can never be installed later, while an empty one costs
+	// nothing: `hasSecrets()` is false, so every redaction hook short-circuits,
+	// and the lazy key provider means the per-install key file is not created
+	// until a placeholder is actually minted.
+	let obfuscator = settings.get("secrets.enabled")
 		? await buildSecretObfuscator(cwd, agentDir, options.agentDir)
 		: undefined;
-	const secretsEnabled = obfuscator?.hasSecrets() === true;
+	if (!obfuscator) {
+		obfuscator = new SecretObfuscator([], () => getSecretPlaceholderKeySync(options.agentDir));
+	}
+	// Runtime credential vault. Shares the obfuscator above, so a value stored
+	// here is redacted on every outbound path and restored in tool-call arguments
+	// on the way back — see `secrets/session-credentials.ts`.
+	const sessionCredentials = new SessionCredentials(obfuscator);
 
 	// An abnormal process exit after a non-terminal message tail is durable
 	// evidence that the old process can no longer finish that turn. Preserve the
@@ -1659,6 +1675,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,
+			credentials: sessionCredentials,
 			hasUI: options.hasUI ?? false,
 			getApiKey: options.getApiKey,
 			get additionalDirectories() {
@@ -2896,7 +2913,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
-				secretsEnabled,
+				// Read live, not captured: `/credential` and `ask`'s secret mode can flip
+				// this mid-session by registering the first runtime secret, and the
+				// resulting `refreshBaseSystemPrompt()` must pick the new value up.
+				secretsEnabled: obfuscator.hasSecrets(),
+				credentials: sessionCredentials.list(),
 				workspaceTree: workspaceTreePromise,
 				includeWorkspaceTree,
 				memoryRootEnabled: memoryBackend?.id === "local",
@@ -3078,7 +3099,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// then applies secret obfuscation to the remaining outbound context.
 		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
 			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
-			if (!obfuscator?.hasSecrets()) return converted;
+			if (!obfuscator.hasSecrets()) return converted;
 			return obfuscateMessages(obfuscator, converted);
 		};
 
@@ -3104,7 +3125,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					)
 				: undefined;
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
-			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			let transformed = obfuscateProviderContext(obfuscator, context);
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
 			return clampProviderContextImages(transformed, transformModel);
 		};
@@ -3161,7 +3182,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (maxTimeout > 0 && typeof result.timeout === "number") {
 				result = { ...result, timeout: Math.min(result.timeout, maxTimeout) };
 			}
-			if (obfuscator?.hasSecrets()) {
+			if (obfuscator.hasSecrets()) {
 				result = deobfuscateToolArguments(obfuscator, result);
 			}
 			return result;
@@ -3412,6 +3433,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,
+			credentials: sessionCredentials,
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
@@ -3627,7 +3649,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					convertToLlm: convertToLlmFinal,
 					transformContext: async messages => wrapSteeringForModel(messages),
 					transformProviderContext: async (context, transformModel) => {
-						const transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+						const transformed = obfuscateProviderContext(obfuscator, context);
 						return clampProviderContextImages(transformed, transformModel);
 					},
 					thinkingBudgets: agent.thinkingBudgets,

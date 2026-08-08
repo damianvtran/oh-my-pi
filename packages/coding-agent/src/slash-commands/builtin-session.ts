@@ -1,5 +1,6 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { settings } from "../config/settings";
+import { describeStoreFailure } from "../secrets/session-credentials";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import {
@@ -10,6 +11,13 @@ import {
 } from "../utils/changelog";
 import { formatTokenCount, refreshStatusLine, shortDetail } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
+import {
+	CREDENTIAL_UNAVAILABLE,
+	formatCredentialForget,
+	formatCredentialForgetAll,
+	formatCredentialList,
+	parseCredentialCommand,
+} from "./helpers/credential";
 import { formatDuration } from "./helpers/format";
 import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
@@ -643,11 +651,94 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (!doomed) {
 				return usage(`No scheduled wakeup "${target}". Active: ${schedules.map(s => s.id).join(", ")}`, runtime);
 			}
+			const preview = shortDetail(doomed.message, WAKE_LIST_MESSAGE_LIMIT);
 			const purged = runtime.session.setWakeSchedules(schedules.filter(schedule => schedule.id !== doomed.id));
 			await runtime.output(
 				`Cancelled wakeup ${doomed.id} and purged ${purged} queued ${purged === 1 ? "delivery" : "deliveries"} — ${preview}`,
 			);
 			return commandConsumed();
+		},
+	},
+	{
+		name: "credential",
+		aliases: ["cred"],
+		description: "Hand the agent a secret it can use but never read",
+		acpDescription: "List or forget this session's credentials (storing requires interactive mode)",
+		inlineHint: "<KEY> | --forget <KEY> | --forget-all",
+		allowArgs: true,
+		// ACP/text mode has no masked input surface, so only the non-capturing
+		// verbs are available there. Advertising the command anyway is deliberate:
+		// an editor client can still list and revoke what a TUI session stored.
+		handle: async (command, runtime) => {
+			const vault = runtime.session.credentials;
+			if (!vault) return usage(CREDENTIAL_UNAVAILABLE, runtime);
+			const parsed = parseCredentialCommand(command.args);
+			switch (parsed.action) {
+				case "error":
+					return usage(parsed.message, runtime);
+				case "list":
+					return usage(formatCredentialList(vault.list()), runtime);
+				case "forget":
+					return usage(formatCredentialForget(vault.forget(parsed.key), parsed.key), runtime);
+				case "forget-all":
+					return usage(formatCredentialForgetAll(vault.clear()), runtime);
+				case "store":
+					return usage(
+						`Storing a credential needs the interactive TUI so the value can be entered masked. Run /credential ${parsed.key} there.`,
+						runtime,
+					);
+			}
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const vault = runtime.ctx.session.credentials;
+			if (!vault) {
+				runtime.ctx.showError(CREDENTIAL_UNAVAILABLE);
+				return;
+			}
+			const parsed = parseCredentialCommand(command.args);
+			switch (parsed.action) {
+				case "error":
+					runtime.ctx.showError(parsed.message);
+					return;
+				case "list":
+					runtime.ctx.showStatus(formatCredentialList(vault.list()));
+					return;
+				case "forget":
+					runtime.ctx.showStatus(formatCredentialForget(vault.forget(parsed.key), parsed.key));
+					return;
+				case "forget-all":
+					runtime.ctx.showStatus(formatCredentialForgetAll(vault.clear()));
+					return;
+				case "store":
+					break;
+			}
+			// Masked so the value is never painted into the terminal, and captured
+			// through the dialog rather than the composer so it never enters the
+			// editor buffer, its history, or a transcript entry.
+			const value = await runtime.ctx.showHookInput(
+				`Paste value for **${parsed.key}** — hidden, enter stores, esc cancels`,
+				undefined,
+				{ mask: true },
+			);
+			if (value === undefined) {
+				runtime.ctx.showStatus(`Cancelled; ${parsed.key} not stored.`);
+				return;
+			}
+			// Trimmed because a paste routinely carries a trailing newline, and a
+			// credential with stray whitespace fails authentication in a way that is
+			// invisible to everyone involved.
+			const result = vault.store(parsed.key, value.trim(), "command");
+			if (!result.ok) {
+				runtime.ctx.showError(describeStoreFailure(result.reason, parsed.key));
+				return;
+			}
+			// The credential block is part of the system prompt, so the model only
+			// learns about the new key once the prompt is rebuilt.
+			await runtime.ctx.session.refreshBaseSystemPrompt();
+			runtime.ctx.showStatus(
+				`${result.replaced ? "Replaced" : "Stored"} ${result.credential.key}. The agent can use it as ${result.credential.placeholder} without ever reading the value.`,
+			);
 		},
 	},
 ];

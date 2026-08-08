@@ -131,8 +131,8 @@ function createHandlerUIContext(ui: ExtensionUIContext, handlerSignal: AbortSign
 			ui.select(title, options, attachHandlerSignal(dialogOptions, handlerSignal)),
 		confirm: (title, message, dialogOptions) =>
 			ui.confirm(title, message, attachHandlerSignal(dialogOptions, handlerSignal)),
-		input: (title, placeholder, dialogOptions) =>
-			ui.input(title, placeholder, attachHandlerSignal(dialogOptions, handlerSignal)),
+		input: (title, placeholder, dialogOptions, inputOptions) =>
+			ui.input(title, placeholder, attachHandlerSignal(dialogOptions, handlerSignal), inputOptions),
 		askDialog: askDialog
 			? (questions, dialogOptions) =>
 					askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal))
