@@ -2238,6 +2238,13 @@ export class EventController {
 	}
 
 	sendCompletionNotification(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
+		// Only the main session's terminal settle should surface a desktop
+		// notification. Subagent completions and mid-retry / scheduled-
+		// continuation pauses emit `agent_end` with `isTerminal: false` and
+		// would otherwise spam the desktop on every task tool return.
+		if (event.isTerminal === false) return;
+		if (this.#retryPending) return;
+
 		const notify = settings.get("completion.notify");
 		if (notify === "off") return;
 
