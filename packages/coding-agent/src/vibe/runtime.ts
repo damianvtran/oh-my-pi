@@ -18,7 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
-import { resolveAgentModelPatterns } from "../config/model-resolver";
+import { formatActiveModelSelector, resolveAgentModelPatterns } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -92,6 +92,8 @@ export interface VibeParentSession {
 	asyncJobManager?: AsyncJobManager;
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
+	getActiveModel?: ToolSession["getActiveModel"];
+	getActiveThinkingLevel?: ToolSession["getActiveThinkingLevel"];
 	getModelString?: () => string | undefined;
 }
 
@@ -490,14 +492,22 @@ export class VibeSessionRegistry {
 			throw new ToolError(`Bundled agent "${agentName}" for vibe cli "${cli}" is unavailable.`);
 		}
 		const agentModelOverrides = session.settings.get("task.agentModelOverrides");
+		// `task.inheritSessionModel` (fork feature): vibe workers track the
+		// session's live model and effort like any other subagent spawn.
+		const inheritSessionModel = session.settings.get("task.inheritSessionModel") === true;
+		const activeModelPattern =
+			(inheritSessionModel &&
+				formatActiveModelSelector(session.getActiveModel?.(), session.getActiveThinkingLevel?.())) ||
+			session.getActiveModelString?.();
 		return {
 			agent,
 			modelOverride: resolveAgentModelPatterns({
 				settingsOverride: agentModelOverrides[agentName],
 				agentModel: agent.model,
 				settings: session.settings,
-				activeModelPattern: session.getActiveModelString?.(),
+				activeModelPattern,
 				fallbackModelPattern: session.getModelString?.(),
+				inheritSessionModel,
 			}),
 		};
 	}

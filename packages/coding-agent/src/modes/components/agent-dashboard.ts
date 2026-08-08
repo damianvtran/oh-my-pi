@@ -94,6 +94,8 @@ interface GeneratedAgentSpec {
 interface AgentDashboardModelContext {
 	modelRegistry?: ModelRegistry;
 	activeModelPattern?: string;
+	/** Live selector including the session's active thinking suffix; preview source for `task.inheritSessionModel`. */
+	activeModelSelector?: string;
 	defaultModelPattern?: string;
 }
 
@@ -872,21 +874,28 @@ export class AgentDashboard extends Container {
 	}
 
 	#defaultPatternsFor(agent: DashboardAgent): string[] {
-		return resolveAgentModelPatterns({
-			agentModel: agent.model,
-			settings: this.#settingsManager ?? undefined,
-			activeModelPattern: this.modelContext.activeModelPattern,
-			fallbackModelPattern: this.modelContext.defaultModelPattern,
-		});
+		return this.#resolvePatternsFor(agent, undefined);
 	}
 
 	#effectivePatternsFor(agent: DashboardAgent, draftOverride: string | undefined): string[] {
+		return this.#resolvePatternsFor(agent, draftOverride);
+	}
+
+	// `task.inheritSessionModel` (fork feature): the preview must match what a
+	// spawn would resolve, so with the flag on the live selector (model plus
+	// effort) replaces the bare active pattern.
+	#resolvePatternsFor(agent: DashboardAgent, draftOverride: string | undefined): string[] {
+		const inheritSessionModel = this.#settingsManager?.get("task.inheritSessionModel") === true;
 		return resolveAgentModelPatterns({
 			settingsOverride: draftOverride,
 			agentModel: agent.model,
 			settings: this.#settingsManager ?? undefined,
-			activeModelPattern: this.modelContext.activeModelPattern,
+			activeModelPattern:
+				inheritSessionModel && this.modelContext.activeModelSelector
+					? this.modelContext.activeModelSelector
+					: this.modelContext.activeModelPattern,
 			fallbackModelPattern: this.modelContext.defaultModelPattern,
+			inheritSessionModel,
 		});
 	}
 

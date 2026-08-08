@@ -15,6 +15,7 @@ import {
 } from "../../advisor";
 import { reset as resetCapabilities } from "../../capability";
 import {
+	formatActiveModelSelector,
 	formatModelSelectorValue,
 	resolveAdvisorRoleSelection,
 	resolveModelRoleValue,
@@ -399,6 +400,7 @@ export class SelectorController {
 		const dashboard = await AgentDashboard.create(getProjectDir(), this.ctx.settings, this.ctx.ui.terminal.rows, {
 			modelRegistry: this.ctx.session.modelRegistry,
 			activeModelPattern,
+			activeModelSelector: formatActiveModelSelector(activeModel, this.ctx.session.thinkingLevel),
 			defaultModelPattern,
 		});
 		const overlay = this.ctx.ui.showOverlay(dashboard, {
