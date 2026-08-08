@@ -50,11 +50,20 @@ export function shortenHashes(message: string): string {
 
 /**
  * Middle-truncate cleaned text, preserving 2/3 of the available space from the
- * head and 1/3 from the tail. The omission marker counts toward the bound.
+ * head and 1/3 from the tail. The omission marker counts toward the bound, and
+ * the result is never longer than `limit`.
+ *
+ * `limit` exists for {@link formatTitleConversationContext}, which bounds each
+ * sampled turn separately: applying one bound to the assembled envelope would
+ * cut whichever turns happen to sit in the middle, which is exactly the
+ * structure that envelope is built to convey. That caller derives its limits by
+ * dividing a fixed budget, so small and zero limits are reachable and the
+ * length guarantee is what makes the envelope's own bound provable.
  */
-export function truncateTinyMessage(message: string): string {
-	if (message.length <= MAX_TINY_MESSAGE_CHARS) return message;
-	let omitted = message.length - MAX_TINY_MESSAGE_CHARS;
+export function truncateTinyMessage(message: string, limit: number = MAX_TINY_MESSAGE_CHARS): string {
+	if (message.length <= limit) return message;
+	if (limit <= 0) return "";
+	let omitted = message.length - limit;
 	let marker = "";
 	let headChars = 0;
 	let tailChars = 0;
@@ -62,13 +71,19 @@ export function truncateTinyMessage(message: string): string {
 	// only the decimal digit count can change.
 	for (let pass = 0; pass < 2; pass++) {
 		marker = `\n[… ${omitted} chars omitted …]\n`;
-		const keptChars = Math.max(0, MAX_TINY_MESSAGE_CHARS - marker.length);
+		const keptChars = Math.max(0, limit - marker.length);
 		headChars = Math.ceil((keptChars * 2) / 3);
 		tailChars = keptChars - headChars;
 		omitted = message.length - headChars - tailChars;
 	}
 	marker = `\n[… ${omitted} chars omitted …]\n`;
-	return `${message.slice(0, headChars)}${marker}${message.slice(-tailChars)}`;
+	// No room for the marker plus anything either side of it: say less rather
+	// than return a marker that is itself longer than the budget.
+	if (marker.length >= limit) return message.slice(0, limit);
+	// `slice(message.length - tailChars)`, not `slice(-tailChars)`: the latter is
+	// `slice(-0)` === `slice(0)` when nothing is kept from the tail, which returns
+	// the entire message and makes the "truncated" result longer than the input.
+	return `${message.slice(0, headChars)}${marker}${message.slice(message.length - tailChars)}`;
 }
 
 /**
@@ -105,8 +120,9 @@ export function preprocessTinyMessage(message: string): string {
 /** Envelope produced by {@link formatTitleConversationContext}. Anchored to both
  *  ends so ordinary user text merely containing a chat snippet never matches. */
 const CHAT_CONTEXT_ENVELOPE = /^\s*<chat>[\s\S]*<\/chat>\s*$/;
-/** Structural tags emitted by {@link formatTitleConversationContext}. */
-const CHAT_SCAFFOLD_TAG = /<\/?(?:chat|user|assistant|think)>/g;
+/** Structural tags emitted by {@link formatTitleConversationContext}, including
+ *  the self-closing `<elided/>` gap marker. */
+const CHAT_SCAFFOLD_TAG = /<\/?(?:chat|current-title|user|assistant|think|elided)\/?>/g;
 
 /** True when `message` is a preformatted replan context from
  *  {@link formatTitleConversationContext} — already cleaned per turn and
@@ -116,8 +132,9 @@ export function isPreformattedChatContext(message: string): boolean {
 	return CHAT_CONTEXT_ENVELOPE.test(message);
 }
 
-/** Drop the `<chat>`/`<user>`/`<assistant>`/`<think>` scaffolding, keeping turn
- *  text. Used for token-level signal checks on preformatted contexts. */
+/** Drop the `<chat>`/`<current-title>`/`<user>`/`<assistant>`/`<think>`/`<elided/>`
+ *  scaffolding, keeping turn text. Used for token-level signal checks on
+ *  preformatted contexts. */
 export function stripChatScaffolding(message: string): string {
 	return message.replace(CHAT_SCAFFOLD_TAG, " ");
 }
@@ -129,27 +146,134 @@ export function formatTitleUserMessage(message: string): string {
 	return `<user>\n${preprocessTinyMessage(message)}\n</user>`;
 }
 
-/** One recent conversation turn supplied to title refresh after replanning. */
+/** One sampled conversation turn supplied to session theme titling. */
 export interface TitleConversationTurn {
 	role: "user" | "assistant";
 	text?: string;
 	thinking?: string;
 }
 
-/** Format preprocessed recent context for title generation after a todo replan. */
-export function formatTitleConversationContext(turns: readonly TitleConversationTurn[]): string {
-	const formattedTurns: string[] = [];
-	for (const turn of turns) {
-		const sections: string[] = [];
+/** Marks turns the sampler dropped, so the model does not read the head and the
+ *  tail of a long conversation as adjacent. Self-closing: there is no content to
+ *  wrap, and a paired tag would invite the model to invent some. */
+const ELIDED_MARKER = "<elided/>";
+
+/**
+ * Longest session name embedded as `<current-title>`. Nothing else bounds it —
+ * `SessionManager` only trims and strips control characters, and an imported or
+ * model-authored title can be arbitrarily long — and the header is subtracted
+ * from the budget the turns then share, so an unbounded one would push the
+ * envelope past {@link MAX_TINY_MESSAGE_CHARS} and starve every turn at once.
+ */
+const CURRENT_TITLE_MAX_CHARS = 200;
+
+/**
+ * Share `available` characters across `bodies` by max-min fairness: every body
+ * shorter than an equal share is kept whole and donates its slack to the ones
+ * that are over. Returns the per-body character cap, summing to at most
+ * `available` — which is what makes the envelope's length bound provable.
+ *
+ * The opening turn of a real session is frequently ten times the length of the
+ * turns around it, which is precisely the turn the theme prompt leans on, so an
+ * equal split would truncate the one turn that states the subject while short
+ * assistant acknowledgements keep budget they cannot use.
+ */
+function allocateTurnBudgets(bodies: readonly string[], available: number): number[] {
+	const caps = new Array<number>(bodies.length).fill(0);
+	const order = bodies.map((body, index) => ({ index, length: body.length })).sort((a, b) => a.length - b.length);
+	let remaining = available;
+	let slots = bodies.length;
+	for (const { index, length } of order) {
+		// Shortest first, so each body either fits its equal share of what is left
+		// or is capped at it; the leftover from those that fit raises the share for
+		// everyone after them, and the running total can never exceed `available`.
+		const cap = Math.min(length, Math.floor(remaining / slots));
+		caps[index] = cap;
+		remaining -= cap;
+		slots--;
+	}
+	return caps;
+}
+
+/**
+ * Format sampled conversation turns for session theme titling.
+ *
+ * `currentTitle` is emitted as the first child of `<chat>` rather than as a
+ * sibling of it: {@link isPreformattedChatContext} anchors on the envelope
+ * spanning the entire string, so anything outside `</chat>` would make the
+ * context look like ordinary user text and send it through
+ * {@link preprocessTinyMessage}, whose paired-tag stripping eats the envelope.
+ *
+ * `elidedAfter` indexes into `turns`; the marker is emitted once, immediately
+ * before the first turn past that index that survives cleaning. Anchoring it to
+ * the following turn rather than the preceding one keeps it out of the trailing
+ * position, where it would read as "the conversation continues" instead of
+ * "turns were skipped here".
+ *
+ * The length bound is applied per turn, not to the assembled envelope. Bounding
+ * the envelope reduced this to a head-and-tail slice of a string that is
+ * already a head-and-tail sample: on a real session the middle turns vanished,
+ * `<elided/>` went with them, and what remained opened and closed mid-tag. The
+ * head turns the sampler exists to preserve were the ones cut, because they are
+ * the long ones. Budgeting per turn keeps every sampled turn, its role tag and
+ * the gap marker, and spends the omission inside the turns that are actually
+ * oversized.
+ */
+export function formatTitleConversationContext(
+	turns: readonly TitleConversationTurn[],
+	options?: { currentTitle?: string; elidedAfter?: number },
+): string {
+	const rendered: Array<{
+		role: TitleConversationTurn["role"];
+		text: string;
+		thinking: string;
+		elidedBefore: boolean;
+	}> = [];
+	const elidedAfter = options?.elidedAfter;
+	let elisionEmitted = false;
+	for (const [index, turn] of turns.entries()) {
 		// Clean raw content before adding structural tags so paired-tag stripping
 		// cannot consume the `<user>`/`<assistant>` scaffolding added below.
 		const text = cleanTinyMessage(turn.text ?? "").trim();
-		if (text) sections.push(text);
 		const thinking = turn.role === "assistant" ? cleanTinyMessage(turn.thinking ?? "").trim() : "";
-		if (thinking) sections.push(`<think>\n${thinking}\n</think>`);
-		if (sections.length === 0) continue;
-		formattedTurns.push(`<${turn.role}>\n${sections.join("\n\n")}\n</${turn.role}>`);
+		if (!text && !thinking) continue;
+		const elidedBefore = !elisionEmitted && elidedAfter !== undefined && index > elidedAfter;
+		if (elidedBefore) elisionEmitted = true;
+		rendered.push({ role: turn.role, text, thinking, elidedBefore });
 	}
-	if (formattedTurns.length === 0) return "";
-	return truncateTinyMessage(`<chat>\n${formattedTurns.join("\n\n")}\n</chat>`);
+	if (rendered.length === 0) return "";
+	const currentTitle = options?.currentTitle?.trim();
+	// The name already in use leads the envelope: the model is asked to keep it
+	// unless the subject changed, and that judgement is cheapest when it reads the
+	// name before the turns. Bounded like any other body: nothing constrains a
+	// session name's length, and an unbounded header would push the envelope past
+	// the budget it is subtracted from.
+	const header = currentTitle
+		? `<current-title>\n${truncateTinyMessage(currentTitle, CURRENT_TITLE_MAX_CHARS)}\n</current-title>\n\n`
+		: "";
+	// Text and thinking are budgeted as two separate bodies, with `assemble`
+	// owning the `<think>` tags. Truncating the joined pair instead would cut the
+	// opening `<think>` out of any assistant turn whose text exceeds the head
+	// allowance while the closing tag survived in the tail — a stray `</think>`
+	// on most oversized turns, which is the mid-tag damage this whole approach
+	// exists to avoid.
+	const assemble = (bodies: readonly string[]): string => {
+		const parts: string[] = [];
+		for (const [index, turn] of rendered.entries()) {
+			if (turn.elidedBefore) parts.push(ELIDED_MARKER);
+			const sections: string[] = [];
+			if (turn.text) sections.push(bodies[index * 2] ?? "");
+			if (turn.thinking) sections.push(`<think>\n${bodies[index * 2 + 1] ?? ""}\n</think>`);
+			parts.push(`<${turn.role}>\n${sections.join("\n\n")}\n</${turn.role}>`);
+		}
+		return `<chat>\n${header}${parts.join("\n\n")}\n</chat>`;
+	};
+	// Two slots per turn, in `assemble`'s indexing order; an absent half is an
+	// empty body, which costs nothing and keeps the indexing arithmetic trivial.
+	const bodies = rendered.flatMap(turn => [turn.text, turn.thinking]);
+	const scaffolding = assemble(bodies.map(() => "")).length;
+	const caps = allocateTurnBudgets(bodies, Math.max(0, MAX_TINY_MESSAGE_CHARS - scaffolding));
+	// `caps` is index-aligned with `bodies`, so the fallback is unreachable; 0 is
+	// the safe reading of "no budget" rather than a number that could overrun.
+	return assemble(bodies.map((body, index) => truncateTinyMessage(body, caps[index] ?? 0)));
 }
