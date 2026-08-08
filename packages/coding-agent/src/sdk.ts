@@ -129,11 +129,11 @@ import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
 	deobfuscateToolArguments,
+	getSecretPlaceholderKeySync,
 	obfuscateMessages,
 	obfuscateProviderContext,
 	SecretObfuscator,
 	SessionCredentials,
-	getSecretPlaceholderKeySync,
 } from "./secrets";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
