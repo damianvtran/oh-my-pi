@@ -1,8 +1,8 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
+import { applyBackgroundToLine } from "@oh-my-pi/pi-tui/utils";
 import { colorLuma, hexToRgb, logger, relativeLuminance, rgbToHex } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { applyBackgroundToLine } from "@oh-my-pi/pi-tui/utils";
 import { ansi256ToHex, bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
 import type { ColorMode, ThemeBg, ThemeColor } from "./schema";
 import {
