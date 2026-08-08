@@ -7,6 +7,7 @@ import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme, Sy
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveMermaidAscii } from "./mermaid-cache";
+import { isFullscreenViewport } from "../../tools/render-utils";
 import { theme } from "./theme";
 import type { Theme } from "./theme-class";
 
@@ -224,14 +225,42 @@ export function getSelectListTheme(): SelectListTheme {
 		scrollInfo: (text: string) => theme.fg("muted", text),
 		noMatch: (text: string) => theme.fg("muted", text),
 		symbols: getSymbolTheme(),
-		// Not raw `selectedBg`: dozens of themes set it to their own surface, which
-		// left the hover band invisible. Both lists skip the wash on the keyboard-
-		// selected row, so it never competes with the cursor + accent selection.
+		// Both bands are the same rung of the surface ladder, not raw `selectedBg`:
+		// dozens of themes set that equal to their own surface, which left the band
+		// invisible. Hovered and selected share the rung the way opencode does, and
+		// the accent `selectedText` plus the cursor glyph is what tells them apart.
 		hovered: (text: string) => theme.hoverBg(text),
+		// Append mode has no pointer and no panel behind the list, so a wash there
+		// would be a band floating on native scrollback. Leave it untouched.
+		selectedRow: (text: string) => (isFullscreenViewport() ? theme.elementBg(text) : text),
 	};
 }
 
-export function getEditorTheme(): EditorTheme {
+/**
+ * Which surface the editor will be drawn on. Only the selection wash depends
+ * on it: its contrast floor is measured against the background it lands on,
+ * and a floating overlay is two rungs above the composer.
+ */
+export type EditorSurface = "panel" | "overlay";
+
+/**
+ * The wash an editor on `surface` paints selected text with.
+ *
+ * A theme that leaves `statusLineBg` at the terminal default derives no surface
+ * ladder, so there is no rung to tint and either wash would paint nothing at
+ * all. Reverse video needs no palette and inverts whatever the row already
+ * carries, which is what the transcript's own drag-select uses for exactly this
+ * reason.
+ */
+function selectionWashFor(surface: EditorSurface): (text: string) => string {
+	const open = surface === "overlay" ? theme.selectionOverlayBgAnsi : theme.selectionBgAnsi;
+	if (open === "") return (text: string) => `\x1b[7m${text}\x1b[27m`;
+	return surface === "overlay"
+		? (text: string) => theme.selectionOverlayBg(text)
+		: (text: string) => theme.selectionBg(text);
+}
+
+export function getEditorTheme(surface: EditorSurface = "panel"): EditorTheme {
 	// Guard against `theme` being undefined (pre-init or cross-module-instance
 	// plugin calls). See #2998.
 	if (typeof theme === "undefined") {
@@ -247,6 +276,17 @@ export function getEditorTheme(): EditorTheme {
 		selectList: getSelectListTheme(),
 		symbols: getSymbolTheme(),
 		hintStyle: (text: string) => theme.fg("dim", text),
+		// Unconditional, unlike `selectList.selectedRow` above: that band is a
+		// pointer affordance with nothing behind it in append mode, but selected
+		// composer text is a direct answer to the user's own drag and has to show
+		// up wherever the composer is drawn.
+		//
+		// A theme that leaves `statusLineBg` at the terminal default derives no
+		// surface ladder, so there is no rung to tint and `selectionBg` would
+		// paint nothing at all. Reverse video needs no palette and inverts
+		// whatever the row already carries, which is what the transcript's own
+		// drag-select uses for exactly this reason.
+		selectionWash: selectionWashFor(surface),
 	};
 }
 
