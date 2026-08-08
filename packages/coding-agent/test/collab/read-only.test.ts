@@ -75,6 +75,7 @@ function makeHostContext(): HostHarness {
 		},
 		ui: { requestRender: () => {} },
 		showStatus: () => {},
+		startAutoTitleGeneration: () => {},
 		collabHost: undefined,
 	} as unknown as InteractiveModeContext;
 	const nextPrompt = (): Promise<{ from?: string }> => {

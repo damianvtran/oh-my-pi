@@ -29,6 +29,7 @@ import { readToolRenderer } from "./read";
 import { resolveRenderer } from "./resolve";
 import { todoToolRenderer } from "./todo";
 import { createVibeToolRenderer } from "./vibe";
+import { wakeToolRenderer } from "./wake";
 import { writeToolRenderer } from "./write";
 import { setXdevRendererLookup } from "./xdev";
 
@@ -116,6 +117,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 		return taskToolRenderer as ToolRenderer;
 	},
 	todo: todoToolRenderer as ToolRenderer,
+	wake: wakeToolRenderer as ToolRenderer,
 	github: githubToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,

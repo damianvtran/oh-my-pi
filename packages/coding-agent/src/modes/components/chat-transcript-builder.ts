@@ -26,6 +26,7 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionMessageEntry } from "../../session/session-entries";
+import { WAKE_PROMPT_MESSAGE_TYPE, type WakePromptDetails } from "../../wake/store";
 import { theme } from "../theme/theme";
 import {
 	assistantHasVisibleContent,
@@ -57,6 +58,7 @@ import { ToolExecutionComponent } from "./tool-execution";
 import { TranscriptContainer } from "./transcript-container";
 import { createUsageRowBlock } from "./usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
+import { WakeMessageComponent } from "./wake-message";
 
 export interface ChatTranscriptBuilderDeps {
 	ui: TUI;
@@ -480,6 +482,14 @@ export class ChatTranscriptBuilder {
 		}
 		if (message.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
 			this.container.addChild(new CollabPromptMessageComponent(message as CustomMessage<CollabPromptDetails>));
+			return;
+		}
+		// Wake cards are dispatched here *and* in `UiHelpers.addMessageToChat`:
+		// this path rebuilds a persisted transcript, that one appends live. A
+		// branch present in only one of them renders correctly until `/resume`
+		// and then degrades to the generic custom-message block.
+		if (message.customType === WAKE_PROMPT_MESSAGE_TYPE) {
+			this.container.addChild(new WakeMessageComponent(message as CustomMessage<WakePromptDetails>));
 			return;
 		}
 		if (message.customType === SKILL_PROMPT_MESSAGE_TYPE) {

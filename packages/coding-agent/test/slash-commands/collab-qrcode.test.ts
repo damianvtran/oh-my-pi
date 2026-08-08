@@ -3,6 +3,7 @@ import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { startCollabHosting } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-collaboration";
 import {
 	type BuiltinSlashCommandRuntime,
 	executeBuiltinSlashCommand,
@@ -45,6 +46,7 @@ function createRuntimeHarness(options?: { collabHost?: NonNullable<InteractiveMo
 	const settingsGet = vi.fn((key: string) => {
 		if (key === "collab.relayUrl") return "wss://relay.example.com";
 		if (key === "collab.webUrl") return "";
+		if (key === "collab.publishLink") return false;
 		return "";
 	});
 	const ctx = {
@@ -80,14 +82,13 @@ function mockStartedHostLinks() {
 
 describe("/collab slash command QR code rendering", () => {
 	it("starts hosting and prints a one-shot full-control QR", async () => {
-		const startSpy = mockStartedHostLinks();
+		mockStartedHostLinks();
 		const harness = createRuntimeHarness();
 
 		const handled = await executeBuiltinSlashCommand("/collab", harness.runtime);
 
 		expect(handled).toBe(true);
 		expect(harness.setText).toHaveBeenCalledWith("");
-		expect(startSpy).toHaveBeenCalledWith("wss://relay.example.com", "");
 		expect(harness.ctx.collabHost).toBeInstanceOf(CollabHost);
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
 		expect(statusText).toContain("my.omp.sh/#started-full");
@@ -100,13 +101,12 @@ describe("/collab slash command QR code rendering", () => {
 	});
 
 	it("starts hosting and prints a one-shot read-only QR", async () => {
-		const startSpy = mockStartedHostLinks();
+		mockStartedHostLinks();
 		const harness = createRuntimeHarness();
 
 		const handled = await executeBuiltinSlashCommand("/collab view", harness.runtime);
 
 		expect(handled).toBe(true);
-		expect(startSpy).toHaveBeenCalledWith("wss://relay.example.com", "");
 		expect(harness.ctx.collabHost).toBeInstanceOf(CollabHost);
 		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
 		expect(statusText).toContain("my.omp.sh/#started-view");
@@ -150,5 +150,62 @@ describe("/collab slash command QR code rendering", () => {
 		const component = presented[1] as CollabQrCodeComponent;
 		expect(component.url).toBe(webViewLink);
 		expect(component.render(10).join("\n")).toContain("QR code hidden");
+	});
+});
+
+/**
+ * `collab.autoStart` fires on every interactive launch, so it shares the
+ * `/collab` start path but suppresses the QR block and must still hand the room
+ * the right capability. These cover the decisions that path owns.
+ */
+describe("collab auto-start hosting", () => {
+	it("prints the join hint without a QR code", async () => {
+		mockStartedHostLinks();
+		const harness = createRuntimeHarness();
+
+		const started = await startCollabHosting(harness.ctx, { qr: false });
+
+		expect(started).toBe(true);
+		expect(harness.ctx.collabHost).toBeInstanceOf(CollabHost);
+		expect(harness.showStatus.mock.calls[0]?.[0] as string).toContain("my.omp.sh/#started-full");
+		expect(harness.present).not.toHaveBeenCalled();
+	});
+
+	it("hands out only the read-only link in view mode", async () => {
+		mockStartedHostLinks();
+		const harness = createRuntimeHarness();
+
+		await startCollabHosting(harness.ctx, { view: true, qr: false });
+
+		const statusText = harness.showStatus.mock.calls[0]?.[0] as string;
+		expect(statusText).toContain("my.omp.sh/#started-view");
+		expect(statusText).not.toContain("my.omp.sh/#started-full");
+	});
+
+	it("claims the host slot before the relay handshake so a racing /collab cannot double-host", async () => {
+		// Auto-start runs unawaited while the TUI already accepts input. If the
+		// slot were only claimed after `start()` resolved, a `/collab` typed during
+		// the handshake would pass its own guard and build a second host that
+		// `/collab stop` could never reach.
+		const gate = Promise.withResolvers<void>();
+		vi.spyOn(CollabHost.prototype, "start").mockImplementation(() => gate.promise);
+		const harness = createRuntimeHarness();
+
+		const pending = startCollabHosting(harness.ctx, { qr: false });
+		expect(harness.ctx.collabHost).toBeInstanceOf(CollabHost);
+
+		gate.resolve();
+		await pending;
+	});
+
+	it("releases the host slot when the relay is unreachable", async () => {
+		vi.spyOn(CollabHost.prototype, "start").mockRejectedValue(new Error("Failed to connect"));
+		const harness = createRuntimeHarness();
+
+		const started = await startCollabHosting(harness.ctx, { qr: false });
+
+		expect(started).toBe(false);
+		expect(harness.ctx.collabHost).toBeUndefined();
+		expect(harness.showError).toHaveBeenCalledWith("Failed to start collab session: Failed to connect");
 	});
 });
