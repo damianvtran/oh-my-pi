@@ -11,7 +11,6 @@ import {
 	completeSimple,
 	type Model,
 	parseRateLimitReason,
-	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { isConPTYHosted } from "@oh-my-pi/pi-tui";
@@ -104,6 +103,29 @@ function disposeWindowsConsoleTitleApi(): void {
 // ceiling costs nothing when thinking is genuinely suppressed and keeps the
 // `<title>` marker output reachable when it isn't (issue #4355).
 const TITLE_MAX_TOKENS = 1024;
+
+// Raised cap for the two same-model title retries below (mandatory-reasoning
+// re-enable and truncation recovery). Once reasoning is in play the 1024 cap
+// is spent by thinking before the marker can land — observed in the wild as
+// `stopReason: "length"` with the entire budget in `reasoningTokens`, leaving
+// the session untitled until a later message happened to reason less. 8192
+// leaves room for a thinking pass and the title itself; like the base cap it
+// is a ceiling, not a target.
+const TITLE_REASONING_RETRY_MAX_TOKENS = 8192;
+
+/**
+ * True when a provider rejected a reasoning-disabled request because its
+ * endpoint requires reasoning ("Reasoning is mandatory for this endpoint and
+ * cannot be disabled"). The turn path never meets this — turns always send a
+ * real effort — but titling asks for none, so mandatory-reasoning models
+ * (e.g. OpenRouter's responses endpoints) refuse every title request until
+ * the session switches to a model that tolerates the disable. Detecting the
+ * message lets the title path retry with reasoning allowed.
+ */
+function isMandatoryReasoningRejection(errorMessage: string | undefined): boolean {
+	if (!errorMessage) return false;
+	return /\breasoning\b[^\n]{0,120}\b(?:mandatory|required|cannot be disabled)\b/i.test(errorMessage);
+}
 
 /** Matches the title the model wraps in `<title>...</title>`. */
 const TITLE_MARKER_GLOBAL_RE = /<title>([\s\S]*?)<\/title>|<title\s*\/>|<title>\s*$/gi;
@@ -247,9 +269,9 @@ export async function generateTitleOnline(
 	const systemPrompt = titleSystemPrompt ? [titleSystemPrompt, TITLE_MARKER_INSTRUCTION] : [TITLE_SYSTEM_PROMPT];
 	const userMessage = formatTitleUserMessage(firstMessage);
 
-	// Title generation is a 3-7 word task, but the ceiling has to survive
-	// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
-	const maxTokens = TITLE_MAX_TOKENS;
+	// The attempt budget starts at the cheap reasoning-disabled request and only
+	// grows inside the per-model ladder below when the endpoint proves it needs
+	// reasoning tokens (see the retry ladder in the loop).
 	const attemptModels = resolveTitleFailoverModels(model, registry, settings);
 
 	for (const [attemptIndex, attemptModel] of attemptModels.entries()) {
@@ -279,36 +301,94 @@ export async function generateTitleOnline(
 			// account_uuid rather than the snapshot-at-call-site value.
 			const metadata = metadataResolver?.(attemptModel.provider);
 
-			logger.debug("title-generator: request", { ...modelContext, maxTokens });
-
-			// Two layers, deliberately: `retryTransientCompletion` re-tries this
-			// *same* model through a blip (upstream's behaviour), while the
-			// enclosing loop fails over to the next chain candidate once the
-			// model itself is the problem (rate-limited, out of credit, no
-			// credentials). Collapsing either one loses a distinct recovery.
-			const response = await retryTransientCompletion(
-				() =>
-					completeSimple(
-						attemptModel,
-						{
-							systemPrompt,
-							messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-						},
-						{
-							apiKey: registry.resolver(attemptModel, sessionId),
-							maxTokens,
-							disableReasoning: true,
-							// Greedy decode: titling is extraction, not generation. Backends that
-							// default temperature high (e.g. Ollama's 0.8) otherwise garble names
-							// from the message ("hashline" → "HasHroshi"). Providers whose models
-							// reject sampling params drop this via `supportsSamplingParams`.
-							temperature: 0,
-							metadata,
-							signal,
-						},
-					),
-				{ signal },
-			);
+			// Same-model remediation ladder BEFORE failing over to the next
+			// candidate. The default request disables reasoning — a title is a
+			// 3-7 word task — but two endpoint families defeat that:
+			//
+			// 1. Mandatory-reasoning endpoints reject the disable outright
+			//    ("Reasoning is mandatory for this endpoint and cannot be
+			//    disabled"). Retry with reasoning allowed and the raised cap,
+			//    which is what makes turns work on these models.
+			// 2. Endpoints that silently ignore `disableReasoning` (Qwen3-style
+			//    chat templates force thinking on) can spend the entire base cap
+			//    on reasoning and truncate before the `<title>` marker lands.
+			//    Retry once with the raised cap.
+			//
+			// Each remediation fires at most once per model; everything else
+			// falls through to the existing error / no-title handling.
+			let maxTokens = TITLE_MAX_TOKENS;
+			let disableReasoning = true;
+			let reEnabledReasoning = false;
+			let raisedTokenCap = false;
+			let response!: AssistantMessage;
+			let title: string | null = null;
+			for (;;) {
+				logger.debug("title-generator: request", { ...modelContext, maxTokens, disableReasoning });
+				// Two recovery layers, each for a distinct failure and neither
+				// substitutable: this ladder re-shapes the request when the endpoint's
+				// reasoning behaviour defeats it, and the enclosing candidate loop
+				// moves on when the model itself is unusable (rate-limited, out of
+				// credit, uncredentialed).
+				//
+				// Deliberately NOT wrapped in `retryTransientCompletion`. Upstream
+				// added that here because its title path had no recovery at all; this
+				// path has the candidate loop, and the two own the same failure class.
+				// Nesting them lets the inner one win: it consumes a transient
+				// `stopReason: "error"` before the failover check below can see it, so
+				// "take the next healthy model" silently became "sleep out a backoff,
+				// then re-hit the model the provider just refused" — and a single
+				// candidate with fallback disabled made three provider calls where
+				// this path guarantees one. Titling is best-effort and retried on the
+				// next message, so losing blip-tolerance on a chain of one is cheaper
+				// than losing failover.
+				response = await completeSimple(
+					attemptModel,
+					{
+						systemPrompt,
+						messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+					},
+					{
+						apiKey: registry.resolver(attemptModel, sessionId),
+						maxTokens,
+						disableReasoning,
+						// Greedy decode: titling is extraction, not generation. Backends that
+						// default temperature high (e.g. Ollama's 0.8) otherwise garble names
+						// from the message ("hashline" → "HasHroshi"). Providers whose models
+						// reject sampling params drop this via `supportsSamplingParams`.
+						temperature: 0,
+						metadata,
+						signal,
+					},
+				);
+				if (signal?.aborted) return null;
+				if (
+					response.stopReason === "error" &&
+					disableReasoning &&
+					!reEnabledReasoning &&
+					isMandatoryReasoningRejection(response.errorMessage)
+				) {
+					reEnabledReasoning = true;
+					disableReasoning = false;
+					maxTokens = Math.max(maxTokens, TITLE_REASONING_RETRY_MAX_TOKENS);
+					logger.debug("title-generator: reasoning is mandatory; retrying with reasoning enabled", {
+						...modelContext,
+						maxTokens,
+					});
+					continue;
+				}
+				title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
+				if (!title && !raisedTokenCap && response.stopReason === "length") {
+					raisedTokenCap = true;
+					maxTokens = Math.max(maxTokens, TITLE_REASONING_RETRY_MAX_TOKENS);
+					logger.debug("title-generator: response truncated before the title marker; retrying with raised cap", {
+						...modelContext,
+						maxTokens,
+						usage: response.usage,
+					});
+					continue;
+				}
+				break;
+			}
 
 			if (response.stopReason === "error") {
 				logger.warn("title-generator: response error", {
@@ -317,12 +397,9 @@ export async function generateTitleOnline(
 					stopReason: response.stopReason,
 					errorMessage: response.errorMessage,
 				});
-				if (signal?.aborted) return null;
 				noteTitleFailoverCooldown(registry, attemptModel, response.errorMessage);
 				continue;
 			}
-
-			const title = normalizeGeneratedTitle(extractGeneratedTitle(response.content), firstMessage);
 
 			if (!title) {
 				logger.debug("title-generator: no title returned", {

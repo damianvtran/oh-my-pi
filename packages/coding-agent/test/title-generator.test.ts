@@ -755,6 +755,131 @@ describe("title generator failover", () => {
 		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(fallback);
 	});
+
+	// Same-model remediation ladder: two endpoint families defeat the default
+	// reasoning-disabled title request, and both must recover WITHOUT spending
+	// a failover candidate — the primary model is fine, only the request shape
+	// needs adjusting.
+	it("retries the same model with reasoning allowed when the endpoint makes reasoning mandatory", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const fallback = getModelFor("kimi-code", "k3");
+		const { registry, suppressCalls } = createFailoverRegistry([primary, fallback]);
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({
+				stopReason: "error",
+				errorMessage: "400 Reasoning is mandatory for this endpoint and cannot be disabled.",
+				content: [],
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Mandatory reasoning title</title>" }],
+			} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary, { chains: { default: ["kimi-code/k3"] } }),
+		);
+
+		expect(title).toBe("Mandatory reasoning title");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		// Both attempts stay on the primary — the fallback chain is untouched.
+		expect(completeSimpleMock.mock.calls[0]?.[0]).toBe(primary);
+		expect(completeSimpleMock.mock.calls[1]?.[0]).toBe(primary);
+		const firstOptions = completeSimpleMock.mock.calls[0]?.[2] as { disableReasoning?: boolean };
+		const secondOptions = completeSimpleMock.mock.calls[1]?.[2] as {
+			disableReasoning?: boolean;
+			maxTokens?: number;
+		};
+		expect(firstOptions?.disableReasoning).toBe(true);
+		expect(secondOptions?.disableReasoning).toBe(false);
+		// The retry raises the cap so a mandatory reasoning pass can't eat the
+		// whole budget before the title marker.
+		expect((secondOptions?.maxTokens ?? 0) > 1024).toBe(true);
+		// No cooldown: the model was never broken, only the request shape was.
+		expect(suppressCalls).toHaveLength(0);
+	});
+
+	it("retries the same model with a raised cap when reasoning truncates the response before the title marker", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const { registry } = createFailoverRegistry([primary]);
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({
+				stopReason: "length",
+				content: [],
+				usage: { output: 1026, reasoningTokens: 1024 },
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Truncation recovery</title>" }],
+			} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary),
+		);
+
+		expect(title).toBe("Truncation recovery");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(completeSimpleMock.mock.calls[1]?.[0]).toBe(primary);
+		const firstOptions = completeSimpleMock.mock.calls[0]?.[2] as { maxTokens?: number };
+		const secondOptions = completeSimpleMock.mock.calls[1]?.[2] as { maxTokens?: number };
+		expect((secondOptions?.maxTokens ?? 0) > (firstOptions?.maxTokens ?? 0)).toBe(true);
+	});
+
+	it("gives up after one truncation retry instead of looping", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const { registry, suppressCalls } = createFailoverRegistry([primary]);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "length",
+			content: [],
+		} as never);
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary),
+		);
+
+		expect(title).toBeNull();
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(suppressCalls).toHaveLength(0);
+	});
+
+	it("still fails over when the mandatory-reasoning retry itself errors", async () => {
+		const primary = getModelOrThrow("claude-sonnet-4-5");
+		const fallback = getModelFor("kimi-code", "k3");
+		const { registry, suppressCalls } = createFailoverRegistry([primary, fallback]);
+		const completeSimpleMock = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce({
+				stopReason: "error",
+				errorMessage: "400 Reasoning is mandatory for this endpoint and cannot be disabled.",
+				content: [],
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "error",
+				errorMessage: "503 overloaded",
+				content: [],
+			} as never)
+			.mockResolvedValueOnce({
+				stopReason: "stop",
+				content: [{ type: "text", text: "<title>Recovered via fallback</title>" }],
+			} as never);
+
+		const title = await generateSessionTitle(
+			"investigate the flaky resolver test",
+			registry,
+			createFailoverSettings(primary, { chains: { default: ["kimi-code/k3"] } }),
+		);
+
+		expect(title).toBe("Recovered via fallback");
+		expect(completeSimpleMock).toHaveBeenCalledTimes(3);
+		expect(completeSimpleMock.mock.calls[2]?.[0]).toBe(fallback);
+		expect(suppressCalls).toHaveLength(1);
+	});
 });
 // the emitted OSC title from three inputs — an extension override, a run-state
 // separator (spinner frame, static Windows `:`, `>`, or `!` between the `π`
