@@ -1,4 +1,4 @@
-import { type BaseType, type } from "@oh-my-pi/omptype";
+import { type BaseType, type FluentType, type } from "@oh-my-pi/omptype";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
@@ -202,6 +202,9 @@ function createTaskSchema(options: {
 	const effortField = options.effortEnabled ? { "effort?": effortRule } : {};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
+			// `type.raw` returns `BaseType`, whose static surface does not carry the
+			// fluent builders; `item` is immediately used as one (`item.array()`),
+			// so assert the wider interface. Runtime object is the same either way.
 			const item = type.raw({
 				"name?": "string",
 				agent,
@@ -211,7 +214,7 @@ function createTaskSchema(options: {
 				"schemaMode?": '"permissive" | "strict"',
 				"isolated?": "boolean",
 				"+": "delete",
-			});
+			}) as FluentType;
 			return type.raw({
 				context: "string",
 				tasks: item.array(),
@@ -226,7 +229,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			"+": "delete",
-		});
+		}) as FluentType;
 		return type.raw({
 			context: "string",
 			tasks: item.array(),
