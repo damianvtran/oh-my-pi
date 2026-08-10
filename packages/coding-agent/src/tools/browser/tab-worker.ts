@@ -17,6 +17,7 @@ import type {
 	Target,
 } from "puppeteer-core";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
+import { ArgvDisclosureLedger, redactProcessInvocation } from "../../utils/argv-disclosure";
 import { resizeImage } from "../../utils/image-resize";
 import { resolveToCwd } from "../path-utils";
 import { formatScreenshot } from "../render-utils";
@@ -466,7 +467,16 @@ function createRunPageScope(page: Page): RunPageScope {
 	};
 }
 
-function errorPayload(error: unknown): RunErrorPayload {
+/**
+ * `ledger` carries the `browser` `run` sources this tab has already shown the
+ * agent. Tab code has full Node access, so a `run` cell that shells out with a
+ * credential in argv hits the same disclosure hole the JS eval worker does:
+ * Node bakes the whole joined argv into `Error.message` for every exec-family
+ * failure. See `utils/argv-disclosure` for the prior-disclosure rule. Omitting
+ * `ledger` (worker lifecycle errors, busy/closed rejections) is the fail-safe
+ * direction — nothing counts as disclosed.
+ */
+function errorPayload(error: unknown, ledger?: ArgvDisclosureLedger): RunErrorPayload {
 	const recoverTab = error instanceof RequestInterceptionCleanupError || undefined;
 	if (error instanceof ToolAbortError) {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: true };
@@ -482,7 +492,8 @@ function errorPayload(error: unknown): RunErrorPayload {
 		};
 	}
 	if (error instanceof Error) {
-		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: false };
+		const display = redactProcessInvocation(error, ledger);
+		return { name: error.name, message: display.message, stack: display.stack, isToolError: false, isAbort: false };
 	}
 	return { name: "Error", message: String(error), isToolError: false, isAbort: false };
 }
@@ -764,6 +775,11 @@ export class WorkerCore {
 	#dialogPolicy?: DialogPolicy;
 	#dialogHandler?: (dialog: Dialog) => void;
 	#openDialog?: OpenDialogInfo;
+	/**
+	 * `browser` `run` sources this tab has executed, i.e. the bytes already
+	 * visible in the transcript. See `utils/argv-disclosure`.
+	 */
+	#disclosed = new ArgvDisclosureLedger();
 
 	constructor(transport: Transport, isolated: boolean) {
 		this.#transport = transport;
@@ -1055,6 +1071,9 @@ export class WorkerCore {
 			opCounter: 0,
 		};
 		this.#active = active;
+		// Record before running: the run whose error is being rendered is the run
+		// whose own literals must still count as disclosed.
+		this.#disclosed.record(msg.code);
 		let completed = false;
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
@@ -1156,7 +1175,12 @@ export class WorkerCore {
 			if (this.#active?.id === msg.id) this.#active = null;
 		}
 		if (failure) {
-			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(failure.error) });
+			this.#transport.send({
+				type: "result",
+				id: msg.id,
+				ok: false,
+				error: errorPayload(failure.error, this.#disclosed),
+			});
 			return;
 		}
 		if (completed) {

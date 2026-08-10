@@ -511,7 +511,280 @@ end
 
 pushdisplay(OmpDisplay())
 
-function emit_error(rid, err, bt)
+# ---------------------------------------------------------------------------
+# Argv disclosure gating for process-invocation errors
+# ---------------------------------------------------------------------------
+#
+# A cell that spawns a subprocess routinely puts a credential in argv
+# (`run(`psql $dsn`)`), and Julia re-renders the whole `Cmd` when that spawn
+# fails: `showerror(::ProcessFailedException)` prints the `Process`, and a
+# failed spawn raises an `IOError` whose `msg` already has the backtick-rendered
+# `Cmd` interpolated into it. The exception escapes to the tool result, so the
+# credential lands in the agent transcript and in the session file on disk even
+# though the agent asked to see none of it.
+#
+# The rule, shared verbatim with `src/utils/argv-disclosure.ts` (the normative
+# statement), the JS eval worker and `../py/runner.py`: gate on *prior
+# disclosure*, never on secret detection. An argument is rendered only when its
+# exact characters already appear in code the agent itself wrote in this kernel
+# — those characters are already in the transcript, so re-rendering them
+# discloses nothing new. Everything else (a value read from ENV, a file, an API
+# response, or a session credential the host substituted into the cell) is
+# replaced by its length alone. Guessing which arguments "look like" secrets
+# fails in both directions; this needs no detector to be correct, and it keeps
+# the diagnostics that matter — program, argument count, exit code, signal,
+# captured output, backtrace.
+#
+# argv[0] is the one deliberate exception and is always rendered: an executable
+# path is the single most useful part of a spawn failure, it is not a
+# credential, and Julia resolves it (`sh` -> `/bin/sh`) so it often fails a
+# literal disclosure check the agent's own source should pass.
+#
+# The Ruby runner needs no equivalent: its stdlib never embeds argv in these
+# messages (`Errno::ENOENT: No such file or directory - prog`,
+# `#<Process::Status: pid N exit M>`), so there is nothing there to filter.
+#
+# Keep the `<redacted:<N>c>` rendering identical across all four runtimes.
+
+const DISCLOSURE_MAX_ENTRIES = 64
+const DISCLOSURE_MAX_CHARS = 256 * 1024
+const disclosure_entries = String[]
+const disclosure_chars = Ref(0)
+
+# Record cell source as disclosed to the transcript.
+#
+# A persistent kernel keeps state across cells, so a literal written in cell 1
+# can reach argv in cell 5; checking only the failing cell would redact values
+# that are plainly visible in the transcript. Retention is bounded because a
+# long session's cell history is not, and evicting an entry only costs fidelity
+# (over-redaction), never safety.
+function record_disclosure!(source::AbstractString)
+    isempty(source) && return nothing
+    text = String(source)
+    push!(disclosure_entries, text)
+    disclosure_chars[] += length(text)
+    while length(disclosure_entries) > DISCLOSURE_MAX_ENTRIES ||
+          (disclosure_chars[] > DISCLOSURE_MAX_CHARS && length(disclosure_entries) > 1)
+        disclosure_chars[] -= length(popfirst!(disclosure_entries))
+    end
+    return nothing
+end
+
+# True when `text`'s exact characters already appear in recorded cell source.
+# Substring containment is the right test and not a weakening: a match means
+# those characters are literally present in code the agent wrote.
+function is_disclosed(text::AbstractString)
+    isempty(text) && return true
+    for entry in disclosure_entries
+        occursin(text, entry) && return true
+    end
+    return false
+end
+
+# Length-only rendering of an argument that was never disclosed. Space-free so
+# it reads as one token inside a rendered command line, and length-only so it
+# carries no characters of the value — not even a digest, which would be a
+# (small) partial oracle on a secret.
+redacted_arg(text::AbstractString) = string("<redacted:", length(text), "c>")
+
+# Redacted argv, or `nothing` when every element may be rendered as-is (which
+# keeps Julia's own formatting byte for byte in the all-literal case).
+function redact_exec(exec::Vector{String})
+    out = copy(exec)
+    changed = false
+    for i in 2:length(out)  # argv[0] is always rendered; see the header above.
+        is_disclosed(out[i]) && continue
+        out[i] = redacted_arg(out[i])
+        changed = true
+    end
+    return changed ? out : nothing
+end
+
+# `setenv(cmd, ...)` entries render inside the very same `Cmd` that argv does,
+# and a `PGPASSWORD=...` entry is the classic place to keep a credential *out*
+# of argv. Same gate, same rendering.
+function redact_cmd_env(env)
+    env === nothing && return (nothing, false)
+    out = String[]
+    changed = false
+    for entry in env
+        text = String(entry)
+        if is_disclosed(text)
+            push!(out, text)
+        else
+            push!(out, redacted_arg(text))
+            changed = true
+        end
+    end
+    return (out, changed)
+end
+
+# A `Cmd` that renders like `cmd` with undisclosed argv/env replaced, or
+# `nothing` when `cmd` already renders safely. Only `show(::Cmd)` output matters
+# here — the replacement is never executed — so it carries exactly the fields
+# `show` prints: exec, env, dir and cpu affinity.
+function redact_cmd(cmd::Base.Cmd)
+    exec = redact_exec(cmd.exec)
+    env, env_changed = redact_cmd_env(cmd.env)
+    (exec === nothing && !env_changed) && return nothing
+    base = Base.Cmd(exec === nothing ? copy(cmd.exec) : exec)
+    try
+        return Base.Cmd(base; env=env, dir=cmd.dir, cpus=cmd.cpus)
+    catch
+        # Julia versions without cpu affinity on `Cmd`; affinity is cosmetic in
+        # a rendering, env and dir are not.
+        try
+            return Base.Cmd(base; env=env, dir=cmd.dir)
+        catch
+            return base
+        end
+    end
+end
+
+# Prefix `Base._spawn` builds for every failed spawn:
+# `throw(_UVError("could not spawn " * repr(cmd), err))`. Gating on Julia's own
+# marker — rather than on anything about argument content — is what keeps
+# ordinary `IOError`s (sockets, closed streams, libuv reads) untouched.
+const SPAWN_FAILURE_PREFIX = "could not spawn "
+
+# Index of the backtick closing the command opened at `open_idx`. `show(::Cmd)`
+# escapes a backtick inside an argument as `\``, so the first backtick that is
+# not preceded by a backslash closes the command.
+function find_command_close(chars::Vector{Char}, open_idx::Int)
+    i = open_idx + 1
+    while i <= length(chars)
+        chars[i] == '`' && chars[i - 1] != '\\' && return i
+        i += 1
+    end
+    return nothing
+end
+
+# Redact every argument of a rendered command line whose characters the ledger
+# has not seen. argv[0] is preserved verbatim, and so are the spacing and
+# quoting of every preserved argument, so an all-disclosed command line comes
+# back unchanged.
+#
+# Quote awareness is fidelity, not safety: without it `sh -c 'exit 3'` splits
+# into `'exit` and `3'`, neither of which matches the agent's `"exit 3"`
+# literal, and a perfectly innocent command line comes back half-redacted. An
+# unbalanced quote simply runs to end of input — worst case one large piece,
+# which fails the disclosure check and over-redacts.
+function redact_command_line(line::AbstractString)
+    chars = collect(line)
+    n = length(chars)
+    out = IOBuffer()
+    seen_arg = false
+    i = 1
+    while i <= n
+        gap_start = i
+        while i <= n && isspace(chars[i])
+            i += 1
+        end
+        i > gap_start && print(out, join(chars[gap_start:i - 1]))
+        i > n && break
+        raw_start = i
+        value = IOBuffer()
+        while i <= n && !isspace(chars[i])
+            c = chars[i]
+            if c == '\'' || c == '"'
+                closing = findnext(isequal(c), chars, i + 1)
+                stop = closing === nothing ? n : closing - 1
+                i + 1 <= stop && print(value, join(chars[i + 1:stop]))
+                i = closing === nothing ? n + 1 : closing + 1
+                continue
+            end
+            print(value, c)
+            i += 1
+        end
+        raw = join(chars[raw_start:i - 1])
+        text = String(take!(value))
+        if !seen_arg
+            seen_arg = true  # argv[0]
+            print(out, raw)
+        else
+            print(out, is_disclosed(text) ? raw : redacted_arg(text))
+        end
+    end
+    return String(take!(out))
+end
+
+# `show(::Cmd)` wraps a command carrying env or dir in `setenv(`cmd`,[...]; dir=...)`.
+# The env block is a Julia vector literal, so gate each string literal that sits
+# inside brackets; `dir="..."` sits outside them and is kept, a working
+# directory being a path rather than a credential.
+function redact_bracketed_literals(text::AbstractString)
+    chars = collect(text)
+    n = length(chars)
+    out = IOBuffer()
+    depth = 0
+    i = 1
+    while i <= n
+        c = chars[i]
+        if c == '['
+            depth += 1
+            print(out, c)
+            i += 1
+        elseif c == ']'
+            depth -= 1
+            print(out, c)
+            i += 1
+        elseif c == '"'
+            closing = i + 1
+            while closing <= n && chars[closing] != '"'
+                closing += chars[closing] == '\\' ? 2 : 1
+            end
+            closing = min(closing, n)
+            literal = join(chars[i:closing])
+            if depth > 0
+                value = unescape_string(join(chars[i + 1:closing - 1]))
+                print(out, is_disclosed(value) ? literal : string('"', redacted_arg(value), '"'))
+            else
+                print(out, literal)
+            end
+            i = closing + 1
+        else
+            print(out, c)
+            i += 1
+        end
+    end
+    return String(take!(out))
+end
+
+# Filter the `repr(cmd)` region of a spawn-failure message: the backtick command
+# through `redact_command_line`, any `setenv` env block through the same gate.
+function redact_cmd_repr(region::AbstractString)
+    chars = collect(region)
+    open_idx = findfirst(isequal('`'), chars)
+    open_idx === nothing && return region
+    close_idx = find_command_close(chars, open_idx)
+    close_idx === nothing && return region
+    return string(
+        join(chars[1:open_idx]),                                  # `setenv(` and the opening backtick
+        redact_command_line(join(chars[open_idx + 1:close_idx - 1])),
+        redact_bracketed_literals(join(chars[close_idx:end])),    # closing backtick, env, dir
+    )
+end
+
+# The spawn-failure message with its rendered invocation filtered, or the
+# message unchanged when there was nothing to redact.
+function redact_spawn_message(msg::AbstractString)
+    startswith(msg, SPAWN_FAILURE_PREFIX) || return msg
+    start = ncodeunits(SPAWN_FAILURE_PREFIX) + 1
+    # `_UVError` appends `": " * strerror * " (NAME)"` after `repr(cmd)`, so the
+    # last `": "` ends the invocation. Taking the *last* one errs safely: a
+    # `": "` inside an env value only pushes the boundary later, which
+    # over-redacts a few words of strerror rather than under-redacting argv.
+    separator = findlast(": ", msg)
+    stop = separator === nothing ? lastindex(msg) : prevind(msg, first(separator))
+    stop < start && return msg
+    region = msg[start:stop]
+    redacted = redact_cmd_repr(region)
+    redacted == region && return msg
+    suffix = separator === nothing ? "" : msg[first(separator):end]
+    return string(SPAWN_FAILURE_PREFIX, redacted, suffix)
+end
+
+function render_error_text(err)
     io = IOBuffer()
     # invokelatest + guard: custom error types from packages loaded inside the
     # cell define `showerror` methods invisible to this frozen-world function.
@@ -520,7 +793,56 @@ function emit_error(rid, err, bt)
     catch
         print(io, string(err))
     end
-    err_str = String(take!(io))
+    return String(take!(io))
+end
+
+# `showerror` text for `err` with any process invocation it embeds filtered
+# through the disclosure ledger. Everything else about the failure survives
+# untouched: exception type, exit code, signal, the captured stdout/stderr the
+# agent actually asked for, and every backtrace frame.
+function render_error_text_redacted(err)
+    if err isa Base.ProcessFailedException
+        # Structural fix: `Base.Process` is mutable and `showerror` renders
+        # `proc.cmd`, so swapping in a redacted `Cmd` lets Julia do its own
+        # formatting and leaves the exit code and signal — which it reads from
+        # separate fields — exactly as they were.
+        saved = Tuple{Base.Process, Base.Cmd}[]
+        try
+            for proc in err.procs
+                replacement = redact_cmd(proc.cmd)
+                replacement === nothing && continue
+                push!(saved, (proc, proc.cmd))
+                proc.cmd = replacement
+            end
+            return render_error_text(err)
+        finally
+            # Mandatory, not tidy: cell code in a `catch` block may still hold
+            # this exception, and a cell that deliberately prints
+            # `err.procs[1].cmd` is making an explicit disclosure that is none
+            # of our business. Only the *uncaught* rendering is filtered.
+            for (proc, original) in saved
+                proc.cmd = original
+            end
+        end
+    end
+    text = render_error_text(err)
+    if err isa Base.IOError
+        # `IOError` is immutable and Julia interpolated the `Cmd` into `msg`
+        # before constructing it, so this shape has to be filtered as text.
+        redacted = redact_spawn_message(err.msg)
+        redacted == err.msg || return replace(text, err.msg => redacted)
+    end
+    return text
+end
+
+function emit_error(rid, err, bt)
+    err_str = try
+        render_error_text_redacted(err)
+    catch
+        # A bug in the disclosure filter must never take the kernel down, and
+        # must never fall through to the unfiltered rendering either.
+        string("(unrenderable ", typeof(err), ")")
+    end
     
     # Seed the traceback with the rendered exception text so the array is a
     # self-contained error display, matching the Python and Ruby runners. The
@@ -618,6 +940,13 @@ function main()
             store_history = string(parts[5]) == "1"
             env_pairs = string(parts[6])
             code = String(base64decode(string(parts[7])))
+
+            # Record before running: the agent wrote this source, so it is
+            # already in the transcript and any literal in it may legally
+            # reappear in a rendered process invocation. Doing it up front also
+            # covers the cell that fails — its own literals must still count as
+            # disclosed in its own error rendering.
+            record_disclosure!(code)
             
             global current_rid = rid
             emit_frame(Dict("type" => "started", "id" => rid))

@@ -17,6 +17,7 @@ import { createDesktopSession } from "@oh-my-pi/pi-natives/desktop";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
+import { ArgvDisclosureLedger, redactProcessInvocation } from "../../utils/argv-disclosure";
 import { copyToClipboard, readTextFromClipboard } from "../../utils/clipboard";
 import { cloneSafe, RunOutput } from "../browser/run-output";
 import {
@@ -103,7 +104,16 @@ interface ComputerRunContext {
 
 type RunContextAccessor = () => ComputerRunContext;
 
-function errorPayload(error: unknown): RunErrorPayload {
+/**
+ * `ledger` carries the `computer` `run` sources this worker has already shown
+ * the agent. Desktop code has full Node access, so a `run` cell that shells out
+ * with a credential in argv hits the same disclosure hole the JS eval worker
+ * does: Node bakes the whole joined argv into `Error.message` for every
+ * exec-family failure. See `utils/argv-disclosure` for the prior-disclosure
+ * rule. Omitting `ledger` (busy/closed rejections, native errors) is the
+ * fail-safe direction — nothing counts as disclosed.
+ */
+function errorPayload(error: unknown, ledger?: ArgvDisclosureLedger): RunErrorPayload {
 	if (error instanceof ToolAbortError) {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: true };
 	}
@@ -111,7 +121,8 @@ function errorPayload(error: unknown): RunErrorPayload {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: true, isAbort: false };
 	}
 	if (error instanceof Error) {
-		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: false };
+		const display = redactProcessInvocation(error, ledger);
+		return { name: error.name, message: display.message, stack: display.stack, isToolError: false, isAbort: false };
 	}
 	return { name: "Error", message: String(error), isToolError: false, isAbort: false };
 }
@@ -429,6 +440,11 @@ export class ComputerWorkerCore {
 	 */
 	readonly #runContexts = new AsyncLocalStorage<ComputerRunContext>();
 	#closed = false;
+	/**
+	 * `computer` `run` sources this worker has executed, i.e. the bytes already
+	 * visible in the transcript. See `utils/argv-disclosure`.
+	 */
+	#disclosed = new ArgvDisclosureLedger();
 
 	constructor(transport: ComputerWorkerTransport, createSession: NativeDesktopSessionFactory = createDesktopSession) {
 		this.#transport = transport;
@@ -498,6 +514,9 @@ export class ComputerWorkerCore {
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
 		const active: ActiveRun = { id: message.id, ac, signal, pendingTools: new Map() };
 		this.#active = active;
+		// Record before running: the run whose error is being rendered is the run
+		// whose own literals must still count as disclosed.
+		this.#disclosed.record(message.code);
 		const output = new RunOutput();
 		const screenshots: ComputerScreenshot[] = [];
 		const runContext: ComputerRunContext = {
@@ -572,7 +591,12 @@ export class ComputerWorkerCore {
 			if (this.#active?.id === message.id) this.#active = null;
 		}
 		if (failure !== undefined) {
-			this.#transport.send({ type: "result", id: message.id, ok: false, error: errorPayload(failure.error) });
+			this.#transport.send({
+				type: "result",
+				id: message.id,
+				ok: false,
+				error: errorPayload(failure.error, this.#disclosed),
+			});
 			return;
 		}
 		if (completed) {

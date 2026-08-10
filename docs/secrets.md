@@ -134,12 +134,72 @@ Regex entries always scan globally (the `g` flag is enforced automatically). The
 
 Environment variables are collected first, file-defined entries follow, and the built-in credential regex runs last so configured entries see matching content before the generic detector. Duplicate environment values are collapsed within the environment scan. Environment and file entries are not deduplicated against each other, so a plain value present in both is registered twice; both placeholders restore to the same secret, so deobfuscation is unaffected.
 
+## Subprocess argv in error rendering
+
+Obfuscation only helps for values the harness has been told about. A credential
+a cell reads from the environment, a file, or an API response is unknown to the
+`SecretObfuscator` -- and so is a registered credential once
+`deobfuscateToolArguments` has substituted the real bytes into a tool call. When
+such a value is passed to a subprocess in argv, every runtime we host echoes it
+back on failure:
+
+| Runtime | Rendering that embeds argv |
+| --- | --- |
+| JS (Node) | `Command failed: <joined argv>` in `Error.message` for `exec` / `execFile` / `execFileSync`, on timeout as well as non-zero exit |
+| Python | `subprocess.TimeoutExpired.__str__` and `CalledProcessError.__str__` interpolate `self.cmd` (and the same argv sits in `args`, so `repr(exc)` leaks too) |
+| Julia | `showerror` prints the whole `Cmd` for `ProcessFailedException`, and interpolates it into the `IOError` message for a failed spawn |
+| Ruby | None -- its stdlib never embeds argv in these messages, so the Ruby runner needs no guard |
+
+That exception escapes to the tool result, which puts the credential in the
+transcript and in the session file even though the agent asked for none of it. A
+timing-out child is the worst case: there is no output, so the argv is the entire
+content of the error.
+
+The guard is **prior-disclosure gating**, not secret detection. At each error
+serialization boundary an argument is rendered only when its exact bytes already
+appear in code the agent itself wrote in that kernel -- those bytes are already
+in the transcript, so re-rendering them discloses nothing new. Anything else is
+replaced by its length alone: `<redacted:71c>`. Consequences worth knowing:
+
+- **argv[0] is always rendered.** An executable path is the most useful part of
+  a spawn failure, is not a credential, and is resolved by the runtime (`"sh"` ->
+  `/bin/sh`) so it often fails a literal disclosure check.
+- **Nothing else about the failure changes** -- exception type, exit code,
+  signal, timeout and captured stdout/stderr are untouched. Program output is
+  what the agent asked for; only the invocation is filtered.
+- **An all-disclosed command line comes back byte-identical**, so the guard is
+  invisible for ordinary failures like `['git', 'status']`.
+- **A value assembled at runtime reads as undisclosed** even when its literal
+  halves are in the source, because the assembled bytes are not. This
+  over-redacts a computed date or a joined path; that is the safe direction.
+- **Deliberate disclosure still works.** A cell that catches the error and
+  prints `err.cmd` (or `e.cmd`) is making an explicit choice and still sees the
+  real argv. Only the *uncaught* rendering is filtered. The live exception object
+  is never mutated.
+
+One limitation is deliberate. The disclosure ledger records cell source **as
+executed**, which is one step past what the transcript holds: a registered
+secret the agent referenced as `$$KEY_<hmac>$$` inside cell code has already been
+substituted by `deobfuscateToolArguments` by the time the kernel sees it, so it
+counts as disclosed and a failing subprocess can echo it. That is the
+pre-existing behaviour that tool results echo deobfuscated arguments at all --
+`bash` does the same, rendering its `command` verbatim -- and the obfuscator
+still re-masks those values at the provider boundary, so the model never reads
+them; the exposure is to the on-disk session. Values the harness was never told
+about, which is the case this guard exists for, are fully covered.
+
+The policy lives in `packages/coding-agent/src/utils/argv-disclosure.ts`, which
+is normative; the Python and Julia runners run out of process and reimplement it
+in their own languages, so the `<redacted:<N>c>` rendering must stay in sync
+across all three.
+
 ## Key files
 
 - `packages/coding-agent/src/secrets/index.ts` -- loading, merging, env var collection
 - `packages/coding-agent/src/secrets/obfuscator.ts` -- `SecretObfuscator` class, placeholder generation, message obfuscation
 - `packages/coding-agent/src/secrets/regex.ts` -- regex literal parsing and compilation
 - `packages/coding-agent/src/config/settings-schema.ts` -- `secrets.enabled` setting definition
+- `packages/coding-agent/src/utils/argv-disclosure.ts` -- prior-disclosure gating for subprocess argv in error rendering (mirrored by `src/eval/py/runner.py` and `src/eval/jl/runner.jl`)
 
 ## See also
 

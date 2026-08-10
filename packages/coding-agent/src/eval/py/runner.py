@@ -169,6 +169,303 @@ def _flush_stream_proxies(rid: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Argv disclosure gating
+# ---------------------------------------------------------------------------
+#
+# Every way Python reports a failed spawn re-renders argv: both
+# ``subprocess.TimeoutExpired.__str__`` and
+# ``subprocess.CalledProcessError.__str__`` interpolate ``self.cmd``. So a cell
+# that runs ``psql <dsn>`` leaks the DSN into the agent transcript (and into
+# the on-disk session) the moment that child times out or exits non-zero, even
+# though the agent asked for none of it. A timing-out child is the worst case:
+# the agent gets no output at all, only an error whose single piece of content
+# is the argv it must not see.
+#
+# The rule is *prior disclosure*, not secret detection: an argument is rendered
+# only when its exact bytes already appear in code the agent itself wrote in
+# this kernel. Those bytes are in the transcript already, so re-rendering them
+# discloses nothing new; a value that came from the environment, a file, an API
+# response or a substituted session credential is replaced by its length alone.
+# Guessing which arguments "look like" credentials fails in both directions —
+# it misses bespoke formats and mangles innocent arguments — and this rule needs
+# no detector to be correct: ``['git', 'status']`` still renders in full, and so
+# do the exit code, the signal, the timeout and the captured output.
+#
+# argv[0] is the one deliberate exception and is always rendered: an executable
+# path is the most useful part of a spawn failure, it is not a credential, and
+# the runtime resolves it (``"sh"`` -> ``/bin/sh``) so it often fails a literal
+# disclosure check that the agent's own source should pass.
+#
+# ``src/utils/argv-disclosure.ts`` is the normative statement of this policy and
+# implements it for the JS side; this runner is out of process and cannot import
+# it, so the two must be kept in sync — including the exact
+# ``<redacted:<N>c>`` rendering.
+
+# Cell sources retained for disclosure checks, newest last.
+_LEDGER_MAX_ENTRIES = 64
+
+# Total characters of retained cell source. Bounds a long-lived kernel.
+_LEDGER_MAX_CHARS = 256 * 1024
+
+
+class _ArgvDisclosureLedger:
+    """Bounded record of the code an agent has run in this kernel.
+
+    A persistent kernel keeps state across cells, so a literal written in cell
+    1 can reach argv in cell 5; checking only the failing cell would redact
+    values that are plainly visible in the transcript. Retention is bounded
+    because a long session's cell history is not, and evicting an entry only
+    costs fidelity (over-redaction), never safety.
+    """
+
+    def __init__(self) -> None:
+        self._entries: list[str] = []
+        self._chars = 0
+
+    def record(self, source: str) -> None:
+        """Record cell source as disclosed to the transcript."""
+        if not source:
+            return
+        self._entries.append(source)
+        self._chars += len(source)
+        while len(self._entries) > _LEDGER_MAX_ENTRIES or (
+            self._chars > _LEDGER_MAX_CHARS and len(self._entries) > 1
+        ):
+            self._chars -= len(self._entries.pop(0))
+
+    def discloses(self, text: str) -> bool:
+        """True when ``text``'s exact bytes already appear in recorded source.
+
+        Substring containment is the right test and not a weakening: a match
+        means those bytes are literally present in code the agent wrote.
+        """
+        if not text:
+            return True
+        return any(text in entry for entry in self._entries)
+
+
+def _redacted_arg(text: str) -> str:
+    """Length-only rendering of an argument that was never disclosed.
+
+    Deliberately space-free so it reads as one token inside a rendered command
+    line, and length-only so it carries no bytes of the value — not even a
+    digest, which would be a (small) partial oracle on a secret. The JS and
+    Julia runners emit the same shape.
+    """
+    return f"<redacted:{len(text)}c>"
+
+
+def _argv_element_text(value: Any) -> str:
+    """The characters an argv element contributes, for the disclosure check."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", "replace")
+    return str(value)
+
+
+def _split_command_line(line: str) -> list[tuple[str, str | None]]:
+    """Split a rendered command line into pieces.
+
+    Yields ``(raw, value)`` per argument and ``(whitespace, None)`` for the gaps
+    between them, so preserved arguments can be re-emitted with their original
+    spelling.
+
+    Quote awareness is fidelity, not safety: without it ``sh -c 'exit 3'``
+    splits into ``'exit`` and ``3'``, neither of which matches the agent's
+    ``"exit 3"`` literal, and a perfectly innocent command line comes back
+    half-redacted. An unbalanced quote simply runs to end of input — worst case
+    one large piece, which fails the disclosure check and over-redacts.
+    """
+    pieces: list[tuple[str, str | None]] = []
+    index = 0
+    length = len(line)
+    while index < length:
+        gap_start = index
+        while index < length and line[index].isspace():
+            index += 1
+        if index > gap_start:
+            pieces.append((line[gap_start:index], None))
+        if index >= length:
+            break
+        raw_start = index
+        value: list[str] = []
+        while index < length and not line[index].isspace():
+            char = line[index]
+            if char in ("'", '"'):
+                close = line.find(char, index + 1)
+                end = length if close == -1 else close
+                value.append(line[index + 1 : end])
+                index = length if close == -1 else close + 1
+                continue
+            value.append(char)
+            index += 1
+        pieces.append((line[raw_start:index], "".join(value)))
+    return pieces
+
+
+def _redact_command_line(line: str, ledger: _ArgvDisclosureLedger) -> str:
+    """Redact undisclosed arguments of a rendered command line.
+
+    This is the ``shell=True`` shape, where ``cmd`` is one string. argv[0] is
+    preserved verbatim, and so are the spacing and quoting of every preserved
+    argument, so an all-disclosed command line comes back byte-identical.
+    """
+    out: list[str] = []
+    seen_arg = False
+    for raw, value in _split_command_line(line):
+        if value is None:
+            out.append(raw)
+            continue
+        if not seen_arg:
+            seen_arg = True
+            out.append(raw)
+            continue
+        out.append(raw if ledger.discloses(value) else _redacted_arg(value))
+    return "".join(out)
+
+
+def _redact_argv(argv: list | tuple, ledger: _ArgvDisclosureLedger) -> str | None:
+    """Render a sequence ``cmd`` with undisclosed elements replaced.
+
+    Mirrors the ``repr`` Python itself would interpolate (``%s`` on a list uses
+    its ``repr``), so a redacted argv still reads as the sequence it is.
+    Returns ``None`` when nothing needed redacting, which keeps Python's own
+    rendering byte for byte in the common all-literal case.
+    """
+    rendered: list[str] = []
+    changed = False
+    for position, element in enumerate(argv):
+        text = _argv_element_text(element)
+        if position == 0 or ledger.discloses(text):
+            rendered.append(repr(element))
+            continue
+        changed = True
+        rendered.append(repr(_redacted_arg(text)))
+    if not changed:
+        return None
+    body = ", ".join(rendered)
+    if isinstance(argv, tuple):
+        return f"({body},)" if len(rendered) == 1 else f"({body})"
+    return f"[{body}]"
+
+
+class _RedactedInvocation:
+    """Stand-in for a leaky ``cmd`` attribute.
+
+    Both leaking ``__str__`` implementations render ``cmd`` with ``%s``, so
+    substituting a value that is *already* redacted fixes ``str(exc)``,
+    ``traceback.format_exception`` and ``format_exception_only`` in one place.
+    ``__repr__`` renders the same text so ``repr(exc)`` — which renders
+    ``args`` — is safe too.
+    """
+
+    __slots__ = ("_rendered",)
+
+    def __init__(self, rendered: str) -> None:
+        self._rendered = rendered
+
+    def __str__(self) -> str:
+        return self._rendered
+
+    def __repr__(self) -> str:
+        return self._rendered
+
+
+def _process_invocation_carriers(exc: BaseException) -> list[BaseException]:
+    """Exceptions reachable from ``exc`` that structurally carry an invocation.
+
+    Gating on the runtime's own markers — a ``subprocess.SubprocessError`` with
+    the documented ``cmd`` attribute, which is exactly what ``TimeoutExpired``
+    and ``CalledProcessError`` are — means an ordinary error is never touched,
+    however much its message happens to look like a command. Argument *content*
+    is never inspected.
+
+    The walk covers ``__cause__``/``__context__`` (a leaky invocation is
+    routinely re-raised from a wrapper) and ``ExceptionGroup`` members, because
+    ``traceback.format_exception`` renders all of those too. ``seen`` guards the
+    cycles that ``__context__`` chains can contain.
+    """
+    carriers: list[BaseException] = []
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [exc]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, subprocess.SubprocessError) and (
+            getattr(current, "cmd", None) is not None
+        ):
+            carriers.append(current)
+        pending.append(current.__cause__)
+        pending.append(current.__context__)
+        group = getattr(current, "exceptions", None)
+        if isinstance(group, (list, tuple)):
+            pending.extend(item for item in group if isinstance(item, BaseException))
+    return carriers
+
+
+def _swap_process_invocations(
+    exc: BaseException, ledger: _ArgvDisclosureLedger
+) -> list[tuple[BaseException, Any, tuple]]:
+    """Replace leaky ``cmd`` values with redacted stand-ins.
+
+    Returns the originals so the caller can restore them; see ``_emit_error``
+    for why restoring is mandatory rather than tidy.
+    """
+    saved: list[tuple[BaseException, Any, tuple]] = []
+    for carrier in _process_invocation_carriers(exc):
+        cmd = carrier.cmd  # type: ignore[attr-defined]
+        if isinstance(cmd, (list, tuple)):
+            rendered = _redact_argv(cmd, ledger)
+        elif isinstance(cmd, str):
+            redacted = _redact_command_line(cmd, ledger)
+            rendered = None if redacted == cmd else redacted
+        else:
+            # A bare non-sequence ``cmd`` (``Path``, ``bytes``) is argv[0] on
+            # its own, and argv[0] is always rendered.
+            continue
+        if rendered is None:
+            continue
+        placeholder = _RedactedInvocation(rendered)
+        # Register the originals before mutating, so a half-applied swap is
+        # still fully undone by the caller's ``finally``.
+        saved.append((carrier, cmd, carrier.args))
+        try:
+            carrier.cmd = placeholder  # type: ignore[attr-defined]
+            # ``BaseException.__new__`` also stores the constructor arguments,
+            # so the same argv object sits in ``args`` and would resurface
+            # through ``repr(exc)``. Swap it there by identity too.
+            carrier.args = tuple(
+                placeholder if item is cmd else item for item in carrier.args
+            )
+        except Exception:
+            # ``cmd`` is a plain attribute on both stdlib carriers, so this only
+            # fires for an exotic subclass that made it read-only. Reporting the
+            # failure at all wins over filtering it: raising here would leave
+            # the request with no ``done`` frame and hang the host.
+            continue
+    return saved
+
+
+def _restore_process_invocations(
+    saved: list[tuple[BaseException, Any, tuple]],
+) -> None:
+    """Undo ``_swap_process_invocations``.
+
+    Never raises: this runs in a ``finally`` around error reporting, and a
+    failure to put an attribute back must not become the error the host sees.
+    """
+    for carrier, cmd, args in saved:
+        try:
+            carrier.cmd = cmd  # type: ignore[attr-defined]
+            carrier.args = args
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Runner state
 # ---------------------------------------------------------------------------
 
@@ -190,6 +487,10 @@ class _RunnerState:
         # processes inheriting stdout). With overlapping requests the most
         # recently started one wins — strictly better than dropping the bytes.
         self.capture_rid: str | None = None
+        # Cell sources the agent has run, used to decide whether re-rendering
+        # a subprocess argument would disclose anything new. Lives here because
+        # disclosure is a property of the kernel session, not of one request.
+        self.argv_ledger = _ArgvDisclosureLedger()
 
 
 _CURRENT_RID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -1243,6 +1544,12 @@ async def _handle_request_async(req: dict) -> None:
     _STATE.cancel_requested = False
     _STATE.execution_count += 1
     execution_count = _STATE.execution_count
+    # Record before executing, not after: a subprocess this very cell spawns can
+    # fail inside it, and the literals it wrote must already count as disclosed
+    # or its own argv comes back redacted. See the argv disclosure section —
+    # rendering an argument is gated on its bytes already being in the
+    # transcript, and this cell's source is exactly that.
+    _STATE.argv_ledger.record(str(req.get("code", "") or ""))
     _emit({"type": "started", "id": rid})
 
     status: str = "ok"
@@ -1316,27 +1623,40 @@ async def _handle_request_async(req: dict) -> None:
 
 
 def _emit_error(rid: str, exc: BaseException) -> None:
-    if isinstance(exc, SyntaxError) and exc.filename == "<cell>":
-        # Syntax error in the cell source itself: every stack frame is runner
-        # machinery, so emit only the caret display, like a REPL.
-        tb_lines = traceback.format_exception_only(type(exc), exc)
-    else:
-        # Drop the leading runner-internal frames (_handle_request_async ->
-        # _exec_source_async -> _run_compiled_*) so tracebacks start at user
-        # code. If the exception never reached user code it is a runner bug;
-        # keep the full traceback because those frames are the diagnosis.
-        tb = exc.__traceback__
-        while tb is not None and tb.tb_frame.f_code.co_filename == __file__:
-            tb = tb.tb_next
-        tb_lines = traceback.format_exception(
-            type(exc), exc, tb if tb is not None else exc.__traceback__
-        )
+    # Neutralise leaky subprocess renderings for the duration of formatting
+    # only. The swap has to be undone: cell code in an ``except`` block may
+    # still hold this exception, and a cell that deliberately prints ``e.cmd``
+    # is making an explicit disclosure that is none of our business — only the
+    # *uncaught* rendering below is filtered. Everything else about the failure
+    # survives untouched: exception type, exit code, signal, timeout, the
+    # captured stdout/stderr the agent actually asked for, and every frame of
+    # the traceback.
+    saved = _swap_process_invocations(exc, _STATE.argv_ledger)
+    try:
+        if isinstance(exc, SyntaxError) and exc.filename == "<cell>":
+            # Syntax error in the cell source itself: every stack frame is runner
+            # machinery, so emit only the caret display, like a REPL.
+            tb_lines = traceback.format_exception_only(type(exc), exc)
+        else:
+            # Drop the leading runner-internal frames (_handle_request_async ->
+            # _exec_source_async -> _run_compiled_*) so tracebacks start at user
+            # code. If the exception never reached user code it is a runner bug;
+            # keep the full traceback because those frames are the diagnosis.
+            tb = exc.__traceback__
+            while tb is not None and tb.tb_frame.f_code.co_filename == __file__:
+                tb = tb.tb_next
+            tb_lines = traceback.format_exception(
+                type(exc), exc, tb if tb is not None else exc.__traceback__
+            )
+        evalue = str(exc)
+    finally:
+        _restore_process_invocations(saved)
     _emit(
         {
             "type": "error",
             "id": rid,
             "ename": type(exc).__name__,
-            "evalue": str(exc),
+            "evalue": evalue,
             "traceback": [line.rstrip("\n") for line in tb_lines],
         }
     )
