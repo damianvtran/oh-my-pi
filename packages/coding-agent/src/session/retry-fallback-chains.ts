@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { extractRetryHint, logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelSelectorValue,
@@ -74,6 +74,64 @@ export function calculateRetryBackoffDelayMs(baseDelayMs: number, attempt: numbe
 	const cappedDelayMs = Math.min(Math.max(0, baseDelayMs) * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_DELAY_MS);
 	const jitter = 1 - Math.random() * RETRY_BACKOFF_JITTER_RATIO;
 	return cappedDelayMs * jitter;
+}
+
+/**
+ * Parses provider retry and rate-limit reset hints out of an error message
+ * into a delay (ms). Shared by the turn-recovery path (which schedules the
+ * next attempt) and background consumers like session-title generation (which
+ * record a selector cooldown before failing over), so both honor the same
+ * `retry-after` / `x-ratelimit-reset` hints a provider sends.
+ */
+export function parseRetryAfterMsFromError(errorMessage: string): number | undefined {
+	const now = Date.now();
+	const retryAfterMsMatch = /retry-after-ms\s*[:=]\s*(\d+)/i.exec(errorMessage);
+	if (retryAfterMsMatch) {
+		return Math.max(0, Number(retryAfterMsMatch[1]));
+	}
+
+	const retryAfterMatch = /retry-after\s*[:=]\s*([^\s,;]+)/i.exec(errorMessage);
+	if (retryAfterMatch) {
+		const value = retryAfterMatch[1];
+		const seconds = Number(value);
+		if (!Number.isNaN(seconds)) {
+			return Math.max(0, seconds * 1000);
+		}
+		const dateMs = Date.parse(value);
+		if (!Number.isNaN(dateMs)) {
+			return Math.max(0, dateMs - now);
+		}
+	}
+
+	const retryHintMs = extractRetryHint(undefined, errorMessage);
+	if (retryHintMs !== undefined) {
+		return retryHintMs;
+	}
+
+	const resetMsMatch = /x-ratelimit-reset-ms\s*[:=]\s*(\d+)/i.exec(errorMessage);
+	if (resetMsMatch) {
+		const resetMs = Number(resetMsMatch[1]);
+		if (!Number.isNaN(resetMs)) {
+			if (resetMs > 1_000_000_000_000) {
+				return Math.max(0, resetMs - now);
+			}
+			return Math.max(0, resetMs);
+		}
+	}
+
+	const resetMatch = /x-ratelimit-reset\s*[:=]\s*(\d+)/i.exec(errorMessage);
+	if (resetMatch) {
+		const resetSeconds = Number(resetMatch[1]);
+		if (!Number.isNaN(resetSeconds)) {
+			if (resetSeconds > 1_000_000_000) {
+				return Math.max(0, resetSeconds * 1000 - now);
+			}
+			return Math.max(0, resetSeconds * 1000);
+		}
+	}
+
+	// Smart Fallback if no exact headers found
+	return undefined;
 }
 
 /** Parses a configured retry fallback selector. */
