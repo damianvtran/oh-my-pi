@@ -75,7 +75,17 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		initTheme();
 		resetSettingsForTest();
 		settingsDir = TempDir.createSync("@pi-issue-6879-settings-");
-		await Settings.init({ inMemory: true, cwd: settingsDir.path() });
+		// Asserts append-mode rendering: the bash card writes its `$ <command>` echo
+		// into the transcript, which is how these tests count renders. The fullscreen
+		// viewport collapses the card to a click-to-expand header and shows none.
+		// This has to ride on the init that follows `resetSettingsForTest()` —
+		// `Settings.init` returns the live singleton and silently discards a second
+		// call's overrides, so pinning it from `beforeEach` would be dead code.
+		await Settings.init({
+			inMemory: true,
+			cwd: settingsDir.path(),
+			overrides: { "tui.viewport": "append" },
+		} as never);
 		authStorage = await AuthStorage.create(":memory:");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
@@ -90,14 +100,6 @@ describe("issue #6879 — tool output appears twice after a superseded turn", ()
 		}
 
 		tempDir = TempDir.createSync("@pi-issue-6879-");
-		// Asserts append-mode rendering: the bash card writes its `$ <command>` echo
-		// into the transcript, which is how this test counts renders. The fullscreen
-		// viewport collapses the card to a click-to-expand header and shows none.
-		await Settings.init({
-			inMemory: true,
-			cwd: tempDir.path(),
-			overrides: { "tui.viewport": "append" },
-		} as never);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
 

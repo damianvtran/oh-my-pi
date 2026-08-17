@@ -55,7 +55,15 @@ import {
 	matchesSelectUp,
 } from "../utils/keybinding-matchers";
 import { buildBrowserItems, ModelBrowser, type ModelBrowserItem, sortModelItems } from "./model-browser";
-import { bottomBorder, dividerSplit, row, splitBodyWidth, splitRow, topBorderSplit } from "./overlay-box";
+import {
+	bottomBorder,
+	dividerSplit,
+	row,
+	splitBodyWidth,
+	splitRow,
+	topBorderSplit,
+	topChromeRows,
+} from "./overlay-box";
 
 /** One agent with its per-agent settings overrides resolved for display. */
 interface HubAgent extends AgentDefinition {
@@ -1423,7 +1431,12 @@ export class AgentsHubComponent implements Component {
 		const sidebarWidth = this.#sidebarWidth();
 		this.#sidebarWidthLast = sidebarWidth;
 		const bodyWidth = splitBodyWidth(width, sidebarWidth);
-		const contentRows = Math.max(10, height - 4);
+		// Top chrome, plus the section rule, the footer and the bottom row. Upstream
+		// hardcoded 4 because its top border is always one row; this fork's
+		// fullscreen panel spends two (a pad row above the title), so a fixed 4
+		// renders one row more than the viewport holds. `topChromeRows()` exists for
+		// exactly this — every other split overlay already budgets through it.
+		const contentRows = Math.max(10, height - 3 - topChromeRows());
 		this.#contentRowCount = contentRows;
 
 		const bodyLines: string[] = [this.#statusRow(bodyWidth)];
@@ -1439,7 +1452,12 @@ export class AgentsHubComponent implements Component {
 
 		const sidebarLines = this.#renderSidebar(sidebarWidth, contentRows);
 		const out: string[] = [];
-		out.push(topBorderSplit(width, "Agents", sidebarWidth));
+		// Spread, never push: this fork's `topBorderSplit` returns a ROW LIST, because
+		// the fullscreen viewport draws a header as a padding row plus a title row
+		// instead of one box-drawing border. `#contentRowStart` is read from
+		// `out.length` immediately after, so it stays correct for either row count —
+		// pushing the array would make the hit-zone rows off by one AND type-error.
+		out.push(...topBorderSplit(width, "Agents", sidebarWidth));
 		this.#contentRowStart = out.length;
 		for (let i = 0; i < contentRows; i++) {
 			out.push(splitRow(sidebarLines[i] ?? "", bodyLines[i] ?? "", width, sidebarWidth));
