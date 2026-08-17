@@ -23,7 +23,9 @@ import defaultPersonality from "./prompts/system/personalities/default.md" with 
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
+import sessionCredentialsTemplate from "./prompts/system/session-credentials.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import type { SessionCredential } from "./secrets/session-credentials";
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import { usesCodexTaskPrompt } from "./task/prompt-policy";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
@@ -532,6 +534,13 @@ export interface BuildSystemPromptOptions {
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
 	secretsEnabled?: boolean;
+	/**
+	 * Credentials the operator has handed to this session via `/credential` or an
+	 * `ask` secret question. Renders one extra prompt block naming each key and
+	 * its placeholder; omitted entirely when empty, so a session that never uses
+	 * the feature pays nothing.
+	 */
+	credentials?: readonly SessionCredential[];
 	/** Pre-loaded workspace tree (skips discovery if provided). May be a Promise to allow early kick-off. */
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
 	/** Whether the local memory://root summary is active. */
@@ -601,6 +610,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskMaxConcurrency = 0,
 		taskIrcEnabled = false,
 		secretsEnabled = false,
+		credentials = [],
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
 		memoryRootEnabled = false,
@@ -906,6 +916,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	}
 	if (activeRepoContextPrompt) {
 		systemPrompt.push(activeRepoContextPrompt);
+	}
+	// Appended as its own block rather than gated inside a template, so it reaches
+	// custom system prompts too and costs exactly zero when the operator has never
+	// used `/credential`.
+	if (credentials.length > 0) {
+		systemPrompt.push(prompt.render(sessionCredentialsTemplate, { credentials }).trim());
 	}
 
 	// The xd:// protocol section (with its device catalog) is only rendered by the

@@ -88,7 +88,8 @@ export class ExtensionUiController {
 			timeoutStartsOnPresentation: true,
 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
-			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
+			input: (title, placeholder, dialogOptions, inputOptions) =>
+				this.showHookInput(title, placeholder, dialogOptions, inputOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
@@ -955,6 +956,7 @@ export class ExtensionUiController {
 		title: string,
 		placeholder?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
+		inputOptions?: { mask?: boolean },
 	): Promise<string | undefined> {
 		return this.#presentDialog(dialogOptions?.signal, settle => {
 			this.ctx.hookInput = new HookInputComponent(
@@ -966,6 +968,7 @@ export class ExtensionUiController {
 					timeout: dialogOptions?.timeout,
 					onTimeout: dialogOptions?.onTimeout,
 					tui: this.ctx.ui,
+					mask: inputOptions?.mask,
 				},
 			);
 			this.ctx.editorContainer.clear();

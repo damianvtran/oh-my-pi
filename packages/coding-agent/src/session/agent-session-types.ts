@@ -33,6 +33,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { SessionCredentials } from "../secrets/session-credentials";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
@@ -223,6 +224,8 @@ export interface AgentSessionConfig {
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for provider and edit content. */
 	obfuscator?: SecretObfuscator;
+	/** Runtime credential vault shared with the tool layer; backs `/credential`. */
+	credentials?: SessionCredentials;
 	/** Inherited eval executor session id from a parent agent. */
 	parentEvalSessionId?: string;
 	/** Logical owner for retained eval kernels created by this session. */

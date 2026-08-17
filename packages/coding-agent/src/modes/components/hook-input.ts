@@ -11,6 +11,13 @@ export interface HookInputOptions {
 	tui?: TUI;
 	timeout?: number;
 	onTimeout?: () => void;
+	/**
+	 * Render typed/pasted characters as bullets while the real value is kept
+	 * internally. Used for credential capture (`/credential`, `ask` secret
+	 * questions) so a shoulder-surfer or a screen recording never sees the
+	 * secret. The value still leaves via `onSubmit` unchanged.
+	 */
+	mask?: boolean;
 }
 
 export class HookInputComponent extends Container {
@@ -54,9 +61,13 @@ export class HookInputComponent extends Container {
 		}
 
 		this.#input = new Input();
+		this.#input.mask = opts?.mask === true;
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "enter submit  esc cancel"), 1, 0));
+		// Name the masking explicitly: a field that shows bullets (or nothing, for
+		// an empty paste) otherwise reads as a broken input.
+		const hint = this.#input.mask ? "enter submit  esc cancel  input hidden" : "enter submit  esc cancel";
+		this.addChild(new Text(theme.fg("dim", hint), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 	}

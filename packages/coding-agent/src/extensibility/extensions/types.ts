@@ -263,8 +263,17 @@ export interface ExtensionUIContext {
 	/** Show a confirmation dialog. */
 	confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean>;
 
-	/** Show a text input dialog. */
-	input(title: string, placeholder?: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined>;
+	/**
+	 * Show a text input dialog. Pass `inputOptions.mask` to render the value as
+	 * bullets — required for credential capture so the secret is not exposed to
+	 * anyone reading the screen.
+	 */
+	input(
+		title: string,
+		placeholder?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+		inputOptions?: { mask?: boolean },
+	): Promise<string | undefined>;
 
 	/** Show the rich ask dialog when the interactive TUI surface is available. */
 	askDialog?(

@@ -157,6 +157,14 @@ export {
 } from "./message-transform";
 export { type SecretEntry, SecretObfuscator } from "./obfuscator";
 export { secretEntriesNeedPlaceholderKey, secretEntryNeedsPlaceholderKey } from "./placeholder";
+export {
+	type CredentialSource,
+	type CredentialStoreResult,
+	MIN_CREDENTIAL_LENGTH,
+	normalizeCredentialKey,
+	type SessionCredential,
+	SessionCredentials,
+} from "./session-credentials";
 
 /**
  * Load secrets from project-local and global secrets.yml files.

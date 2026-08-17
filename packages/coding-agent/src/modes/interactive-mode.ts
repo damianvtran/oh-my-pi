@@ -5640,8 +5640,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.hideHookSelector();
 	}
 
-	showHookInput(title: string, placeholder?: string): Promise<string | undefined> {
-		return this.#extensionUiController.showHookInput(title, placeholder);
+	showHookInput(title: string, placeholder?: string, inputOptions?: { mask?: boolean }): Promise<string | undefined> {
+		return this.#extensionUiController.showHookInput(title, placeholder, undefined, inputOptions);
 	}
 
 	hideHookInput(): void {
