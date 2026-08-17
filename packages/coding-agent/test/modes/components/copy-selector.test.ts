@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CopySelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/copy-selector";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { CopyTarget } from "@oh-my-pi/pi-coding-agent/modes/utils/copy-targets";
@@ -61,6 +62,10 @@ function render(component: CopySelectorComponent): string {
 
 describe("CopySelectorComponent", () => {
 	beforeAll(async () => {
+		// Asserts append-mode rendering: the selector draws its own rounded box, where
+		// the fullscreen viewport renders it borderless inside the surrounding card.
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		darkTheme = await getThemeByName("dark");
 		if (!darkTheme) throw new Error("Failed to load dark theme");
 	});

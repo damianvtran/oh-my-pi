@@ -3,8 +3,9 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Box, Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import type { CustomMessage, SkillPromptDetails } from "../../session/messages";
-import { shortenPath } from "../../tools/render-utils";
+import { isFullscreenViewport, shortenPath } from "../../tools/render-utils";
 import { fileHyperlink } from "../../tui";
+import { CARD_PADDING_X } from "./collapsible-block";
 
 export class SkillMessageComponent extends Container {
 	#box: Box;
@@ -40,8 +41,13 @@ export class SkillMessageComponent extends Container {
 		this.removeChild(this.#box);
 		this.addChild(this.#box);
 		this.#box.clear();
-		// Re-read symbols every rebuild so a runtime theme/preset switch refreshes the outline.
-		this.#box.setBorder({ chars: theme.boxRound, color: t => theme.fg("borderMuted", t) });
+		// Re-read symbols every rebuild so a runtime theme/preset switch refreshes
+		// the outline. Fullscreen has no outline: the `customMessageBg` fill is the
+		// boundary, and the card inset replaces the columns the frame occupied so
+		// content stays on the same column in either mode.
+		const flat = isFullscreenViewport();
+		this.#box.setPaddingX(flat ? CARD_PADDING_X : 1);
+		this.#box.setBorder(flat ? undefined : { chars: theme.boxRound, color: t => theme.fg("borderMuted", t) });
 
 		const details = this.message.details;
 		const name = details?.name?.trim() || "unknown";

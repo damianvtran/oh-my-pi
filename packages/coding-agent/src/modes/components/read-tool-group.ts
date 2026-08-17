@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
-import type { Component } from "@oh-my-pi/pi-tui";
+import type { Component, HitZoneSink } from "@oh-my-pi/pi-tui";
 import { Container, Text } from "@oh-my-pi/pi-tui";
 import { InternalUrlRouter, XD_URL_PREFIX } from "../../internal-urls";
 import { getLanguageFromPath, theme } from "../../modes/theme/theme";
@@ -8,6 +8,7 @@ import { parseLineRanges, selectorLineRanges, splitPathAndSel } from "../../tool
 import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
 import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import { BlockCard, CollapsibleBlockHeader, HeaderRowPainter } from "./collapsible-block";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "./usage-row";
 
@@ -134,6 +135,10 @@ type ReadUsageRow = {
 
 /** Number of code lines to show in collapsed preview mode */
 const COLLAPSED_PREVIEW_LINES = PREVIEW_LIMITS.OUTPUT_COLLAPSED;
+
+// Stable per-instance counter so a group's hit zone keeps its identity while
+// the transcript above it changes.
+let readToolGroupInstanceSeq = 0;
 
 type ReadDisplayTarget = {
 	entry: ReadEntry;
@@ -345,6 +350,17 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	// Forced terminal even with a still-pending entry: the turn ended (abort or
 	// completion) so no late result is coming. Set via `seal()`.
 	#sealed = false;
+	// The engine repaints after a consumed click, so the toggle only has to
+	// rebuild this group's display.
+	readonly #header = new CollapsibleBlockHeader(
+		`read:${++readToolGroupInstanceSeq}`,
+		() => this.setExpanded(!this.#expanded),
+		() => this.#copySource(),
+	);
+	readonly #headerPainter = new HeaderRowPainter();
+	readonly #card = new BlockCard();
+	/** Rows the last render produced, which the card's click target spans. */
+	#cardRows = 0;
 
 	constructor(options: ReadToolGroupOptions = {}) {
 		super();
@@ -354,10 +370,6 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.#updateDisplay();
 	}
 
-	override render(width: number): readonly string[] {
-		if (!this.#toolActivityVisible) return [];
-		return super.render(width);
-	}
 	isTranscriptBlockFinalized(): boolean {
 		if (this.#sealed) return true;
 		if (!this.#finalized) return false;
@@ -510,10 +522,68 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return this;
 	}
 
+	override render(width: number): readonly string[] {
+		// Hidden tool activity draws nothing at all — the guard has to sit ahead
+		// of the card paint, or a hidden group would still emit its card chrome.
+		if (!this.#toolActivityVisible) return [];
+		const lines = super.render(this.#card.contentWidth(width));
+		const rows = this.#card.paint(lines, width, this.#header.hovered);
+		this.#cardRows = rows.length;
+		// The summary line is always this group's first row, whether it is the
+		// `Read <path>` one-liner, the `Read (N)` tree head, or the title row of
+		// a single entry's code preview; the card's top pad sits above it.
+		return this.#headerPainter.paint(rows, this.#card.topRows, this.#header, this.#expanded, this.#card.active);
+	}
+
+	/**
+	 * One zone over the whole card, in both states. Anything smaller is fussy
+	 * to hit: the fill is what the pointer sees, so the fill is the target. A
+	 * press that moves never reaches `onZoneClick` (the engine turns it into a
+	 * selection), so preview code stays drag-selectable underneath.
+	 */
+	override publishHitZones(sink: HitZoneSink): void {
+		this.#card.publishSelectionInset(sink, this.#cardRows);
+		this.#card.publishContentGeometry(sink, () => super.publishHitZones(sink));
+		this.#header.publish(sink, 0, this.#cardRows);
+	}
+
+	/**
+	 * Complete grouped read results, labeled by path.
+	 *
+	 * A group can combine unrelated files and its collapsed tree may show none
+	 * of their bodies. Labels preserve that boundary in the clipboard while the
+	 * source text remains unwrapped and untruncated.
+	 */
+	#copySource(): string | undefined {
+		const sections: string[] = [];
+		for (const entry of this.#entries.values()) {
+			if (entry.contentText === undefined) continue;
+			const content = entry.contentText.trimEnd();
+			const path = entry.path.trim() || "unknown";
+			sections.push(content.length > 0 ? `Read: ${path}\n\n${content}` : `Read: ${path}`);
+		}
+		return sections.length > 0 ? sections.join("\n\n") : undefined;
+	}
+
+	/**
+	 * Whether expanding would actually reveal anything. Only content previews
+	 * are capped when collapsed; a group that shows nothing but paths already
+	 * shows everything it has.
+	 */
+	#hasCappedPreview(): boolean {
+		if (!this.#showContentPreview) return false;
+		for (const entry of this.#entries.values()) {
+			if (!entry.contentText) continue;
+			if (entry.contentText.split("\n").length > COLLAPSED_PREVIEW_LINES) return true;
+		}
+		return false;
+	}
+
 	#updateDisplay(): void {
 		const entries = [...this.#entries.values()];
 		const displayTargets = this.#displayTargetsForEntries(entries);
 		const displayRows = this.#buildSummaryRows(displayTargets);
+		this.#header.noteOverflow(this.#hasCappedPreview());
 
 		// Clear previous children and rebuild the summary and preview blocks.
 		this.clear();

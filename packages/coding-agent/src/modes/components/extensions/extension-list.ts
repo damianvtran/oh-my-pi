@@ -150,7 +150,7 @@ export class ExtensionList implements Component {
 			} else {
 				rowStr = this.#renderExtensionRow(listItem.item, isSelected, rowWidth, masterDisabled);
 			}
-			if (isHovered) rowStr = theme.bg("selectedBg", rowStr);
+			if (isHovered) rowStr = theme.hoverBg(rowStr);
 			rows.push(rowStr);
 		}
 		this.#visibleCount = rows.length;

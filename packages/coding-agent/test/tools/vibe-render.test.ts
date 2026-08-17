@@ -43,7 +43,8 @@ describe("vibe tool renderers", () => {
 	let uiTheme: Theme;
 
 	beforeAll(async () => {
-		await Settings.init({ inMemory: true });
+		// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		const loaded = await getThemeByName("dark");
 		if (!loaded) throw new Error("theme unavailable");
 		uiTheme = loaded;

@@ -154,7 +154,9 @@ function cursorTurn(): AgentMessage[] {
 
 describe("issue #4348: cursor exec-channel tool results pair with synthesized toolCall blocks on rebuild", () => {
 	it("renders bash toolResult inside a ToolExecutionComponent, not as an orphan `⎿` line", async () => {
-		await Settings.init({ inMemory: true });
+		// Asserts append-mode rendering: tool output lands in the terminal's own
+		// scrollback in full, rather than collapsed behind fullscreen card chrome.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		const transcript = transcriptWith(cursorTurn());
 		const { ctx, chatContainer } = makeRenderCtx(transcript);
 
@@ -184,7 +186,7 @@ describe("issue #4348: cursor exec-channel tool results pair with synthesized to
 		// pair the result with. This test guards the failure mode so a future
 		// regression that reverts the synthesis is caught: the rendered output
 		// notably omits the bash command preview.
-		await Settings.init({ inMemory: true });
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		const preFixAssistant: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "Running command:" }],

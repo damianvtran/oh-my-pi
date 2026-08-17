@@ -227,7 +227,7 @@ function makeRenderCtx(
 }
 
 describe("UiHelpers.renderInitialMessages — transcript source", () => {
-	it("renders the collapsed live display transcript, never the LLM context", async () => {
+	it("renders the live display transcript, never the LLM context", async () => {
 		await Settings.init({ inMemory: true });
 		const { ctx, transcriptSpy, llmContextSpy, renderSessionContextSpy } = makeCtx();
 		const transcript = makeEmptyContext();
@@ -235,12 +235,27 @@ describe("UiHelpers.renderInitialMessages — transcript source", () => {
 
 		await new UiHelpers(ctx).renderInitialMessages();
 
-		expect(transcriptSpy).toHaveBeenCalledWith({ collapseCompactedHistory: true });
+		// The load-bearing half: the two contexts diverge at a compaction, and
+		// rendering the agent's one would show the reader a summary in place of
+		// the conversation it replaced.
 		expect(llmContextSpy).not.toHaveBeenCalled();
 		expect(renderSessionContextSpy).toHaveBeenCalledWith(transcript, {
 			updateFooter: true,
 			populateHistory: false,
 		});
+	});
+
+	it.each([true, false])("passes display.collapseCompacted=%s straight through", async collapse => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { "display.collapseCompacted": collapse } } as never);
+		const { ctx, transcriptSpy } = makeCtx();
+		transcriptSpy.mockReturnValue(makeEmptyContext());
+
+		new UiHelpers(ctx).renderInitialMessages();
+
+		// Asserted against the setting rather than a literal, because which way
+		// it defaults is a product decision and this is not the test that owns it.
+		expect(transcriptSpy).toHaveBeenCalledWith(expect.objectContaining({ collapseCompactedHistory: collapse }));
 	});
 });
 
@@ -388,7 +403,16 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 	});
 
 	it("restores eval display image blocks onto rebuilt tool output", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		// Asserts append-mode rendering: the replayed eval cell output is written into
+		// the transcript. The fullscreen viewport collapses the card to a click-to-expand
+		// header, so the cell text is off-frame until it is opened.
+		// `Settings.init` is a no-op once initialised, so the shared `beforeEach`
+		// init has to be torn down before these overrides can land.
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: { "terminal.showImages": true, "tui.viewport": "append" },
+		} as never);
 		setTerminalImageProtocol(ImageProtocol.Sixel);
 		const transcript = transcriptWith([
 			assistantToolCall("eval-image", "eval", { language: "py", code: "display(image)" }),

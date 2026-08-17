@@ -9,6 +9,7 @@ import {
 	type SliceResult,
 } from "@oh-my-pi/pi-natives";
 import { DEFAULT_TAB_WIDTH } from "@oh-my-pi/pi-utils";
+import { isKittyPlaceholderDiacritic, KITTY_PLACEHOLDER } from "./kitty-graphics";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
 
@@ -228,6 +229,68 @@ const OSC66_PREFIX = "\x1b]66;";
 const ESC = "\x1b";
 const TAB = "\t";
 const LONG_WIDTH_FAST_PATH_MIN = 128;
+// APC / PM / SOS strings (`ESC _`, `ESC ^`, `ESC X` ... BEL or ST). These carry
+// application metadata and paint NOTHING, but `Bun.stringWidth` only strips
+// CSI/OSC, so their payload is counted as printable text. That matters because
+// the engine's own caret sentinel is an APC string (`CURSOR_MARKER`): a row
+// carrying the caret measured 5 cells too wide, and every consumer that pads a
+// row to a width - `applyBackgroundToLine` above all - stopped its fill short by
+// exactly that much, leaving an unpainted notch at the right edge of whichever
+// composer row the caret was on.
+const APC_SPAN_REGEX = /\x1b[_^X][\s\S]*?(?:\x07|\x1b\\)/g;
+/** True when `str` may contain an APC/PM/SOS span, from `index` onward. Two
+ *  `indexOf` probes are cheaper than running the regex on every measured row. */
+function hasApcSpan(str: string, index: number): boolean {
+	return (
+		str.indexOf("\x1b_", index) !== -1 || str.indexOf("\x1b^", index) !== -1 || str.indexOf("\x1bX", index) !== -1
+	);
+}
+// Kitty's Unicode image placeholders are one terminal cell each: U+10EEEE
+// followed by explicit row and column diacritics. Bun's generic Unicode width
+// tables count some of Kitty's later diacritics as spacing characters, so a
+// wide image row can be over-reported by dozens of cells. That makes callers
+// such as `applyBackgroundToLine` believe the image already reaches the right
+// edge and leave the rest of the surface unpainted.
+// U+10EEEE is reserved by the protocol; marker validation below prevents a
+// malformed or literal occurrence from changing ordinary text measurement.
+
+function correctKittyPlaceholderWidth(width: number, str: string, index: number): number {
+	placeholderRuns: for (let start = str.indexOf(KITTY_PLACEHOLDER, index); start !== -1; ) {
+		const runStart = start;
+		let runEnd = start;
+		let cells = 0;
+		// The encoder emits adjacent placeholder cells. Measure each contiguous
+		// run once rather than crossing the JS/native string-width boundary for
+		// every image column; embedded styling simply starts another run.
+		while (start === runEnd) {
+			let end = start + KITTY_PLACEHOLDER.length;
+			let complete = true;
+			for (let marker = 0; marker < 2; marker++) {
+				const codePoint = str.codePointAt(end);
+				if (codePoint === undefined || !isKittyPlaceholderDiacritic(codePoint)) {
+					complete = false;
+					break;
+				}
+				end += codePoint > 0xffff ? 2 : 1;
+			}
+			if (!complete) {
+				// Keep the malformed suffix on Bun's normal path, but retain the
+				// correction for complete cells immediately before it and keep
+				// looking for valid runs later in the row.
+				if (cells > 0) {
+					width += cells - Bun.stringWidth(str.slice(runStart, runEnd), STRING_WIDTH_OPTS);
+				}
+				start = str.indexOf(KITTY_PLACEHOLDER, start + KITTY_PLACEHOLDER.length);
+				continue placeholderRuns;
+			}
+			cells++;
+			runEnd = end;
+			start = str.indexOf(KITTY_PLACEHOLDER, end);
+		}
+		width += cells - Bun.stringWidth(str.slice(runStart, runEnd), STRING_WIDTH_OPTS);
+	}
+	return width;
+}
 
 // Pin Bun.stringWidth semantics to the native width engine and guard against Bun
 // default drift: strip ANSI/OSC (don't count escape bytes) and treat
@@ -307,6 +370,9 @@ export function visibleWidth(str: string): number {
 			tabCount++;
 		}
 		if (tabCount > 0) width += tabCount * DEFAULT_TAB_WIDTH;
+		if (str.includes(KITTY_PLACEHOLDER)) {
+			width = correctKittyPlaceholderWidth(width, str, 0);
+		}
 		return correctHangulCompatibilityJamoWidth(width, str);
 	}
 
@@ -364,8 +430,32 @@ export function visibleWidth(str: string): number {
 					explicit = value;
 				}
 			}
-			width += scale * (explicit ?? Bun.stringWidth(m[2], STRING_WIDTH_OPTS));
+			let payloadWidth = explicit;
+			if (payloadWidth === undefined) {
+				payloadWidth = Bun.stringWidth(m[2], STRING_WIDTH_OPTS);
+				if (m[2].includes(KITTY_PLACEHOLDER)) {
+					payloadWidth = correctKittyPlaceholderWidth(payloadWidth, m[2], 0);
+				}
+			}
+			width += scale * payloadWidth;
 		}
+	}
+
+	// APC/PM/SOS: subtract each span back out. `Bun.stringWidth` leaves the
+	// payload counted, but nothing in the span reaches the screen.
+	if (hasApcSpan(str, i)) {
+		APC_SPAN_REGEX.lastIndex = 0;
+		for (let m = APC_SPAN_REGEX.exec(str); m !== null; m = APC_SPAN_REGEX.exec(str)) {
+			width -= Bun.stringWidth(m[0], STRING_WIDTH_OPTS);
+		}
+	}
+
+	// Strip nonpainting control spans before scanning: a placeholder-looking
+	// triple in APC/OSC metadata is not a visible image cell. OSC 66 payloads
+	// were corrected at their own scale above and are stripped here as well.
+	if (str.includes(KITTY_PLACEHOLDER, i)) {
+		const visibleText = Bun.stripANSI(str);
+		width = correctKittyPlaceholderWidth(width, visibleText, 0);
 	}
 
 	return correctHangulCompatibilityJamoWidth(width, str);

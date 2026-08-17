@@ -1,12 +1,13 @@
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
-import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { type Component, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
+import { isFullscreenViewport } from "../../../tools/render-utils";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
 import * as git from "../../../utils/git";
 import * as jj from "../../../utils/jj";
@@ -1707,10 +1708,15 @@ export class StatusLineComponent implements Component {
 		// set `statusLineBg: ""`. Powerline end caps need a contrasting fill to
 		// bridge the bar into the surrounding terminal; without one they read as
 		// stray glyphs, so the cap renderer drops them when the fill is empty.
+		//
+		// Fullscreen rides on the composer panel instead: the bar is one row of
+		// that surface, so it takes the panel fill and drops the caps, which
+		// would only bridge the panel into itself.
 		const TRANSPARENT_BG_ANSI = "\x1b[49m";
+		const onPanel = isFullscreenViewport();
 		const themeBgAnsi = theme.getBgAnsi("statusLineBg");
-		const bgAnsi = effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi;
-		const transparentBg = bgAnsi === TRANSPARENT_BG_ANSI;
+		const bgAnsi = onPanel ? theme.panelBgAnsi : effectiveSettings.transparent ? TRANSPARENT_BG_ANSI : themeBgAnsi;
+		const dropEndCaps = onPanel || bgAnsi === TRANSPARENT_BG_ANSI;
 		const fgAnsi = theme.getFgAnsi("text");
 		const sepAnsi = theme.getFgAnsi("statusLineSep");
 		const subagentBadge = this.#subagentBadgeText();
@@ -1749,16 +1755,19 @@ export class StatusLineComponent implements Component {
 
 		const leftSepWidth = visibleWidth(separatorDef.left);
 		const rightSepWidth = visibleWidth(separatorDef.right);
-		// Transparent mode drops powerline caps (they need a bg fill to bridge),
-		// so the width budget excludes them too.
-		const leftCapWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.right) : 0;
-		const rightCapWidth = separatorDef.endCaps && !transparentBg ? visibleWidth(separatorDef.endCaps.left) : 0;
+		// Capless modes exclude the caps from the width budget too.
+		const leftCapWidth = separatorDef.endCaps && !dropEndCaps ? visibleWidth(separatorDef.endCaps.right) : 0;
+		const rightCapWidth = separatorDef.endCaps && !dropEndCaps ? visibleWidth(separatorDef.endCaps.left) : 0;
 
+		// `outerPad` must track `renderGroup` exactly: it emits a space on each
+		// side of the group, except the panel-facing edge, which is dropped so the
+		// strip lines up with the composer text (see renderGroup).
+		const outerPad = onPanel ? 1 : 2;
 		const groupWidth = (parts: string[], capWidth: number, sepWidth: number): number => {
 			if (parts.length === 0) return 0;
 			const partsWidth = parts.reduce((sum, part) => sum + visibleWidth(part), 0);
 			const sepTotal = Math.max(0, parts.length - 1) * (sepWidth + 2);
-			return partsWidth + sepTotal + 2 + capWidth;
+			return partsWidth + sepTotal + outerPad + capWidth;
 		};
 
 		let leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
@@ -1772,6 +1781,14 @@ export class StatusLineComponent implements Component {
 			}
 			// Shrink path before dropping left segments — path is the only elastic segment
 			const pathIdx = leftSegIds.indexOf("path");
+			const configuredPathMaxLen = ctx.options.path?.maxLength ?? 40;
+			const pathCtx = (maxLen: number): SegmentContext => ({
+				...ctx,
+				options: { ...ctx.options, path: { ...ctx.options.path, maxLength: maxLen } },
+			});
+			// Tracks what the path was last rendered at, so the regrow pass below
+			// knows where it is starting from rather than re-deriving it.
+			let pathMaxLen = configuredPathMaxLen;
 			if (pathIdx >= 0 && totalWidth() > topFillWidth) {
 				const overflow = totalWidth() - topFillWidth;
 				const currentPathVW = visibleWidth(left[pathIdx]);
@@ -1779,12 +1796,7 @@ export class StatusLineComponent implements Component {
 				const shrinkable = currentPathVW - minPathVW;
 				if (shrinkable > 0) {
 					const shrinkBy = Math.min(shrinkable, overflow);
-					const currentMaxLen = ctx.options.path?.maxLength ?? 40;
-					let newMaxLen = Math.max(4, Math.min(currentMaxLen, currentPathVW) - shrinkBy);
-					const pathCtx = (maxLen: number): SegmentContext => ({
-						...ctx,
-						options: { ...ctx.options, path: { ...ctx.options.path, maxLength: maxLen } },
-					});
+					let newMaxLen = Math.max(4, Math.min(configuredPathMaxLen, currentPathVW) - shrinkBy);
 					let reRendered = renderSegment("path", pathCtx(newMaxLen));
 					if (reRendered.visible && reRendered.content) {
 						// maxLength governs path text, not icon prefix; iterate to compensate
@@ -1799,6 +1811,7 @@ export class StatusLineComponent implements Component {
 							reRendered = adjusted;
 						}
 						left[pathIdx] = reRendered.content;
+						pathMaxLen = newMaxLen;
 						leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
 					}
 				}
@@ -1820,13 +1833,45 @@ export class StatusLineComponent implements Component {
 				leftSegIds.splice(dropIdx, 1);
 				leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
 			}
+
+			// Give the path back what the drops freed. The order above shrinks it to
+			// its 8-column floor BEFORE removing any segment, so a bar that then
+			// dropped several segments was left showing a mangled `…ectory` beside
+			// a run of empty columns - worst of both, and the shape the narrow
+			// composer strip hit every time. Regrowing never re-adds a dropped
+			// segment, so it cannot re-trigger the overflow it is unwinding.
+			const regrowIdx = leftSegIds.indexOf("path");
+			if (regrowIdx >= 0 && pathMaxLen < configuredPathMaxLen) {
+				const slack = topFillWidth - totalWidth();
+				if (slack > 0) {
+					const baseVW = visibleWidth(left[regrowIdx]);
+					let candidateMaxLen = Math.min(configuredPathMaxLen, pathMaxLen + slack);
+					let grown = renderSegment("path", pathCtx(candidateMaxLen));
+					// Same compensation loop as the shrink above, in reverse: the icon
+					// prefix is outside `maxLength`, so the width gained per step is
+					// not exactly the step size.
+					for (let i = 0; i < 8; i++) {
+						if (!grown.visible || !grown.content) break;
+						const gained = visibleWidth(grown.content) - baseVW;
+						if (gained <= slack) break;
+						const nextMaxLen = candidateMaxLen - (gained - slack);
+						if (nextMaxLen <= pathMaxLen) break; // no room to grow at all
+						candidateMaxLen = nextMaxLen;
+						grown = renderSegment("path", pathCtx(candidateMaxLen));
+					}
+					if (grown.visible && grown.content && visibleWidth(grown.content) - baseVW <= slack) {
+						left[regrowIdx] = grown.content;
+						leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
+					}
+				}
+			}
 		}
 
 		const renderGroup = (parts: string[], direction: "left" | "right"): string => {
 			if (parts.length === 0) return "";
 			const sep = direction === "left" ? separatorDef.left : separatorDef.right;
 			const cap =
-				separatorDef.endCaps && !transparentBg
+				separatorDef.endCaps && !dropEndCaps
 					? direction === "left"
 						? separatorDef.endCaps.right
 						: separatorDef.endCaps.left
@@ -1834,8 +1879,15 @@ export class StatusLineComponent implements Component {
 			const capPrefix = separatorDef.endCaps?.useBgAsFg ? bgAnsi.replace("\x1b[48;", "\x1b[38;") : bgAnsi + sepAnsi;
 			const capText = cap ? `${capPrefix}${this.#focusedAgentId ? "\x1b[22m" : ""}${cap}\x1b[0m` : "";
 
+			// The outer spaces are the bar's own breathing room against the end
+			// caps. On the composer panel there are no caps and the panel already
+			// insets every row, so keeping them pushed the strip one column right
+			// of the composer text, the hint row and every card above it. Drop the
+			// edge that faces the panel border and keep the inner ones.
+			const padLeadingEdge = onPanel && direction === "left" ? "" : " ";
+			const padTrailingEdge = onPanel && direction === "right" ? "" : " ";
 			let content = bgAnsi + fgAnsi;
-			content += ` ${parts.join(` ${sepAnsi}${sep}${fgAnsi} `)} `;
+			content += `${padLeadingEdge}${parts.join(` ${sepAnsi}${sep}${fgAnsi} `)}${padTrailingEdge}`;
 			content += "\x1b[0m";
 
 			if (capText) {
@@ -1853,6 +1905,12 @@ export class StatusLineComponent implements Component {
 		}
 
 		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
+		if (onPanel) {
+			// The session-accent rule is the one piece of the bar that is a rule.
+			// On the panel the gap is just more of the surface; the accent still
+			// reaches the eye through the session_name segment on the right.
+			return leftGroup + bgAnsi + padding(gapWidth) + rightGroup;
+		}
 		const sessionName =
 			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
 		const accentHex = sessionName
@@ -1884,8 +1942,13 @@ export class StatusLineComponent implements Component {
 			return [];
 		}
 
-		return Array.from(this.#hookStatuses.entries())
+		// Hook rows sit directly above the composer, so in fullscreen they take
+		// the same panel fill and inset and read as the top of that surface.
+		const onPanel = isFullscreenViewport();
+		const inset = onPanel ? 2 : 0;
+		const rows = Array.from(this.#hookStatuses.entries())
 			.sort(([a], [b]) => a.localeCompare(b))
-			.map(([, text]) => truncateToWidth(sanitizeStatusText(text), width));
+			.map(([, text]) => truncateToWidth(sanitizeStatusText(text), Math.max(0, width - inset)));
+		return onPanel ? rows.map(row => theme.panelBg(padding(inset) + row, width)) : rows;
 	}
 }

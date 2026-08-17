@@ -22,7 +22,13 @@ function visibleText(lines: readonly string[]): string {
 
 describe("ToolExecutionComponent custom renderer failures", () => {
 	beforeAll(async () => {
-		await Settings.init({ inMemory: true });
+		await Settings.init({
+			inMemory: true,
+			// Pinned: these assert the renderer-failure fallback text row by row, and
+			// the worktree config selects the fullscreen viewport, whose collapsed
+			// cards are one summary row.
+			overrides: { "tui.viewport": "append" },
+		});
 		const loaded = await getThemeByName("dark");
 		if (!loaded) throw new Error("theme unavailable");
 		setThemeInstance(loaded);
@@ -144,7 +150,13 @@ describe("MCP result Markdown rendering", () => {
 	};
 
 	beforeAll(async () => {
-		await Settings.init({ inMemory: true });
+		await Settings.init({
+			inMemory: true,
+			// Pinned: these assert the renderer-failure fallback text row by row, and
+			// the worktree config selects the fullscreen viewport, whose collapsed
+			// cards are one summary row.
+			overrides: { "tui.viewport": "append" },
+		});
 		const loaded = await getThemeByName("dark");
 		if (!loaded) throw new Error("theme unavailable");
 		setThemeInstance(loaded);

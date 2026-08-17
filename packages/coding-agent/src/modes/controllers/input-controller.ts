@@ -483,6 +483,23 @@ export class InputController {
 		this.ctx.editor.onToggleToolActivity = () => this.toggleToolActivityVisibility();
 		this.ctx.editor.setActionKeys("app.message.dequeue", this.ctx.keybindings.getKeys("app.message.dequeue"));
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
+		this.ctx.editor.setActionKeys("app.session.parent", this.ctx.keybindings.getKeys("app.session.parent"));
+		this.ctx.editor.setActionKeys(
+			"app.session.sibling.next",
+			this.ctx.keybindings.getKeys("app.session.sibling.next"),
+		);
+		this.ctx.editor.setActionKeys(
+			"app.session.sibling.prev",
+			this.ctx.keybindings.getKeys("app.session.sibling.prev"),
+		);
+		// Declining on the main session is what lets these share Alt+Up with
+		// dequeue and Alt+Left/Right with word motion.
+		this.ctx.editor.onSessionNavigate = action => {
+			if (!this.ctx.focusedAgentId) return false;
+			if (action === "parent") void this.ctx.focusParentSession();
+			else void this.ctx.focusSiblingSession(action === "sibling.next" ? 1 : -1);
+			return true;
+		};
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
 		this.ctx.editor.onRetry = () => void this.handleRetry();
 		this.ctx.editor.clearCustomKeyHandlers();
@@ -1954,8 +1971,14 @@ export class InputController {
 		// the live block. resetDisplay() invalidates the snapshots and forces a
 		// full clear + replay — the keyboard-accessible resize-reset equivalent —
 		// which is the only path that re-emits the whole transcript at its new
-		// heights.
-		this.ctx.ui.resetDisplay();
+		// heights. The fullscreen viewport commits nothing to scrollback, so every
+		// block is already repaintable and the full replay would only cost a
+		// needless repaint of the entire frame.
+		if (this.ctx.ui.viewportMode === "fullscreen") {
+			this.ctx.ui.requestRender();
+		} else {
+			this.ctx.ui.resetDisplay();
+		}
 	}
 
 	toggleThinkingBlockVisibility(): void {

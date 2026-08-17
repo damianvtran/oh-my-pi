@@ -1,3 +1,4 @@
+import { type HitZoneSink, isHitZoneProvider } from "../hit-zones";
 import type { Component } from "../tui";
 import {
 	getPaddingX,
@@ -41,6 +42,15 @@ export class Box implements Component {
 	#paddingY: number;
 	#bgFn?: (text: string) => string;
 	#border?: BoxBorder;
+	// Row geometry of the last render, so hit zones published by children can be
+	// translated into the Box's own rows. A Box is not a Container, so it does
+	// not inherit Container's walk, and a tool card's clickable header sits
+	// inside one: without this the whole chain from the transcript down to a
+	// renderer's rows would silently drop every zone.
+	#lastChildLines: (readonly string[])[] = [];
+	#lastContentRowOffset = 0;
+	#lastContentRowCount = 0;
+	#lastContentColumnOffset = 0;
 
 	#ignoreTight = false;
 
@@ -141,6 +151,12 @@ export class Box implements Component {
 			return lines;
 		});
 		const childWidths = childLines.map(lines => getPublishedLineWidths(lines));
+		// Recorded before the memo bail-out below: children re-render every frame
+		// regardless of the cache, so this geometry is always current.
+		this.#lastChildLines = childLines;
+		this.#lastContentRowOffset = contentRows > 0 ? (border ? 1 : 0) + this.#paddingY : 0;
+		this.#lastContentRowCount = contentRows;
+		this.#lastContentColumnOffset = (border ? 1 : 0) + paddingX;
 		const cached = this.#cached;
 		if (
 			cached !== undefined &&
@@ -232,5 +248,32 @@ export class Box implements Component {
 			result,
 		};
 		return result;
+	}
+
+	/**
+	 * Forward children's pointer zones and row-local selection geometry, shifted
+	 * past this Box's own padding and optional border.
+	 *
+	 * Pointer-zone columns deliberately remain unchanged: transcript controls
+	 * own their full row. Selection insets compose separately, because the same
+	 * cells are card chrome rather than source text when a drag copies glyphs.
+	 */
+	publishHitZones(sink: HitZoneSink): void {
+		const refs = this.#lastChildLines;
+		if (refs.length !== this.children.length) return;
+		sink.selectionInset(this.#lastContentRowOffset, this.#lastContentRowCount, this.#lastContentColumnOffset);
+		let offset = this.#lastContentRowOffset;
+		for (let i = 0; i < this.children.length; i++) {
+			const lines = refs[i];
+			if (lines === undefined) return;
+			const child = this.children[i]!;
+			if (isHitZoneProvider(child)) {
+				const base = offset;
+				sink.withOffset(base, () => {
+					sink.withSelectionInset(this.#lastContentColumnOffset, () => child.publishHitZones(sink));
+				});
+			}
+			offset += lines.length;
+		}
 	}
 }

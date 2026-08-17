@@ -5,6 +5,8 @@ import {
 	type Component,
 	CURSOR_MARKER,
 	type Focusable,
+	type HitZoneSink,
+	type MouseZoneTarget,
 	setTerminalScreenToScrollback,
 	TERMINAL,
 	TUI,
@@ -26,6 +28,23 @@ class MutableLinesComponent implements Component {
 
 	render(width: number): string[] {
 		return this.#lines.map(line => line.slice(0, width));
+	}
+}
+
+class PointerZoneComponent implements Component {
+	readonly #target: MouseZoneTarget = {
+		zoneKey: "pointer-probe",
+		pointerShape: "pointer",
+	};
+
+	render(width: number): readonly string[] {
+		return ["link".slice(0, width)];
+	}
+
+	invalidate(): void {}
+
+	publishHitZones(sink: HitZoneSink): void {
+		sink.zone(this.#target, 0, 1, 0, 3);
 	}
 }
 
@@ -3306,6 +3325,43 @@ describe("TUI terminal-state regressions", () => {
 				expect(visible(term).some(line => line.includes("MODAL-0"))).toBeFalse();
 			} finally {
 				tui.stop();
+			}
+		});
+
+		it("sets the pointer over an interactive zone and restores it on stop", async () => {
+			const previousPointerShapes = TERMINAL.pointerShapes;
+			TERMINAL.pointerShapes = true;
+			const term = new VirtualTerminal(40, 8, 200);
+			const writes = captureWrites(term);
+			const tui = new TUI(term);
+			let stopped = false;
+
+			try {
+				tui.setViewportMode("fullscreen");
+				tui.addChild(new PointerZoneComponent());
+				tui.start();
+				await settle(term);
+
+				const hoverFrom = writes.length;
+				let foundPointerZone = false;
+				for (let row = 1; row <= 8 && !foundPointerZone; row++) {
+					for (let col = 1; col <= 40; col++) {
+						term.sendInput(`\x1b[<35;${col};${row}M`);
+						if (writes.slice(hoverFrom).join("").includes("\x1b]22;pointer\x07")) {
+							foundPointerZone = true;
+							break;
+						}
+					}
+				}
+				expect(foundPointerZone).toBeTrue();
+
+				const stopFrom = writes.length;
+				tui.stop();
+				stopped = true;
+				expect(writes.slice(stopFrom).join("")).toContain("\x1b]22;default\x07");
+			} finally {
+				if (!stopped) tui.stop();
+				TERMINAL.pointerShapes = previousPointerShapes;
 			}
 		});
 

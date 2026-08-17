@@ -46,7 +46,11 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-default-plan-");
-		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		// The welcome banner carrying the model name is the append-mode surface. In
+		// the fullscreen viewport this fork shows the home screen instead and puts
+		// model identity in the composer chrome, so `#welcomeComponent` is never
+		// built and the banner assertions below have nothing to read.
+		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "tui.viewport": "append" } } as never);
 		Settings.instance.set("startup.quiet", true);
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");

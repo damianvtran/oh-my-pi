@@ -31,7 +31,9 @@ const originalImageProtocol = TERMINAL.imageProtocol;
 
 beforeEach(async () => {
 	resetSettingsForTest();
-	await Settings.init({ inMemory: true });
+	// Asserts append-mode rendering: the group's first row is its "Read (n)" header.
+	// The fullscreen viewport opens every card with a blank padding row instead.
+	await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 });
 
 afterEach(() => {

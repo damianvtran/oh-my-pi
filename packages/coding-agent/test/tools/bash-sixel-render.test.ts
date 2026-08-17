@@ -1,7 +1,8 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { bashToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { previewWindowRows } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
@@ -22,6 +23,16 @@ describe("bashToolRenderer", () => {
 		const loadedTheme = await getThemeByName("dark");
 		if (!loadedTheme) throw new Error("Expected dark theme");
 		uiTheme = loadedTheme;
+	});
+
+	beforeAll(async () => {
+		resetSettingsForTest();
+		// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+		await Settings.init({ inMemory: true, cwd: process.cwd(), overrides: { "tui.viewport": "append" } } as never);
+	});
+
+	afterAll(() => {
+		resetSettingsForTest();
 	});
 
 	afterEach(() => {

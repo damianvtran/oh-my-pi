@@ -25,6 +25,8 @@ export * from "./desktop-notify";
 export type * from "./editor-component";
 // Fuzzy matching
 export * from "./fuzzy";
+// Engine-owned pointer hit zones
+export * from "./hit-zones";
 // Keybindings
 export * from "./keybindings";
 // Kitty keyboard protocol helpers
@@ -36,6 +38,8 @@ export * from "./latex-block";
 export * from "./latex-to-unicode";
 // SGR mouse report parsing
 export * from "./mouse";
+// Drag-select and copy for the full-screen viewport
+export * from "./selection";
 // Mermaid diagram support
 // Input buffering for batch splitting
 export * from "./stdin-buffer";
@@ -49,3 +53,5 @@ export * from "./ttyid";
 export * from "./tui";
 // Utilities
 export * from "./utils";
+// Trackpad-shaped wheel gesture accumulation
+export * from "./wheel-momentum";

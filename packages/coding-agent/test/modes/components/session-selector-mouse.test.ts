@@ -1,9 +1,14 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 
 beforeAll(async () => {
+	// Asserts append-mode rendering: the selector closes with its own bottom border
+	// on the last row, where the fullscreen viewport ends on a blank card row.
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 	await initTheme();
 });
 

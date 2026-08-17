@@ -13,7 +13,7 @@ import {
 	JSON_TREE_SCALAR_LEN_EXPANDED,
 	renderJsonTreeLines,
 } from "./json-tree";
-import { formatExpandHint, replaceTabs, truncateToWidth } from "./render-utils";
+import { formatExpandHint, isFullscreenViewport, PREVIEW_LIMITS, replaceTabs, truncateToWidth } from "./render-utils";
 
 /** Inputs rendered by the fallback card used when a tool has no bespoke renderer. */
 export interface DefaultToolRenderInput {
@@ -121,7 +121,12 @@ export function formatDefaultToolExecution(
 	}
 
 	const outputLines = textContent.split("\n");
-	const maxOutputLines = options.expanded ? 12 : 4;
+	// A settled call collapses to one line of evidence in the fullscreen
+	// viewport, where its header is a click away from the rest. A still-running
+	// call keeps the wider window because its output is the live edge, and
+	// append mode keeps it throughout because there is nothing to click there.
+	const settledCap = options.isPartial || !isFullscreenViewport() ? 4 : PREVIEW_LIMITS.OUTPUT_SETTLED;
+	const maxOutputLines = options.expanded ? 12 : settledCap;
 	const displayLines = outputLines.slice(0, maxOutputLines);
 
 	for (const line of displayLines) {
@@ -133,7 +138,11 @@ export function formatDefaultToolExecution(
 		lines.push(
 			`${uiTheme.fg("dim", `… ${remaining} more lines`)} ${formatExpandHint(uiTheme, options.expanded, true)}`,
 		);
-	} else if (!options.expanded) {
+	} else if (!options.expanded && !isFullscreenViewport()) {
+		// Nothing is hidden but ctrl+o still reveals the args tree, so append mode
+		// keeps advertising it. In the fullscreen viewport an affordance also
+		// makes the header clickable and hoverable, and a card that already shows
+		// its whole output should not light up under the cursor.
 		lines.push(formatExpandHint(uiTheme, options.expanded, true));
 	}
 
@@ -143,12 +152,18 @@ export function formatDefaultToolExecution(
 /** Render the generic fallback as the state-tinted card used by direct custom tools. */
 export function renderDefaultToolExecution(input: DefaultToolRenderInput, uiTheme: Theme): Component {
 	const component = new WidthAwareText(contentWidth => formatDefaultToolExecution(input, contentWidth, uiTheme), 1, 1);
-	const background = input.options.isPartial
-		? "toolPendingBg"
-		: input.result?.isError
-			? "toolErrorBg"
-			: "toolSuccessBg";
-	component.setCustomBgFn(text => uiTheme.bg(background, text));
+	// Same rule as `renderOutputBlock`: in the fullscreen viewport the enclosing
+	// card owns the surface for every row it draws, padding included, so a tint
+	// applied to the body alone would never reach the card's blank rows and the
+	// block would read as a darker box nested inside a lighter one.
+	if (!isFullscreenViewport()) {
+		const background = input.options.isPartial
+			? "toolPendingBg"
+			: input.result?.isError
+				? "toolErrorBg"
+				: "toolSuccessBg";
+		component.setCustomBgFn(text => uiTheme.bg(background, text));
+	}
 	component.setIgnoreTight(true);
 	return component;
 }

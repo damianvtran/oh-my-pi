@@ -20,10 +20,12 @@ import {
 	getDiffStats,
 	getLspBatchRequest,
 	invalidateRenderedStringCache,
+	isFullscreenViewport,
 	type LspBatchRequest,
 	PREVIEW_LIMITS,
 	previewWindowRows,
 	type RenderedStringCache,
+	recordBlockSummary,
 	replaceTabs,
 	shortenPath,
 	truncateDiffByHunk,
@@ -32,6 +34,7 @@ import {
 	fileHyperlink,
 	framedBlock,
 	Hasher,
+	outputBlockContentWidth,
 	type RenderCache,
 	renderStatusLine,
 	truncateToWidth,
@@ -331,6 +334,9 @@ function renderEditHeader(
 		linkPath: options.linkPath,
 	};
 	const formatted = formatEditDescription(options.rawPath, uiTheme, descriptionOptions);
+	// Threaded into `renderStatusLine` rather than concatenated onto its result:
+	// it records the collapsed one-liner internally, so a tail appended here
+	// would show on the expanded header and vanish from the collapsed card.
 	const suffix = `${options.statsSuffix ?? ""}${options.extraSuffix ?? ""}`;
 	const buildHeader = (description: string): string =>
 		renderStatusLine(
@@ -339,13 +345,19 @@ function renderEditHeader(
 				iconOverride: options.iconOverride,
 				title,
 				description,
+				suffix,
+				// Recorded below, once, from whichever pass actually ships.
+				record: false,
 			},
 			uiTheme,
-		) + suffix;
+		);
 
 	const header = buildHeader(formatted.description);
 	const overflow = visibleWidth(header) - editHeaderLabelBudget(width, uiTheme);
-	if (overflow <= 0 || formatted.pathWidth <= 1) return header;
+	if (overflow <= 0 || formatted.pathWidth <= 1) {
+		recordBlockSummary(header);
+		return header;
+	}
 
 	const pathCount = Math.max(1, (options.rawPath ? 1 : 0) + (options.rename ? 1 : 0));
 	const fittedPathWidth = Math.max(1, Math.floor((formatted.pathWidth - overflow) / pathCount));
@@ -353,7 +365,9 @@ function renderEditHeader(
 		...descriptionOptions,
 		maxPathWidth: fittedPathWidth,
 	});
-	return buildHeader(fitted.description);
+	const fittedHeader = buildHeader(fitted.description);
+	recordBlockSummary(fittedHeader);
+	return fittedHeader;
 }
 
 /**
@@ -514,7 +528,10 @@ function formatMultiFileStreamingDiff(
 	for (let index = 0; index < previews.length; index++) {
 		const preview = previews[index]!;
 		if (!preview.diff && !preview.error) continue;
-		const header = uiTheme.fg("dim", `\n\n── ${shortenPath(preview.path)} ──`);
+		// The blank rows above already separate one file's preview from the next,
+		// so the flanking rules are decoration the fullscreen viewport drops.
+		const name = shortenPath(preview.path);
+		const header = uiTheme.fg("dim", isFullscreenViewport() ? `\n\n${name}` : `\n\n── ${name} ──`);
 		if (preview.error) {
 			parts.push(`${header}\n${uiTheme.fg("error", replaceTabs(preview.error))}`);
 			continue;
@@ -956,7 +973,7 @@ function renderSingleFileResult(
 		// Diff lines self-wrap with a continuation gutter; pre-wrap to the frame's
 		// inner width so renderOutputBlock's generic wrap is a no-op. Edit frames
 		// use a flush left border because code-frame gutters already provide padding.
-		const innerWidth = Math.max(1, width - 2);
+		const innerWidth = outputBlockContentWidth(width, 0);
 		const bodyLines = body.length > 0 ? body.split("\n").flatMap(line => wrapEditRendererLine(line, innerWidth)) : [];
 		while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 

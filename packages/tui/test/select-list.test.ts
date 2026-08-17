@@ -15,6 +15,8 @@ const testTheme = {
 		inputCursor: "|",
 		hrChar: "─",
 		quoteBorder: "│",
+		disclosureCollapsed: "▸",
+		disclosureExpanded: "▾",
 		boxRound: { topLeft: "╭", topRight: "╮", bottomLeft: "╰", bottomRight: "╯", horizontal: "─", vertical: "│" },
 		boxSharp: {
 			topLeft: "┌",
@@ -396,7 +398,11 @@ describe("SelectList.routeMouse", () => {
 		row: 0,
 		release: false,
 		wheel: null,
+		wheelX: null,
 		motion: false,
+		shift: false,
+		alt: false,
+		ctrl: false,
 		leftClick: false,
 	};
 

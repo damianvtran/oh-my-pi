@@ -18,10 +18,39 @@ export interface SgrMouseEvent {
 	row: number;
 	/** True for a release report (`m` suffix). */
 	release: boolean;
-	/** Wheel direction: -1 up, 1 down, null when not a wheel event. */
+	/**
+	 * Vertical wheel direction: -1 up, 1 down, null when the report is not a
+	 * vertical wheel notch.
+	 *
+	 * Horizontal notches are deliberately NOT folded in here. SGR encodes the
+	 * wheel axis in the low bits — 64/65 vertical, 66/67 horizontal — and a
+	 * `button & 1` test cannot tell 65 (down) from 67 (right). A trackpad swipe
+	 * is never purely vertical, so the terminal interleaves horizontal notches
+	 * through every gesture; read as vertical they invert the scroll direction
+	 * mid-swipe and the transcript oscillates against the reader's finger.
+	 */
 	wheel: -1 | 1 | null;
+	/** Horizontal wheel direction: -1 left, 1 right, null when not one. */
+	wheelX: -1 | 1 | null;
 	/** True when the pointer moved (hover or drag) rather than clicked. */
 	motion: boolean;
+	/**
+	 * Modifier held when the report was generated.
+	 *
+	 * SGR packs these into the same button byte as the button itself (4 shift,
+	 * 8 alt/meta, 16 ctrl), so a modified left click is still a left click and
+	 * reaches every ordinary click path unchanged. They are decoded here rather
+	 * than left to callers picking bits out of `button`, so that intent (alt as
+	 * "copy this, do not activate it") is expressed once.
+	 *
+	 * `shift` is decoded for completeness but is close to unusable as an app
+	 * gesture: terminals conventionally reserve shift+drag to bypass mouse
+	 * reporting and make their OWN selection, so the report never arrives.
+	 * There is no super/cmd bit in SGR at all — the protocol cannot carry it.
+	 */
+	shift: boolean;
+	alt: boolean;
+	ctrl: boolean;
 	/** True for a left-button press (not motion, not release, not wheel). */
 	leftClick: boolean;
 }
@@ -38,10 +67,28 @@ export function parseSgrMouse(data: string): SgrMouseEvent | null {
 	const col = Number(match[2]) - 1;
 	const row = Number(match[3]) - 1;
 	const release = match[4] === "m";
-	const wheel = button & 64 ? ((button & 1 ? 1 : -1) as 1 | -1) : null;
-	const motion = (button & 32) !== 0 && wheel === null;
-	const leftClick = !release && wheel === null && !motion && (button & 3) === 0;
-	return { button, col, row, release, wheel, motion, leftClick };
+	// Bit 64 marks a wheel report; bit 1 then selects the axis (0 vertical,
+	// 1 horizontal) and bit 0 the direction within it.
+	const isWheel = (button & 64) !== 0;
+	const horizontal = isWheel && (button & 2) !== 0;
+	const towardEnd = (button & 1) !== 0;
+	const wheel = isWheel && !horizontal ? ((towardEnd ? 1 : -1) as 1 | -1) : null;
+	const wheelX = horizontal ? ((towardEnd ? 1 : -1) as 1 | -1) : null;
+	const motion = (button & 32) !== 0 && !isWheel;
+	const leftClick = !release && !isWheel && !motion && (button & 3) === 0;
+	return {
+		button,
+		col,
+		row,
+		release,
+		wheel,
+		wheelX,
+		motion,
+		shift: (button & 4) !== 0,
+		alt: (button & 8) !== 0,
+		ctrl: (button & 16) !== 0,
+		leftClick,
+	};
 }
 
 /** Handler invoked with a decoded SGR event; returning `false` reports unhandled. */
@@ -100,6 +147,17 @@ export function routeSelectListMouse(target: SelectListMouseTarget, event: SgrMo
  * rendered lines before forwarding.
  */
 export interface MouseRoutable {
-	/** `line`/`col` are 0-based within the component's rendered output. */
-	routeMouse(event: SgrMouseEvent, line: number, col: number): void;
+	/**
+	 * `line`/`col` are 0-based within the component's rendered output.
+	 *
+	 * Return `false` to decline the report; anything else (including
+	 * `undefined`) consumes it. What declining buys you is the host's business,
+	 * and hosts differ: the engine's overlay router routes no pointer input at
+	 * all while an overlay is up, so a report it declines is not re-routed —
+	 * it reaches only the focused component's own `handleInput`, and a
+	 * declining overlay must ignore `\x1b[<` there itself. Every other host
+	 * (`routeSelectListMouse`, `SettingsList`, the setup wizard, the model hub)
+	 * discards the return value, so declining there does nothing at all.
+	 */
+	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean | undefined | void;
 }

@@ -112,6 +112,14 @@ export class TerminalInfo {
 		 * (macOS narrow, otherwise UAX#11).
 		 */
 		public readonly hangulJamoWidth: HangulCompatibilityJamoWidth = "platform",
+		/**
+		 * Honours OSC 22 (`ESC ] 22 ; <css-cursor> BEL`) to set the mouse pointer
+		 * shape. Resolved per terminal rather than probed: OSC 22 has no reply, so
+		 * there is nothing to ask. Terminals that do not implement it swallow the
+		 * sequence, which is why this is a hint for skipping pointless writes
+		 * rather than a safety gate.
+		 */
+		public readonly pointerShapes: boolean = false,
 	) {}
 
 	/**
@@ -471,9 +479,45 @@ const KNOWN_TERMINALS = Object.freeze({
 	base: new TerminalInfo("base", null, false, false, NotifyProtocol.Bell),
 	trueColor: new TerminalInfo("trueColor", null, true, false, NotifyProtocol.Bell),
 	// Recognized terminals
-	kitty: new TerminalInfo("kitty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99, true, true, true),
-	ghostty: new TerminalInfo("ghostty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, false, false, false, 2),
-	wezterm: new TerminalInfo("wezterm", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9),
+	// OSC 22 pointer shapes: kitty (>=0.31), ghostty and wezterm implement it.
+	// iTerm2, VS Code, Alacritty and Warp do not, so they keep the flag off and
+	// the engine skips the write entirely.
+	kitty: new TerminalInfo(
+		"kitty",
+		ImageProtocol.Kitty,
+		true,
+		true,
+		NotifyProtocol.Osc99,
+		true,
+		true,
+		true,
+		"platform",
+		true,
+	),
+	ghostty: new TerminalInfo(
+		"ghostty",
+		ImageProtocol.Kitty,
+		true,
+		true,
+		NotifyProtocol.Osc9,
+		false,
+		false,
+		false,
+		2,
+		true,
+	),
+	wezterm: new TerminalInfo(
+		"wezterm",
+		ImageProtocol.Kitty,
+		true,
+		true,
+		NotifyProtocol.Osc9,
+		false,
+		false,
+		false,
+		"platform",
+		true,
+	),
 	iterm2: new TerminalInfo("iterm2", ImageProtocol.Iterm2, true, true, NotifyProtocol.Osc9),
 	vscode: new TerminalInfo("vscode", null, true, true, NotifyProtocol.Bell),
 	alacritty: new TerminalInfo("alacritty", null, true, true, NotifyProtocol.Bell),
@@ -542,6 +586,7 @@ export interface RuntimeTerminal extends TerminalInfo {
 	deccara: boolean;
 	supportsScreenToScrollback: boolean;
 	textSizing: boolean;
+	pointerShapes: boolean;
 }
 
 export const TERMINAL: RuntimeTerminal = (() => {

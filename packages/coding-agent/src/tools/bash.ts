@@ -45,8 +45,10 @@ import { resolveToCwd } from "./path-utils";
 import {
 	capPreviewLines,
 	DEFAULT_TERMINAL_PREVIEW_LINES,
+	formatExpandHint,
 	formatToolWorkingDirectory,
 	previewWindowRows,
+	recordBlockSummary,
 	replaceTabs,
 } from "./render-utils";
 import { extractLeadingCdTarget, tokenizeShellSegments } from "./shell-tokenize";
@@ -1637,6 +1639,24 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 									},
 							uiTheme,
 						);
+			if (header === undefined && renderArgs.command) {
+				// This frame deliberately draws no title bar, so nothing upstream
+				// reports what the block is. The command is its identity, and the
+				// collapsed one-line card has nothing else to show. Reported from the
+				// raw command rather than the highlighted lines so the status line's
+				// own colouring is not fighting the syntax highlighting.
+				recordBlockSummary(
+					renderStatusLine(
+						{
+							iconOverride: success ? uiTheme.styledSymbol("tool.bash", "accent") : undefined,
+							icon: success ? undefined : isPartial ? "pending" : isTimeout ? "warning" : "error",
+							title: config.resolveTitle(args, options),
+							description: renderArgs.command,
+						},
+						uiTheme,
+					),
+				);
+			}
 			const outputBlock = new CachedOutputBlock();
 
 			// Per-instance cache for the expensive inner lines computation. Mirrors
@@ -1760,11 +1780,9 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 							const previewBudget = Math.min(previewLines, previewWindow);
 							const result = truncateToVisualLines(textContent, previewBudget, outputBlockContentWidth(width));
 							if (result.skippedCount > 0) {
+								const shown = `showing ${result.visualLines.length} of ${result.skippedCount + result.visualLines.length}`;
 								outputLines.push(
-									uiTheme.fg(
-										"dim",
-										`… (${result.skippedCount} earlier lines, showing ${result.visualLines.length} of ${result.skippedCount + result.visualLines.length}) (ctrl+o to expand)`,
-									),
+									`${uiTheme.fg("dim", `… (${result.skippedCount} earlier lines, ${shown})`)} ${formatExpandHint(uiTheme, false, true)}`,
 								);
 							}
 							outputLines.push(...result.visualLines);

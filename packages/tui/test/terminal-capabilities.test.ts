@@ -176,6 +176,15 @@ console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProto
 		expect(warp.textSizing).toBe(false);
 	});
 
+	it("enables OSC 22 pointer shapes only for terminals that implement them", () => {
+		for (const id of ["kitty", "ghostty", "wezterm"] as const) {
+			expect(getTerminalInfo(id).pointerShapes).toBe(true);
+		}
+		for (const id of ["base", "warp", "iterm2", "alacritty", "vscode"] as const) {
+			expect(getTerminalInfo(id).pointerShapes).toBe(false);
+		}
+	});
+
 	it("uses Kitty images on macOS/Linux and disables them on Windows", () => {
 		const mac = getTerminalInfo("warp", "darwin", {});
 		const linux = getTerminalInfo("warp", "linux", {});

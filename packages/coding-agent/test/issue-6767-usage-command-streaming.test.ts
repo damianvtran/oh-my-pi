@@ -82,22 +82,26 @@ describe("issue #6767 /usage output during streaming", () => {
 		resetSettingsForTest();
 	});
 
-	it("defers the usage panel until the active turn ends, mounting it once", async () => {
+	it("keeps the usage panel out of the transcript entirely, mid-stream and after", async () => {
 		const streamedReply = new Text("agent is streaming", 0, 0);
 		mode.chatContainer.addChild(streamedReply);
+		const showOverlay = vi.spyOn(mode.ui, "showOverlay");
 
 		await mode.handleUsageCommand(usageReports);
 
-		// Mid-stream: the finalized panel must NOT mount above the growing live
-		// block (that is what duplicates in native scrollback — issue #6767).
+		// The original defect (#6767) was the finalized panel mounting above a
+		// growing live block and duplicating in native scrollback. The panel is
+		// now a floating overlay, so it never touches the transcript at all —
+		// which is what makes the defect unreachable rather than merely deferred.
 		expect(mode.chatContainer.children).toEqual([streamedReply]);
+		expect(showOverlay).toHaveBeenCalledTimes(1);
+		const panel = showOverlay.mock.calls[0]?.[0] as { render(width: number): readonly string[] };
+		expect(Bun.stripANSI(panel.render(80).join("\n"))).toContain("Usage");
 
 		streaming = false;
 		await mode.eventController.handleEvent({ type: "agent_end", messages: [] } as AgentSessionEvent);
 
-		// streamedReply + the deferred usage panel (Spacer + Text).
-		expect(mode.chatContainer.children).toHaveLength(3);
-		const transcript = mode.chatContainer.render(80).join("\n");
-		expect(transcript.match(/Usage \(/g)).toHaveLength(1);
+		expect(mode.chatContainer.children).toEqual([streamedReply]);
+		expect(showOverlay).toHaveBeenCalledTimes(1);
 	});
 });

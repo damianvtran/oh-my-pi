@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Usage, UsageReport } from "@oh-my-pi/pi-ai";
-import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
+import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI, ViewportMode } from "@oh-my-pi/pi-tui";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "../config/keybindings";
@@ -132,8 +132,10 @@ export interface InteractiveModeContext {
 	readonly focusedAgentId: string | undefined;
 	/** Focus the main view on an agent's live session (delegates to SessionFocusController.focusAgent). */
 	focusAgentSession(id: string): Promise<void>;
-	/** Focus the focused agent's parent session, falling back to main (delegates to focusParent). */
+	/** Pop one level of the drill-down path, back to main at the top (delegates to focusParent). */
 	focusParentSession(): Promise<void>;
+	/** Cycle to the next (`1`) or previous (`-1`) sibling agent (delegates to focusSibling). */
+	focusSiblingSession(direction: 1 | -1): Promise<void>;
 	/** Return the view to the main session (delegates to SessionFocusController.unfocus). */
 	unfocusSession(): Promise<void>;
 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
@@ -253,6 +255,19 @@ export interface InteractiveModeContext {
 	 */
 	present(content: Component | readonly Component[]): void;
 	/**
+	 * Mount a startup notice: an MCP summary, an update banner, a status line.
+	 *
+	 * While the fullscreen home screen is up these are chrome rather than
+	 * history — putting them in the transcript would push the home screen aside
+	 * for a line about an MCP server — so they collect in the home screen's own
+	 * pinned run and move into the transcript, in order, when it comes down.
+	 * With no home screen this is {@link present}. Notices are static rows;
+	 * anything carrying a block lifecycle belongs in the transcript.
+	 */
+	presentNotice(content: readonly Component[]): void;
+	/** Container {@link presentNotice} is mounting into right now. */
+	readonly noticeContainer: Container;
+	/**
 	 * Mount command output immediately while idle, or defer it until the active
 	 * agent turn ends so a growing live block cannot push duplicate rows into
 	 * native scrollback.
@@ -267,6 +282,19 @@ export interface InteractiveModeContext {
 	 */
 	resetTranscript(): void;
 	showStatus(message: string, options?: { dim?: boolean }): void;
+	/**
+	 * Paint one toast into the fullscreen pinned row above the composer,
+	 * replacing whatever was there and restarting its expiry. Only reached from
+	 * `showStatus` in the fullscreen viewport; append mode keeps its statuses in
+	 * the transcript.
+	 */
+	showTransientStatus(message: string, styleFn: ((text: string) => string) | undefined): void;
+	/**
+	 * Show or hide the startup welcome/changelog run above the transcript. Set
+	 * false while the main view is drilled into a subagent, whose transcript
+	 * should open on its assignment rather than on this session's banner.
+	 */
+	setStartupChromeHidden(hidden: boolean): void;
 	showModelCycleTrack(track: string): void;
 	showError(message: string): void;
 	showPinnedError(message: string): void;
@@ -345,6 +373,12 @@ export interface InteractiveModeContext {
 	syncRunningSubagentBadge(): void;
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
+	/**
+	 * Append the divider for the compaction that just landed, without rebuilding
+	 * the transcript. Used when `display.collapseCompacted` is off and nothing
+	 * was elided from the display.
+	 */
+	appendCompactionDivider(): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
 	reloadTodos(): Promise<void>;
 	toggleTodoExpansion(): void;
@@ -451,6 +485,9 @@ export interface InteractiveModeContext {
 	cycleRoleModel(direction?: "forward" | "backward"): Promise<void>;
 	toggleToolOutputExpansion(): void;
 	setToolsExpanded(expanded: boolean): void;
+	/** Switch the terminal painting mode; persists to `tui.viewport`. */
+	setViewportMode(mode: ViewportMode): void;
+	toggleViewportMode(): void;
 	toggleThinkingBlockVisibility(): void;
 	handlePlanModeCommand(
 		initialPrompt?: string,

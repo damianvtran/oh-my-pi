@@ -41,6 +41,7 @@ import {
 	formatBadge,
 	formatDuration,
 	formatStatusIcon,
+	isFullscreenViewport,
 	replaceTabs,
 	type ToolUIColor,
 	type ToolUIStatus,
@@ -347,8 +348,16 @@ function frameText(text: string, max: number): string {
  * │ <body…>
  * ╰─ <footer>
  * ```
+ *
+ * The fullscreen viewport has no rules, so the rail becomes the indent that
+ * already distinguishes the body rows from the header and footer.
  */
 function miniFrame(uiTheme: Theme, header: string, body: string[], footer?: string): string[] {
+	if (isFullscreenViewport()) {
+		const lines = [header, ...body.map(row => `  ${row}`)];
+		if (footer) lines.push(footer);
+		return lines;
+	}
 	const box = uiTheme.boxRound;
 	const rail = (glyph: string) => uiTheme.fg("dim", glyph);
 	const lines = [`${rail(`${box.topLeft}${box.horizontal}`)} ${header}`];

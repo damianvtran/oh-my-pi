@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as os from "node:os";
 import * as path from "node:path";
 import { KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName, initTheme, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	dedupeParseErrors,
@@ -391,8 +392,23 @@ describe("formatExpandHint / expandKeyHint", () => {
 	// rendered hint is deterministic regardless of the active theme's bracket glyphs.
 	const plainTheme = {
 		fg: (_color: unknown, text: string) => text,
+		// The hint now carries the interactive-affordance role rather than a raw
+		// dim colour, so the stub passes it through and the assertions stay on
+		// the text instead of on escape codes.
+		interactiveHint: (text: string) => text,
 		format: { bracketLeft: "[", bracketRight: "]" },
 	} as unknown as Theme;
+
+	/**
+	 * The hint's wording is viewport-dependent, so every case names the mode it
+	 * asserts: append mode has no pointer target and keeps naming the
+	 * keybinding, while the fullscreen viewport makes the block header itself
+	 * the control.
+	 */
+	async function useViewport(viewport: "append" | "fullscreen"): Promise<void> {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": viewport } } as never);
+	}
 
 	let previous: TuiKeybindingsManager;
 	beforeEach(() => {
@@ -402,24 +418,41 @@ describe("formatExpandHint / expandKeyHint", () => {
 	afterEach(() => {
 		setKeybindings(previous);
 		setKeyHintPlatform(undefined);
+		resetSettingsForTest();
 	});
 
-	it("reports the default tool-output expand key", () => {
+	it("reports the default tool-output expand key", async () => {
+		await useViewport("append");
 		setKeybindings(KeybindingsManager.inMemory());
 		expect(expandKeyHint()).toBe("Ctrl+O");
 		// Single bracket pair from the theme, no double-wrapping around the key.
 		expect(formatExpandHint(plainTheme, false, true)).toBe("[Ctrl+O: Expand]");
 	});
 
-	it("tracks a user remap of the expand binding", () => {
+	it("tracks a user remap of the expand binding", async () => {
+		await useViewport("append");
 		setKeybindings(KeybindingsManager.inMemory({ "app.tools.expand": "alt+e" }));
 		expect(expandKeyHint()).toBe("Alt+E");
 		expect(formatExpandHint(plainTheme, false, true)).toBe("[Alt+E: Expand]");
 	});
 
-	it("renders nothing when expanded or there is no more content", () => {
-		setKeybindings(KeybindingsManager.inMemory());
-		expect(formatExpandHint(plainTheme, true, true)).toBe("");
-		expect(formatExpandHint(plainTheme, false, false)).toBe("");
+	it("names the click gesture instead of the keybinding in the fullscreen viewport", async () => {
+		await useViewport("fullscreen");
+		setKeybindings(KeybindingsManager.inMemory({ "app.tools.expand": "alt+e" }));
+		// The card header is the control, so the hint drops the key entirely —
+		// even a remapped one, which would otherwise leak into the label.
+		expect(formatExpandHint(plainTheme, false, true)).toBe("[click to expand]");
+		// The binding itself is unchanged; only the hint's wording moves.
+		expect(expandKeyHint()).toBe("Alt+E");
+	});
+
+	it("renders nothing when expanded or there is no more content", async () => {
+		// Viewport-independent: both modes return early before choosing a label.
+		for (const viewport of ["append", "fullscreen"] as const) {
+			await useViewport(viewport);
+			setKeybindings(KeybindingsManager.inMemory());
+			expect(formatExpandHint(plainTheme, true, true)).toBe("");
+			expect(formatExpandHint(plainTheme, false, false)).toBe("");
+		}
 	});
 });

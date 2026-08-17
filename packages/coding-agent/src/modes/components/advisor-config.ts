@@ -53,6 +53,7 @@ import {
 	splitRow,
 	topBorder,
 	topBorderSplit,
+	topChromeRows,
 } from "./overlay-box";
 
 /** Host callbacks: all disk + live-runtime effects flow through these. */
@@ -183,7 +184,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 
 	render(width: number): readonly string[] {
 		const height = Math.max(14, process.stdout.rows || 40);
-		const bodyRows = Math.max(3, height - 4);
+		// Top chrome, plus the section rule, the footer and the bottom row.
+		const bodyRows = Math.max(3, height - 3 - topChromeRows());
 		const title = `Advisor configuration · ${this.#scope}${this.#dirty ? "  ● unsaved" : ""}`;
 		const out: string[] = [];
 
@@ -193,14 +195,14 @@ export class AdvisorConfigOverlayComponent implements Component {
 			const bodyWidth = splitBodyWidth(width, sidebarWidth);
 			const sidebar = this.#active.render(sidebarWidth);
 			const preview = this.#previewWindow(bodyWidth, bodyRows);
-			out.push(topBorderSplit(width, title, sidebarWidth));
+			out.push(...topBorderSplit(width, title, sidebarWidth));
 			this.#bodyRowStart = out.length;
 			for (let i = 0; i < bodyRows; i++) {
 				out.push(splitRow(sidebar[i] ?? "", preview[i] ?? "", width, sidebarWidth));
 			}
 			out.push(dividerSplit(width, sidebarWidth));
 		} else {
-			out.push(topBorder(width, title));
+			out.push(...topBorder(width, title));
 			this.#bodyRowStart = out.length;
 			const lines = this.#active.render(Math.max(1, width - 4));
 			for (let i = 0; i < bodyRows; i++) out.push(row(lines[i] ?? "", width));

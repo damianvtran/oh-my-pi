@@ -919,6 +919,151 @@ describe("TranscriptContainer renderViewportTail", () => {
 	});
 });
 
+describe("TranscriptContainer renderVirtualViewport", () => {
+	const request = {
+		startRow: 0,
+		endRow: 10,
+		overscanRows: 5,
+		minRows: 20,
+		revealRows: 20,
+		followEnd: true,
+		revealBefore: false,
+		revealAllBefore: false,
+		refreshVisible: true,
+	};
+
+	it("materializes only a bounded tail on the first fullscreen frame", () => {
+		const container = new TranscriptContainer();
+		const blocks = Array.from({ length: 1000 }, (_value, index) => new CountingFinalizedBlock([`block-${index}`]));
+		for (const block of blocks) container.addChild(block);
+
+		const result = container.renderVirtualViewport(40, request);
+		const rendered = blocks.flatMap((block, index) => (block.renderCount > 0 ? [index] : []));
+
+		expect(result.lines.at(-1)).toBe("block-999");
+		expect(result.complete).toBeFalse();
+		expect(rendered.length).toBeLessThan(20);
+		expect(rendered[0]).toBeGreaterThan(980);
+	});
+
+	it("reveals older batches only when scrolling reaches the materialized head", () => {
+		const container = new TranscriptContainer();
+		const blocks = Array.from({ length: 1000 }, (_value, index) => new CountingFinalizedBlock([`block-${index}`]));
+		for (const block of blocks) container.addChild(block);
+		container.renderVirtualViewport(40, request);
+		const initialFirst = blocks.findIndex(block => block.renderCount > 0);
+		for (const block of blocks) block.renderCount = 0;
+
+		const result = container.renderVirtualViewport(40, {
+			...request,
+			followEnd: false,
+			revealBefore: true,
+			refreshVisible: false,
+		});
+		const revealed = blocks.flatMap((block, index) => (block.renderCount > 0 ? [index] : []));
+
+		expect(result.prependedRows).toBeGreaterThan(0);
+		expect(revealed.length).toBeLessThan(20);
+		expect(revealed.every(index => index < initialFirst)).toBeTrue();
+		expect(blocks[999]!.renderCount).toBe(0);
+	});
+
+	it("re-renders only components whose painted rows intersect the requested band", () => {
+		const container = new TranscriptContainer();
+		const blocks = Array.from({ length: 100 }, (_value, index) => new CountingFinalizedBlock([`block-${index}`]));
+		for (const block of blocks) container.addChild(block);
+		const complete = container.renderVirtualViewport(40, {
+			...request,
+			revealAllBefore: true,
+			refreshVisible: false,
+		});
+		expect(complete.complete).toBeTrue();
+		for (const block of blocks) block.renderCount = 0;
+
+		const startRow = 25;
+		const endRow = 32;
+		const refreshed = container.renderVirtualViewport(40, {
+			...request,
+			startRow,
+			endRow,
+			overscanRows: 0,
+			minRows: 0,
+			revealRows: 0,
+			followEnd: false,
+		});
+		const visibleRows = new Set(refreshed.lines.slice(startRow, endRow));
+		const rendered = blocks.flatMap((block, index) => (block.renderCount > 0 ? [index] : []));
+
+		expect(rendered.length).toBeGreaterThan(0);
+		expect(rendered.length).toBeLessThanOrEqual(endRow - startRow);
+		for (const index of rendered) expect(visibleRows.has(`block-${index}`)).toBeTrue();
+	});
+
+	it("refreshes an off-screen mutation when scrolling brings its block into view", () => {
+		const container = new TranscriptContainer();
+		const blocks = Array.from({ length: 100 }, (_value, index) => new CountingFinalizedBlock([`block-${index}`]));
+		for (const block of blocks) container.addChild(block);
+		container.renderVirtualViewport(40, {
+			...request,
+			revealAllBefore: true,
+			refreshVisible: false,
+		});
+		const targetIndex = 75;
+		const targetRow = container.blockStartRows()![targetIndex]!;
+		const target = blocks[targetIndex]!;
+		target.set(["streamed-while-offscreen"]);
+		for (const block of blocks) block.renderCount = 0;
+
+		container.renderVirtualViewport(40, {
+			...request,
+			startRow: 0,
+			endRow: 10,
+			overscanRows: 0,
+			followEnd: false,
+		});
+		expect(target.renderCount).toBe(0);
+
+		const scrolled = container.renderVirtualViewport(40, {
+			...request,
+			startRow: targetRow,
+			endRow: targetRow + 2,
+			overscanRows: 0,
+			followEnd: false,
+		});
+		expect(target.renderCount).toBe(1);
+		expect(scrolled.lines).toContain("streamed-while-offscreen");
+	});
+
+	it("paints a visible zero-row block when an animation produces its first frame", () => {
+		const container = new TranscriptContainer();
+		const before = new CountingFinalizedBlock(["before"]);
+		const animated = new CountingFinalizedBlock([]);
+		const after = new CountingFinalizedBlock(["after"]);
+		container.addChild(before);
+		container.addChild(animated);
+		container.addChild(after);
+		container.renderVirtualViewport(40, {
+			...request,
+			revealAllBefore: true,
+			refreshVisible: false,
+		});
+		const animationRow = container.blockStartRows()![1]!;
+		animated.set(["spinner-frame-1"]);
+		animated.renderCount = 0;
+
+		const frame = container.renderVirtualViewport(40, {
+			...request,
+			startRow: animationRow,
+			endRow: animationRow + 2,
+			overscanRows: 0,
+			followEnd: false,
+		});
+
+		expect(animated.renderCount).toBe(1);
+		expect(frame.lines).toContain("spinner-frame-1");
+	});
+});
+
 // A displaceable snapshot (todo/poll card): kept unfinalized only so a matching
 // follow-up call can retract it. Mirrors ToolExecutionComponent.seal — sealing
 // finalizes the block in place and it stops reporting displaceable. A pending

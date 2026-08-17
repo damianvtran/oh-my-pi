@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { Text, type TUI } from "@oh-my-pi/pi-tui";
@@ -25,6 +26,9 @@ import { Text, type TUI } from "@oh-my-pi/pi-tui";
  */
 describe("ToolExecutionComponent tool-result render memoization", () => {
 	beforeAll(async () => {
+		resetSettingsForTest();
+		// Asserts append-mode rendering: the transcript is the terminal's own scrollback, with no card chrome.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		await initTheme();
 	});
 

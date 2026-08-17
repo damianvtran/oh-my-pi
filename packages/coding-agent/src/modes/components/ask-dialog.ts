@@ -33,7 +33,7 @@ import {
 } from "../utils/keybinding-matchers";
 import { CountdownTimer } from "./countdown-timer";
 import { editorKey } from "./keybinding-hints";
-import { bottomBorder, divider, row, topBorder } from "./overlay-box";
+import { bottomBorder, divider, row, topBorder, topChromeRows } from "./overlay-box";
 import { handleTabSwitchKey } from "./selector-helpers";
 
 const OTHER_OPTION = "Other (type your own)";
@@ -488,11 +488,11 @@ export class AskDialogComponent implements Component {
 		// outgrows it scrolls.
 		const totalRows = this.#dialogHeight(innerWidth, process.stdout.rows || 40);
 		const headerLines = this.#renderHeader(innerWidth);
-		// topBorder(1) + header(N) + divider(1) + divider(1) + footer(1) +
-		// bottomBorder(1) = N + 5 fixed rows outside the body. Without the
+		// top chrome(N) + header(M) + divider(1) + divider(1) + footer(1) +
+		// bottomBorder(1) = fixed rows outside the body. Without the
 		// bottomBorder term the dialog overflowed the viewport by one row
 		// (PRRT_kwDOQxs0bc6OFbDY).
-		const fixedRows = 1 + headerLines.length + 1 + 1 + 1 + 1;
+		const fixedRows = topChromeRows() + headerLines.length + 1 + 1 + 1 + 1;
 		const bodyRows = Math.max(MIN_BODY_ROWS, totalRows - fixedRows);
 		this.#bodyRows = bodyRows;
 		const bodyLines = this.#isSubmitTab()
@@ -500,7 +500,7 @@ export class AskDialogComponent implements Component {
 			: this.#renderQuestionBody(innerWidth, bodyRows);
 		const footer = this.#footerHintText(bodyLines.indicator);
 		return [
-			topBorder(width, this.#titleText()),
+			...topBorder(width, this.#titleText()),
 			...headerLines.map(line => row(line, width)),
 			divider(width),
 			...bodyLines.lines.map(line => row(line, width)),

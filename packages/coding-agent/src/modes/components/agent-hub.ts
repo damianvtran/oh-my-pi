@@ -515,7 +515,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			const detailWidth = splitBodyWidth(width, split);
 			const roster = this.#renderRosterPanel(split, contentRows, observedById);
 			const details = this.#renderDetailPanel(selected, detailWidth, contentRows, observedById);
-			lines.push(topBorderSplit(width, "Agent Hub", split));
+			// The fullscreen viewport renders a panel title as its own row, so the
+			// top border is a run of lines rather than one (see `overlay-box`).
+			lines.push(...topBorderSplit(width, "Agent Hub", split));
 			for (let i = 0; i < contentRows; i++) {
 				const hit = roster.hitRows[i];
 				if (hit !== undefined) this.#hitRows[lines.length] = hit;
@@ -530,11 +532,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const innerWidth = Math.max(1, width - 4);
 		if (this.#narrowDetailsOpen && selected) {
 			const details = this.#renderDetailPanel(selected, innerWidth, contentRows, observedById);
-			lines.push(topBorder(width, `Agent Hub · ${selected.id}`));
+			lines.push(...topBorder(width, `Agent Hub · ${selected.id}`));
 			for (const detail of details) lines.push(row(detail, width));
 		} else {
 			const roster = this.#renderRosterPanel(innerWidth, contentRows, observedById);
-			lines.push(topBorder(width, "Agent Hub"));
+			lines.push(...topBorder(width, "Agent Hub"));
 			for (let i = 0; i < contentRows; i++) {
 				const hit = roster.hitRows[i];
 				if (hit !== undefined) this.#hitRows[lines.length] = hit;

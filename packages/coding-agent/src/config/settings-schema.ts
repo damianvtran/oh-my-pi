@@ -999,6 +999,18 @@ export const SETTINGS_SCHEMA = {
 				"Erase and replay terminal scrollback when a block's final form replaces its live preview. When off (default), stale preview copies remain in history and the final content is appended below.",
 		},
 	},
+	"tui.viewport": {
+		type: "enum",
+		values: ["append", "fullscreen"] as const,
+		default: "fullscreen",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Viewport Mode",
+			description:
+				"Fullscreen takes over the whole window: the transcript scrolls inside omp, tool calls collapse and expand on click, rows highlight on hover, a drag selects text and releasing copies it, Alt+click copies any block, and double click copies user or assistant prose. Append instead keeps the transcript in the terminal's own scrollback, where the terminal owns scrolling, selection and copy — the right choice when you rely on your terminal's own search, its selection, or a multiplexer's copy mode.",
+		},
+	},
 
 	"display.shimmer": {
 		type: "enum",
@@ -1063,13 +1075,13 @@ export const SETTINGS_SCHEMA = {
 
 	"display.collapseCompacted": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "appearance",
 			group: "Display",
 			label: "Collapse Compacted History",
 			description:
-				"Collapse pre-compaction history behind the summary divider on the live transcript; disable to keep the full transcript inline with dividers at each compaction point",
+				"Hide pre-compaction history behind the summary divider on the live transcript; off by default, so the full transcript stays inline with a divider at each compaction point (the model's context is compacted either way)",
 		},
 	},
 

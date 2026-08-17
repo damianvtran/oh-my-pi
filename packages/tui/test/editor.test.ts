@@ -164,6 +164,117 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("Select all", () => {
+		const CTRL_A = "\x01";
+
+		it("selects the whole buffer on ctrl+a", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa\nbeta");
+			editor.handleInput(CTRL_A);
+			expect(editor.getSelectedText()).toBe("alfa\nbeta");
+		});
+
+		it("empties the buffer when backspace follows ctrl+a", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa\nbeta\ngamma");
+			editor.handleInput(CTRL_A);
+			editor.handleInput("\x7f"); // Backspace
+			expect(editor.getText()).toBe("");
+		});
+
+		it("empties the buffer when forward delete follows ctrl+a", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa\nbeta");
+			editor.handleInput(CTRL_A);
+			editor.handleInput("\x1b[3~"); // Delete
+			expect(editor.getText()).toBe("");
+		});
+
+		it("replaces the buffer when a character is typed after ctrl+a", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa\nbeta");
+			editor.handleInput(CTRL_A);
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("x");
+		});
+
+		it("replaces the buffer when a bracketed paste arrives in separate chunks after select-all", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa\nbeta");
+			editor.handleInput(CTRL_A);
+
+			editor.handleInput("\x1b[200~");
+			editor.handleInput("replacement");
+			editor.handleInput("\x1b[201~");
+
+			expect(editor.getText()).toBe("replacement");
+		});
+
+		it("is a no-op on an empty buffer", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput(CTRL_A);
+			expect(editor.getSelectedText()).toBe("");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("x");
+		});
+
+		it("drops the selection when the next key only moves the caret", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa");
+			editor.handleInput(CTRL_A);
+			editor.handleInput("\x1b[D"); // Left arrow
+			expect(editor.getSelectedText()).toBe("");
+			editor.handleInput("x");
+			// Left arrow stepped off the end of the selection, and the buffer survived it.
+			expect(editor.getText()).toBe("alfxa");
+		});
+
+		it("honors a keybindings.yml remap of selectAll", () => {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.editor.selectAll": "alt+g" }));
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa beta");
+			editor.handleInput("\x1bg"); // Alt+G
+			expect(editor.getSelectedText()).toBe("alfa beta");
+		});
+
+		it("leaves ctrl+a inert once both actions release it, proving neither branch is hardcoded", () => {
+			setKeybindings(
+				new KeybindingsManager(TUI_KEYBINDINGS, {
+					"tui.editor.selectAll": [],
+					"tui.editor.cursorLineStart": [],
+				}),
+			);
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa");
+			editor.handleInput(CTRL_A);
+			expect(editor.getSelectedText()).toBe("");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("alfax");
+		});
+
+		it("still moves to line start on Home now that ctrl+a is select-all", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa beta");
+			editor.handleInput("\x1b[H"); // Home
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("xalfa beta");
+		});
+
+		it("restores ctrl+a as line start when the config rebinds it back", () => {
+			setKeybindings(
+				new KeybindingsManager(TUI_KEYBINDINGS, {
+					"tui.editor.selectAll": [],
+					"tui.editor.cursorLineStart": ["home", "ctrl+a"],
+				}),
+			);
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("alfa beta");
+			editor.handleInput(CTRL_A);
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("xalfa beta");
+		});
+	});
+
 	describe("Prompt history navigation", () => {
 		it("does nothing on Up arrow when history is empty", () => {
 			const editor = new Editor(defaultEditorTheme);
@@ -785,7 +896,7 @@ describe("Editor component", () => {
 
 			editor.handleInput("a");
 			editor.handleInput("b");
-			editor.handleInput("\x01"); // Ctrl+A (move to start)
+			editor.handleInput("\x1b[H"); // Home (move to start)
 			editor.handleInput("x"); // Insert at start
 
 			const text = editor.getText();
@@ -880,7 +991,7 @@ describe("Editor component", () => {
 
 			// Test forward from start with leading whitespace
 			editor.setText("   foo bar");
-			editor.handleInput("\x01"); // Ctrl+A to go to start
+			editor.handleInput("\x1b[H"); // Home to go to start
 			editor.handleInput("\x1b[1;5C"); // Ctrl+Right
 			expect(editor.getCursor()).toEqual({ line: 0, col: 6 }); // after 'foo'
 		});
@@ -1458,7 +1569,7 @@ describe("Editor component", () => {
 	describe("Word wrapping", () => {
 		function renderContentLines(editor: Editor, width: number): string[] {
 			// Move cursor to start so the rendered cursor does not affect line padding/borders.
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			const lines = editor.render(width);
 			const paddingX = defaultEditorTheme.editorPaddingX ?? 2;
 			const borderWidth = paddingX + 1;
@@ -1803,7 +1914,7 @@ describe("Editor component", () => {
 
 			// Position cursor on _ (line 2, col 10)
 			expect(editor.getCursor()).toEqual({ line: 2, col: 23 }); // At end
-			editor.handleInput("\x01"); // Ctrl+A - go to start of line
+			editor.handleInput("\x1b[H"); // Home - go to start of line
 			for (let i = 0; i < 10; i++) editor.handleInput("\x1b[C"); // Move right to col 10
 			expect(editor.getCursor()).toEqual({ line: 2, col: 10 });
 
@@ -1824,7 +1935,7 @@ describe("Editor component", () => {
 			// Position cursor on _ (line 0, col 10)
 			editor.handleInput("\x1b[A"); // Up to line 1
 			editor.handleInput("\x1b[A"); // Up to line 0
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 10; i++) editor.handleInput("\x1b[C");
 			expect(editor.getCursor()).toEqual({ line: 0, col: 10 });
 
@@ -1843,7 +1954,7 @@ describe("Editor component", () => {
 			editor.setText("1234567890\n\n1234567890");
 
 			// Start at line 2, col 5
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 5; i++) editor.handleInput("\x1b[C");
 			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
 
@@ -1870,7 +1981,7 @@ describe("Editor component", () => {
 			// Start at line 0, col 5
 			editor.handleInput("\x1b[A"); // Up to line 1
 			editor.handleInput("\x1b[A"); // Up to line 0
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 5; i++) editor.handleInput("\x1b[C");
 			expect(editor.getCursor()).toEqual({ line: 0, col: 5 });
 
@@ -1895,7 +2006,7 @@ describe("Editor component", () => {
 			editor.setText("1234567890\n\n1234567890");
 
 			// Start at line 2, col 8
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 8; i++) editor.handleInput("\x1b[C");
 
 			// Move up through empty line
@@ -1919,7 +2030,7 @@ describe("Editor component", () => {
 			editor.setText("1234567890\n\n1234567890");
 
 			// Start at line 2, col 8
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 8; i++) editor.handleInput("\x1b[C");
 
 			// Move up through empty line
@@ -1943,14 +2054,14 @@ describe("Editor component", () => {
 			editor.setText("1234567890\n\n1234567890");
 
 			// Start at line 2, col 8
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 8; i++) editor.handleInput("\x1b[C");
 
 			// Move up - establishes sticky col 8
 			editor.handleInput("\x1b[A"); // Up - line 1, col 0
 
-			// Ctrl+A - resets sticky column to 0
-			editor.handleInput("\x01"); // Ctrl+A
+			// Home - resets sticky column to 0
+			editor.handleInput("\x1b[H"); // Home
 			expect(editor.getCursor()).toEqual({ line: 1, col: 0 });
 
 			// Move up
@@ -1964,7 +2075,7 @@ describe("Editor component", () => {
 			editor.setText("12345\n\n1234567890");
 
 			// Start at line 2, col 3
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 3; i++) editor.handleInput("\x1b[C");
 
 			// Move up through empty line - establishes sticky col 3
@@ -2013,7 +2124,7 @@ describe("Editor component", () => {
 			// Start at line 0, col 0
 			editor.handleInput("\x1b[A"); // Up
 			editor.handleInput("\x1b[A"); // Up
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
 
 			// Move down through empty line - establishes sticky col 0
@@ -2039,7 +2150,7 @@ describe("Editor component", () => {
 			// Go to line 0, col 8
 			editor.handleInput("\x1b[A"); // Up to line 1
 			editor.handleInput("\x1b[A"); // Up to line 0
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 8; i++) editor.handleInput("\x1b[C");
 			expect(editor.getCursor()).toEqual({ line: 0, col: 8 });
 
@@ -2167,7 +2278,7 @@ describe("Editor component", () => {
 			editor.setText("1234567890\nab\ncd\nef\n1234567890");
 
 			// Start at line 4, col 7
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 7; i++) editor.handleInput("\x1b[C");
 			expect(editor.getCursor()).toEqual({ line: 4, col: 7 });
 
@@ -2252,7 +2363,7 @@ describe("Editor component", () => {
 			editor.setText("1234567890\n\n1234567890");
 
 			// Establish sticky column
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 8; i++) editor.handleInput("\x1b[C");
 			editor.handleInput("\x1b[A"); // Up
 
@@ -2301,7 +2412,7 @@ describe("Editor component", () => {
 			editor.setText("12345678901234567890\n\n12345678901234567890");
 
 			// Start at line 2, col 15
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 15; i++) editor.handleInput("\x1b[C");
 
 			// Move up through empty line - establishes sticky col 15
@@ -2326,7 +2437,7 @@ describe("Editor component", () => {
 			editor.setText("short\n12345678901234567890");
 
 			// Go to line 1, col 15
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 15; i++) editor.handleInput("\x1b[C");
 			expect(editor.getCursor()).toEqual({ line: 1, col: 15 });
 
@@ -2431,7 +2542,7 @@ describe("Editor component", () => {
 			editor.atomicTokenPattern = /\[(?:Image|Paste) #\d+(?:,[^\]\n]*)?\]/g;
 			editor.setText("[Image #1, 800x600]");
 
-			editor.handleInput("\x01"); // Ctrl+A → start of line
+			editor.handleInput("\x1b[H"); // Home → start of line
 			editor.handleInput("\x1b[3~"); // Delete (forward)
 			expect(editor.getText()).toBe("");
 		});
@@ -2668,7 +2779,7 @@ describe("Editor component", () => {
 			editor.setText("ab\n😀😀");
 
 			editor.handleInput("\x1b[A"); // Up to line 0
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			editor.handleInput("\x1b[C"); // Right → col 1
 			expect(editor.getCursor()).toEqual({ line: 0, col: 1 });
 
@@ -2686,7 +2797,7 @@ describe("Editor component", () => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.setText("ああああ\nabcdefgh");
 
-			editor.handleInput("\x01"); // Ctrl+A on line 1
+			editor.handleInput("\x1b[H"); // Home on line 1
 			for (let i = 0; i < 4; i++) editor.handleInput("\x1b[C"); // Right ×4 → col 4
 			expect(editor.getCursor()).toEqual({ line: 1, col: 4 });
 
@@ -2708,7 +2819,7 @@ describe("Editor component", () => {
 			expect(editor.getCursor()).toEqual({ line: 0, col: 9 });
 
 			// Place the cursor on the trimmed space (line 0, col 4)
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 4; i++) editor.handleInput("\x1b[C");
 			expect(editor.getCursor()).toEqual({ line: 0, col: 4 });
 
@@ -2736,7 +2847,7 @@ describe("Editor component", () => {
 			editor.atomicTokenPattern = /\[(?:Image|Paste) #\d+(?:,[^\]\n]*)?\]/g;
 			editor.setText("a [Paste #1, +12 lines] b");
 
-			editor.handleInput("\x01"); // Ctrl+A
+			editor.handleInput("\x1b[H"); // Home
 			for (let i = 0; i < 4; i++) editor.handleInput("\x1b[C"); // into the marker
 			editor.handleInput("\x0b"); // Ctrl+K
 			expect(editor.getText()).toBe("a ");
@@ -2796,7 +2907,7 @@ describe("Editor component", () => {
 			editor.setUseTerminalCursor(true);
 			editor.setText("ultrathink ultrathink");
 			// Position the hardware cursor between the two keywords.
-			editor.handleInput("\x01"); // Ctrl+A → start of line
+			editor.handleInput("\x1b[H"); // Home → start of line
 			editor.handleInput("\x05"); // Ctrl+E → end of line
 			for (let i = 0; i < "ultrathink".length; i++) editor.handleInput("\x1b[D"); // 10× left
 

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -25,7 +25,7 @@ import {
 	type WatchdogConfigDoc,
 } from "../../src/advisor";
 import type { ModelRegistry } from "../../src/config/model-registry";
-import type { Settings } from "../../src/config/settings";
+import { resetSettingsForTest, Settings } from "../../src/config/settings";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../../src/modes/components/advisor-config";
 import { createAdvisorMessageCard } from "../../src/modes/components/advisor-message";
 import { getThemeByName, setThemeInstance } from "../../src/modes/theme/theme";
@@ -5601,6 +5601,18 @@ describe("advisor", () => {
 		const make = (doc: WatchdogConfigDoc, extra?: Partial<AdvisorConfigDeps>): AdvisorConfigOverlayComponent =>
 			new AdvisorConfigOverlayComponent({} as unknown as TUI, { ...deps, ...extra }, "project", doc, callbacks);
 		const fullHeight = Math.max(14, process.stdout.rows || 40);
+
+		beforeAll(async () => {
+			resetSettingsForTest();
+			// Asserts append-mode rendering: the overlay owns the screen outright, with
+			// no fullscreen card chrome shifting its rows, so the mouse coordinates
+			// below land on the sidebar rows they name.
+			await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
+		});
+
+		afterAll(() => {
+			resetSettingsForTest();
+		});
 
 		it("paints a full-screen split frame: roster sidebar + selected-advisor preview", async () => {
 			const uiTheme = await getThemeByName("dark");

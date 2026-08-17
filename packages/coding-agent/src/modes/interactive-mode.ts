@@ -22,10 +22,12 @@ import type {
 	NativeScrollbackLiveRegion,
 	OverlayHandle,
 	SlashCommand,
+	ViewportMode,
 } from "@oh-my-pi/pi-tui";
 import {
 	Container,
 	clearRenderCache,
+	FullscreenPinBoundary,
 	Loader,
 	Markdown,
 	ProcessTerminal,
@@ -122,7 +124,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import { isFullscreenViewport, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
@@ -152,19 +154,24 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
+import { type AgentRowAnchor, AgentRowList } from "./components/agent-row-list";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
 import { CodexResetFireworksController } from "./components/codex-reset-fireworks";
+import { CARD_PADDING_X } from "./components/collapsible-block";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import { ErrorBannerComponent } from "./components/error-banner";
 import type { EvalExecutionComponent } from "./components/eval-execution";
+import { HomeColumn, HomeScreen } from "./components/home-screen";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/plan-review-overlay";
+import { StartupChrome } from "./components/startup-chrome";
 import { StatusLineComponent } from "./components/status-line";
+import { SubagentFooter } from "./components/subagent-footer";
 import type { ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
 import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
@@ -447,6 +454,14 @@ const DEFERRED_PREVIEW_VIEWPORT_FRACTION = 0.4;
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
+/**
+ * How long a fullscreen status toast stays up. Every new status restarts it, so
+ * this is measured from the LAST of a burst — long enough that MCP's connection
+ * chatter reads as one settling line, short enough that "Copied" is gone before
+ * it becomes furniture.
+ */
+const TRANSIENT_STATUS_MS = 6000;
+
 const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
 
@@ -459,22 +474,32 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * Only detached background spawns are listed: a sync task call blocks the
  * parent turn and its inline tool block already renders progress live, and
  * eval `agent()` spawns are rendered by their own eval cell tree.
- * Returns an empty array when nothing is running so the container can clear.
+ * Returns empty rows when nothing is running so the container can clear, plus
+ * the anchors mapping each rendered row back to the agent it stands for.
  */
-export function renderSubagentHudLines(sessions: ObservableSession[], columns: number): string[] {
+export function renderSubagentHudLines(
+	sessions: ObservableSession[],
+	columns: number,
+): { lines: string[]; anchors: AgentRowAnchor[] } {
 	const running = sessions.filter(
 		session => session.kind === "subagent" && session.status === "active" && session.detached === true,
 	);
-	if (running.length === 0) return [];
+	if (running.length === 0) return { lines: [], anchors: [] };
 
 	const dot = theme.styledSymbol("status.done", "accent");
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
 	const hiddenCount = running.length - visible.length;
+	// Which tree row belongs to which agent, so the rows can be drilled into.
+	// Collected during the render walk because `renderTreeList` owns the mapping
+	// from item to row: one item is always one row here, but reading it back
+	// from the output would mean re-parsing the connectors we just drew.
+	const rowAgentIds: string[] = [];
 	const rows = renderTreeList(
 		{
 			items: visible,
 			expanded: true,
 			renderItem: session => {
+				rowAgentIds.push(session.id);
 				const displayId = formatTaskId(session.id);
 				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
@@ -497,7 +522,14 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	if (hiddenCount > 0) {
 		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
 	}
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+	// Two header rows precede the tree, and every tree row is shifted right by
+	// one space, so anchor line N is tree row N plus that offset.
+	const HEADER_ROWS = 2;
+	const anchors: AgentRowAnchor[] = rowAgentIds.map((agentId, i) => ({ line: HEADER_ROWS + i, agentId }));
+	return {
+		lines: ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)],
+		anchors,
+	};
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -522,10 +554,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	modelCycleContainer: Container;
 	deferredCommandContainer: Container;
 	editor: CustomEditor;
-	editorContainer: Container;
+	editorContainer: HomeColumn;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	subagentFooter: SubagentFooter;
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -620,6 +653,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookEditor: HookEditorComponent | undefined = undefined;
 	lastStatusSpacer: Spacer | undefined = undefined;
 	lastStatusText: Text | undefined = undefined;
+	/**
+	 * The fullscreen toast row. Pinned above the composer, holding at most one
+	 * {@link Text}; see {@link showTransientStatus}.
+	 */
+	readonly #transientStatusContainer = new HomeColumn();
+	#transientStatusText: Text | undefined = undefined;
+	#transientStatusTimer: NodeJS.Timeout | undefined = undefined;
 	fileSlashCommands: Set<string> = new Set();
 	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
@@ -697,6 +737,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	focusParentSession(): Promise<void> {
 		return this.#focusController.focusParent();
 	}
+	focusSiblingSession(direction: 1 | -1): Promise<void> {
+		return this.#focusController.focusSibling(direction);
+	}
 	unfocusSession(): Promise<void> {
 		return this.#focusController.unfocus();
 	}
@@ -733,6 +776,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#voiceHue = 0;
 	#voicePreviousShowHardwareCursor: boolean | null = null;
 	#voicePreviousUseTerminalCursor: boolean | null = null;
+	/** Clickable rows of the anchored Subagents HUD; retained so hover survives a rebuild. */
+	readonly #subagentHud = new AgentRowList("subagent-hud");
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
@@ -746,6 +791,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mcpConnectedServers = new Set<string>();
 	#mcpFailedServers = new Map<string, { error: string; sourcePath?: string }>();
 	#welcomeComponent?: WelcomeComponent;
+	/**
+	 * The welcome/changelog run, mounted above the transcript. Held so drilling
+	 * into a subagent can hide it: see {@link StartupChrome}.
+	 */
+	readonly #startupChrome = new StartupChrome();
+	#homeScreen?: HomeScreen;
 	readonly #chatHost: ChatBlockHost = { requestRender: () => this.ui.requestRender() };
 
 	constructor(
@@ -794,6 +845,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
 		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
+		// Chosen here, before anything can paint: entering the alternate screen
+		// after the first frame would leave that frame stranded in the user's
+		// scrollback, visible again the moment omp exits.
+		if (settings.get("tui.viewport") === "fullscreen") this.ui.setViewportMode("fullscreen");
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
@@ -836,7 +891,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hookWidgetContainerAbove = new Container();
 		this.hookWidgetContainerAbove.addChild(new Spacer(1));
 		this.hookWidgetContainerBelow = new Container();
-		this.editorContainer = new Container();
+		this.editorContainer = new HomeColumn();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
@@ -856,7 +911,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		// (#4145). The TUI throttles renders at ~30fps, so a long-running eval
 		// spraying events no longer runs `getTopBorder` synchronously in the
 		// hot path where the render never gets to paint the result.
+		//
+		// The home screen gets the strip too. It is the only indication of the
+		// model, the reasoning effort and the working directory a fresh session
+		// has, and those are exactly what a user checks before the first prompt.
+		// The bar already fits itself to the width it is handed — right-hand
+		// segments drop first, then the path shrinks — so the narrower home
+		// composer keeps the identity segments rather than a truncated path.
 		this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		this.subagentFooter = new SubagentFooter({
+			state: () => {
+				const agentId = this.#focusController.focusedAgentId;
+				if (!agentId) return { agentId: undefined, label: "", position: 0, siblingCount: 0 };
+				// The agent is one of its own siblings, so the same list carries the
+				// display label and the position without a second registry lookup.
+				const siblings = this.#focusController.siblings();
+				const index = siblings.findIndex(ref => ref.id === agentId);
+				return {
+					agentId,
+					label: siblings[index]?.displayName || agentId,
+					position: index + 1,
+					siblingCount: siblings.length,
+				};
+			},
+			navigate: action => {
+				if (action === "parent") void this.focusParentSession();
+				else void this.focusSiblingSession(action === "sibling.next" ? 1 : -1);
+			},
+			keysFor: action =>
+				this.keybindings.getKeys(action === "parent" ? "app.session.parent" : `app.session.${action}`),
+		});
 
 		this.hideToolActivity = settings.get("display.hideToolActivity");
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
@@ -950,10 +1034,64 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	playWelcomeIntro(): void {
-		const welcome = this.#welcomeComponent;
-		// Component-scoped: the intro only mutates the welcome box's own rows,
-		// so a resumed long transcript is not re-walked per animation frame.
-		welcome?.playIntro(() => this.ui.requestComponentRender(welcome));
+		// Whichever surface is painting the logo this session: the home screen's
+		// header in fullscreen, the welcome box otherwise.
+		const logo = this.#homeScreen?.header ?? this.#welcomeComponent;
+		// Component-scoped: the intro only mutates the logo's own rows, so a
+		// resumed long transcript is not re-walked per animation frame.
+		logo?.playIntro(() => this.ui.requestComponentRender(logo));
+	}
+
+	/**
+	 * Take the home screen down, once. Runs from the transcript's first block,
+	 * before the frame that paints it, so a centred composer and a transcript
+	 * are never on screen together.
+	 *
+	 * `fileNotices` is false when the transcript is being reset rather than
+	 * written to: the parked run describes the startup of the session being
+	 * thrown away, and filing it would replay the update banner and the MCP
+	 * summary into a brand-new conversation as its first content.
+	 */
+	#dismissHomeScreen(options?: { fileNotices?: boolean }): void {
+		const home = this.#homeScreen;
+		if (!home) return;
+		this.#homeScreen = undefined;
+		this.chatContainer.onFirstBlock = undefined;
+		// Parked notices become history the moment there is a transcript to hold
+		// them. They go across first, so the MCP summary the session started with
+		// still reads before the message that ended the home screen.
+		const parked = [...home.notices.children];
+		home.notices.clear();
+		if (options?.fileNotices !== false && parked.length > 0) this.present(parked);
+		home.dismiss(this.ui, this.editorContainer);
+		// The toast shares the home column while the home screen is up, so a
+		// status and the notice above it line up; once the transcript owns the
+		// window it goes back to full width with everything else pinned there.
+		this.#transientStatusContainer.setCentered(false);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Take the startup chrome down, once, when the transcript gets its first
+	 * block. Fullscreen only — see the mount site in `init`.
+	 *
+	 * Unmounted rather than hidden: `setStartupChromeHidden(false)` runs on the
+	 * way back out of a subagent drill-down and would resurrect a banner the
+	 * conversation has long since moved past.
+	 */
+	#dismissStartupChrome(): void {
+		this.chatContainer.onFirstBlock = undefined;
+		this.ui.removeChild(this.#startupChrome);
+		this.#welcomeComponent = undefined;
+		this.ui.requestRender();
+	}
+
+	/** Drop the pinned toast and its pending expiry, if either is live. */
+	#clearTransientStatus(): void {
+		clearTimeout(this.#transientStatusTimer);
+		this.#transientStatusTimer = undefined;
+		this.#transientStatusText = undefined;
+		this.#transientStatusContainer.disposeChildren();
 	}
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
@@ -1014,6 +1152,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 
 		const startupQuiet = settings.get("startup.quiet");
+		const startupChangelog = settings.get("startup.changelogMode") === "hidden" ? undefined : this.#startupChangelog;
 		this.#welcomeComponent = undefined;
 
 		for (const warning of this.session.configWarnings) {
@@ -1021,7 +1160,53 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.addChild(new Spacer(1));
 		}
 
-		if (!startupQuiet) {
+		// In the fullscreen viewport the welcome box gives way to the home screen:
+		// the same identity and the same tip, but as chrome bracketing the
+		// composer rather than as the first thing in the transcript, so it never
+		// scrolls and it is gone once the conversation starts. It needs an empty
+		// canvas to float in, and the engine un-centres the pinned run as soon as
+		// the scroll region has rows.
+		//
+		// The emptiness test is the SESSION's message count, not the transcript's
+		// child count: by the time init reaches here the wake listener and the MCP
+		// connection report have usually already landed in the transcript, and
+		// those are ambient startup chatter rather than a conversation. Gating on
+		// children meant the home screen never appeared on a machine with any of
+		// that configured. Whatever did land is adopted into the home screen's
+		// notices run below, so it is chrome while the home screen is up and gets
+		// filed into the transcript when it comes down.
+		const showHomeScreen =
+			isFullscreenViewport() &&
+			!startupQuiet &&
+			startupChangelog === undefined &&
+			this.session.configWarnings.length === 0 &&
+			this.session.messages.length === 0;
+		if (showHomeScreen) {
+			this.#homeScreen = new HomeScreen(this.#version);
+			for (const parked of [...this.chatContainer.children]) {
+				this.chatContainer.removeChild(parked);
+				this.#homeScreen.notices.addChild(parked);
+			}
+			this.#transientStatusContainer.setCentered(true);
+			// Every path into the transcript ends here, which is the only condition
+			// that covers a submitted message, a resumed session, a slash command's
+			// output and a deferred startup notice alike.
+			this.chatContainer.onFirstBlock = () => this.#dismissHomeScreen();
+		}
+
+		// In the fullscreen viewport the startup chrome is not chrome at all. It
+		// is mounted above the transcript inside the viewport's own scroll
+		// region, and nothing ever clears it, so instead of scrolling away into
+		// terminal scrollback the way it does in append mode it becomes a
+		// permanent first block of the history: above a resumed session's own
+		// messages forever, and after a full repaint (compaction) the only thing
+		// left on screen. A session that resumes with content therefore never
+		// builds it, and one that starts empty gives it up when the conversation
+		// begins, the same deal the home screen gets. Config warnings are
+		// mounted directly on `ui` above rather than in this run, so none of
+		// this can swallow one.
+		const fullscreenResumed = isFullscreenViewport() && this.session.messages.length > 0;
+		if (!startupQuiet && !showHomeScreen && !fullscreenResumed) {
 			// Add welcome header
 			this.#welcomeComponent = new WelcomeComponent(
 				this.#version,
@@ -1031,32 +1216,41 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#getWelcomeLspServers(),
 			);
 
-			// Setup UI layout
-			this.ui.addChild(new Spacer(1));
-			this.ui.addChild(this.#welcomeComponent);
-			this.ui.addChild(new Spacer(1));
+			// Setup UI layout. Everything here goes into one run so drilling into
+			// a subagent can take the whole banner off screen in one move.
+			this.#startupChrome.addChild(new Spacer(1));
+			this.#startupChrome.addChild(this.#welcomeComponent);
+			this.#startupChrome.addChild(new Spacer(1));
 			if (!options.suppressWelcomeIntro) {
 				this.playWelcomeIntro();
 			}
 
 			// Add changelog if provided
-			if (this.#startupChangelog && settings.get("startup.changelogMode") !== "hidden") {
-				this.ui.addChild(new DynamicBorder());
-				this.ui.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-				this.ui.addChild(new Spacer(1));
+			if (startupChangelog) {
+				this.#startupChrome.addChild(new DynamicBorder());
+				this.#startupChrome.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+				this.#startupChrome.addChild(new Spacer(1));
 				if (settings.get("startup.changelogMode") === "summary") {
-					const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
+					const summary = formatStartupChangelogSummary(startupChangelog).replace(
 						/\/changelog(?: full)?/g,
 						command => theme.bold(command),
 					);
-					this.ui.addChild(new Text(summary, 1, 0));
+					this.#startupChrome.addChild(new Text(summary, 1, 0));
 				} else {
-					this.ui.addChild(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
+					this.#startupChrome.addChild(
+						new Markdown(startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()),
+					);
 				}
-				this.ui.addChild(new Spacer(1));
-				this.ui.addChild(new DynamicBorder());
+				this.#startupChrome.addChild(new Spacer(1));
+				this.#startupChrome.addChild(new DynamicBorder());
+			}
+			if (isFullscreenViewport()) {
+				// Mutually exclusive with the home screen's claim on the hook: the
+				// two paths never both run.
+				this.chatContainer.onFirstBlock = () => this.#dismissStartupChrome();
 			}
 		}
+		this.ui.addChild(this.#startupChrome);
 
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
@@ -1070,11 +1264,37 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Working loader / transient status sits below the sticky todo + subagent
 		// HUDs, just above the editor's hook-widget top margin — so it reads next to
 		// the prompt while keeping the one-line gap above the editor.
+		// Everything from here down is bottom chrome: in fullscreen mode it is
+		// welded to the base of the viewport while the transcript above scrolls
+		// under it. The boundary renders no rows, so append mode is unaffected.
+		this.ui.addChild(new FullscreenPinBoundary());
+		// Wordmark then parked notices, both above the transient status rows, so a
+		// startup banner reads between the identity and the prompt the way
+		// opencode's does rather than pushing the wordmark off centre.
+		if (this.#homeScreen) {
+			this.ui.addChild(this.#homeScreen.header);
+			this.ui.addChild(this.#homeScreen.notices);
+		}
+		// First pinned row: while drilled into a subagent it stays visible above
+		// the loader no matter how far the transcript is scrolled, which is the
+		// whole point of a "how do I get back up" affordance.
+		this.ui.addChild(this.subagentFooter);
 		this.ui.addChild(this.statusContainer);
+		// Transient status toasts in fullscreen: one row, replaced in place and
+		// expired on a timer, so a run of startup statuses cannot interleave
+		// itself with the cards in the transcript above.
+		this.ui.addChild(this.#transientStatusContainer);
 		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
+		if (this.#homeScreen) {
+			this.ui.addChild(this.#homeScreen.hints);
+			this.editorContainer.setCentered(true);
+			this.ui.setCenterPinned(true);
+			if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
+		}
+		this.#setupFullscreenViewport();
 		this.ui.setFocus(this.editor);
 
 		this.#inputController.setupKeyHandlers();
@@ -1282,6 +1502,80 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusLine.watchBranch(() => {
 			this.ui.requestRender();
 		});
+	}
+	/**
+	 * Give the engine the one capability it cannot supply itself: a clipboard.
+	 *
+	 * Mouse reporting takes native selection away from the terminal, so in
+	 * fullscreen mode omp owes the user a working copy. The mode itself is set
+	 * far earlier, at TUI construction, so nothing paints on the normal screen
+	 * first.
+	 */
+	#setupFullscreenViewport(): void {
+		this.ui.onCopy = text => {
+			if (!text) return;
+			void copyToClipboard(text).then(
+				() => {
+					const lines = text.split("\n").length;
+					this.showStatus(lines > 1 ? `Copied ${lines} lines` : "Copied");
+				},
+				() => this.showStatus("Copy failed"),
+			);
+		};
+		this.#applyViewportChrome();
+		// The canvas colour is a theme value, so it has to be re-derived whenever
+		// the theme changes, including the automatic light/dark flip driven by the
+		// terminal's own appearance.
+		onThemeChange(() => this.#applyViewportChrome());
+	}
+
+	/**
+	 * Gutter and canvas fill for fullscreen mode.
+	 *
+	 * Two columns of gutter and a row at the bottom, matching opencode: the
+	 * inset is most of why a filled surface reads as a window rather than as the
+	 * terminal having been painted over.
+	 *
+	 * There is deliberately no `padTop`. The gap above the first block is the
+	 * scroll region's own leading row (see TUI#renderFullscreenFrame), so it
+	 * shows at rest and scrolls away with the content; as chrome it would stay
+	 * pinned over a scrolled transcript and read as a clipped row.
+	 *
+	 * Overlays fill on `overlayBg`, two rungs above the `panelBg` every transcript
+	 * card uses. In fullscreen a floating panel draws no rule — its fill is the
+	 * only thing defining it — so sharing a rung with the cards left a modal
+	 * landing over one with no perceptible edge. It cannot borrow `elementBg`
+	 * either: that is where a select list paints its own selected row.
+	 */
+	#applyViewportChrome(): void {
+		this.ui.setViewportChrome({
+			padX: 2,
+			padTop: 0,
+			padBottom: 1,
+			// Arrows, not bare method references: these read private state off the
+			// Theme instance, and `theme` is rebound when the user switches theme,
+			// so a captured reference would keep painting the old palette.
+			fill: (line, width) => theme.surfaceBg(line, width),
+			overlayFill: (line, width) => theme.overlayBg(line, width),
+		});
+	}
+
+	/**
+	 * Switch viewport mode at runtime and persist the choice, so the next launch
+	 * starts the way the user left it. Persisting also matters mid-session: the
+	 * collapsed-preview sizing and the click-vs-keybinding hint both read the
+	 * setting rather than the engine, so they follow the same source of truth.
+	 */
+	setViewportMode(mode: ViewportMode): void {
+		if (this.ui.viewportMode === mode) return;
+		this.ui.setViewportMode(mode);
+		this.settings.set("tui.viewport", mode);
+		this.showStatus(mode === "fullscreen" ? "Fullscreen viewport" : "Native scrollback");
+	}
+
+	/** Flip between append and fullscreen at runtime. */
+	toggleViewportMode(): void {
+		this.setViewportMode(this.ui.viewportMode === "fullscreen" ? "append" : "fullscreen");
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
@@ -1991,6 +2285,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#replayOptimisticUserMessage();
 	}
 
+	/**
+	 * Append the divider for the compaction that just landed.
+	 *
+	 * With `display.collapseCompacted` off the visible transcript does not
+	 * shrink when a compaction fires — only the LLM context does — so every card
+	 * already on screen stays valid and the only new content is the divider.
+	 * Rebuilding instead would recreate all of them, dropping their expand state
+	 * and the reader's scroll position for no visible gain.
+	 *
+	 * The summary is synthesized by the context builder from the `compaction`
+	 * session entry rather than persisted as a message, so no live event carries
+	 * it and there is nothing to render off the normal message flow. Take the
+	 * newest one out of a transcript context so the divider is byte-identical to
+	 * the one a rebuild would have produced (superseded-summary elision and
+	 * re-attached snapcompact frames included).
+	 */
+	appendCompactionDivider(): void {
+		const { messages } = this.viewSession.buildTranscriptSessionContext({ collapseCompactedHistory: false });
+		const summary = messages.findLast(message => message.role === "compactionSummary");
+		if (summary) this.addMessageToChat(summary);
+	}
+
 	#replayOptimisticUserMessage(): void {
 		if (!this.optimisticUserMessageSignature) return;
 		const submission = this.#pendingSubmittedInput;
@@ -2292,10 +2608,16 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * the "active" state.
 	 */
 	#renderSubagentList(): void {
-		this.subagentContainer.clear();
-		const lines = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
-		if (lines.length === 0) return;
-		this.subagentContainer.addChild(new Text(lines.join("\n"), 1, 0));
+		const { lines, anchors } = renderSubagentHudLines(this.#observerRegistry.getSessions(), this.ui.terminal.columns);
+		// The list component is retained across rebuilds, not recreated: it holds
+		// the hover state, and a fresh instance every observer tick would drop the
+		// wash the moment the row it belongs to updated its progress text.
+		this.#subagentHud.setRows(lines, anchors);
+		if (this.subagentContainer.children.length === 0 && lines.length > 0) {
+			this.subagentContainer.addChild(this.#subagentHud);
+		} else if (lines.length === 0) {
+			this.subagentContainer.clear();
+		}
 	}
 
 	async #loadTodoList(): Promise<void> {
@@ -4283,6 +4605,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(nextEditor));
+		// Same wiring as the initial editor: the strip renders on the home screen
+		// too, so a swapped-in editor must carry the provider unconditionally.
 		nextEditor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
@@ -4313,6 +4637,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		} else {
 			this.#mountChatChild(content as Component);
 		}
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Where a startup notice is mounted right now: the home screen's own pinned
+	 * run while it is up, the transcript once it is gone.
+	 */
+	get noticeContainer(): Container {
+		return this.#homeScreen?.notices ?? this.chatContainer;
+	}
+
+	presentNotice(content: readonly Component[]): void {
+		const home = this.#homeScreen;
+		if (!home) {
+			this.present(content);
+			return;
+		}
+		for (const item of content) home.notices.addChild(item);
 		this.ui.requestRender();
 	}
 
@@ -4391,12 +4733,71 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	resetTranscript(): void {
 		this.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
+		// The home screen and the toast are pinned chrome, so clearing the
+		// transcript alone leaves them on screen: `/new` from a session that never
+		// got past the home screen used to strand its update banner and MCP
+		// summary at the top of the fresh conversation, because the confirmation
+		// line is itself a first block and dismissal filed the parked run behind
+		// it. Take them down first, and discard rather than file.
+		this.#dismissHomeScreen({ fileNotices: false });
+		this.#clearTransientStatus();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
 	}
 
 	showStatus(message: string, options?: { dim?: boolean }): void {
 		this.#uiHelpers.showStatus(message, options);
+	}
+
+	/**
+	 * Paint one toast into the pinned row above the composer, replacing whatever
+	 * was there and restarting its expiry.
+	 *
+	 * Replacing rather than appending is the whole point: startup emits a run of
+	 * these (MCP connection progress settling into a summary), and appending put
+	 * the same status both above and below the update-available card. Restarting
+	 * the timer on every call means a burst reads as one line that keeps
+	 * updating, and the last of them is what lingers.
+	 *
+	 * `unref` so a pending expiry never holds the process open at exit.
+	 */
+	showTransientStatus(message: string, styleFn: ((text: string) => string) | undefined): void {
+		clearTimeout(this.#transientStatusTimer);
+		if (this.#transientStatusText) {
+			this.#transientStatusText.setStyleFn(styleFn);
+			this.#transientStatusText.setText(message);
+		} else {
+			// CARD_PADDING_X, not 1: the toast is the only pinned row that is not a
+			// card, and a single column of inset would leave it one short of the
+			// column every card, the hint row and the composer text share.
+			//
+			// `setIgnoreTight` for the same reason `BlockCard` sets it — tight
+			// layout shaves a column off decorative padding, but this inset is the
+			// shared column itself, and losing it puts the toast out of line with
+			// everything above it.
+			//
+			// `setMaxLines(1)` is load-bearing, not cosmetic. This row is pinned
+			// chrome: its height comes out of the scrolling region, so a long
+			// status (the MCP summary naming every connected tool ran to 67 rows)
+			// collapses the transcript to its 3-row floor and jumps the scroll
+			// offset by that much, then back when the toast is replaced. That
+			// read as violent scroll jitter with no apparent cause.
+			this.#transientStatusText = new Text(message, CARD_PADDING_X, 0)
+				.setIgnoreTight(true)
+				.setMaxLines(1)
+				.setStyleFn(styleFn);
+			this.#transientStatusContainer.addChild(this.#transientStatusText);
+		}
+		this.#transientStatusTimer = setTimeout(() => {
+			this.#clearTransientStatus();
+			this.ui.requestRender();
+		}, TRANSIENT_STATUS_MS);
+		this.#transientStatusTimer.unref?.();
+		this.ui.requestRender();
+	}
+
+	setStartupChromeHidden(hidden: boolean): void {
+		if (this.#startupChrome.setHidden(hidden)) this.ui.requestRender();
 	}
 
 	showError(message: string): void {

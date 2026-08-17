@@ -10,7 +10,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Loader, Markdown, type OverlayHandle, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
@@ -35,6 +35,7 @@ import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
 import { TranscriptBlock } from "../../modes/components/transcript-container";
+import { UsageOverlayComponent } from "../../modes/components/usage-overlay";
 import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
@@ -541,7 +542,6 @@ export class CommandController {
 			return;
 		}
 
-		const availableWidth = Math.max(40, (this.ctx.ui.terminal.columns ?? 100) - 2);
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
@@ -550,15 +550,38 @@ export class CommandController {
 				)
 			: undefined;
 		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(usageReports);
-		const output = renderUsageReports(
-			usageReports,
-			theme,
-			Date.now(),
-			availableWidth,
-			provider => (provider === currentProvider ? activeAccount : undefined),
-			usageModelSelectors,
+		const openedAt = Date.now();
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			overlayHandle?.hide();
+			this.ctx.ui.setFocus(this.ctx.editor);
+			this.ctx.ui.requestRender();
+		};
+		const overlay = new UsageOverlayComponent(
+			this.ctx.ui,
+			width =>
+				renderUsageReports(
+					usageReports,
+					theme,
+					openedAt,
+					width,
+					provider => (provider === currentProvider ? activeAccount : undefined),
+					usageModelSelectors,
+				),
+			done,
 		);
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(output, 1, 0)]);
+		overlayHandle = this.ctx.ui.showOverlay(overlay, {
+			anchor: "center",
+			width: "84%",
+			minWidth: 48,
+			maxHeight: "70%",
+			margin: 1,
+		});
+		this.ctx.ui.setFocus(overlay);
+		this.ctx.ui.requestRender();
 	}
 
 	async handleChangelogCommand(showFull = false): Promise<void> {
@@ -1347,16 +1370,21 @@ export class CommandController {
 
 			compactingLoader.stop();
 			this.ctx.statusContainer.disposeChildren();
-			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 
-			this.ctx.statusLine.invalidate();
-			// Same as the auto-compaction rebuild: a collapsed transcript is an
-			// intentional replacement, so drop the stale pre-compaction scrollback
-			// instead of repainting the shrunken frame below it. With collapse
-			// disabled the full history stays inline and scrollback is kept.
+			// Same as the auto-compaction path: a collapsed transcript is an
+			// intentional replacement, so rebuild it and drop the stale
+			// pre-compaction scrollback instead of repainting the shrunken frame
+			// below it. With collapse disabled nothing is elided from the display
+			// — only the LLM context shrinks — so every card on screen is still
+			// current and rebuilding would only cost the reader their expand
+			// state and scroll position. Append the new divider instead.
 			if (this.ctx.settings.get("display.collapseCompacted")) {
+				this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
+				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
 			} else {
+				this.ctx.appendCompactionDivider();
+				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
 			}
 		} catch (error) {

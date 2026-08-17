@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
-import type { Component } from "@oh-my-pi/pi-tui";
+import type { Component, HitZoneProvider, HitZoneSink } from "@oh-my-pi/pi-tui";
 import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { pluralize } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
@@ -63,6 +63,13 @@ export const PREVIEW_LIMITS = {
 	OUTPUT_EXPANDED: 10,
 	/** Computer script lines shown in collapsed view */
 	COMPUTER_CODE_COLLAPSED: 10,
+	/**
+	 * Output lines kept for a settled tool call in the fullscreen viewport,
+	 * where one click on the header restores the rest. A completed call is
+	 * history: its header already carries the outcome, so the collapsed form
+	 * is a single line of evidence rather than a paragraph.
+	 */
+	OUTPUT_SETTLED: 1,
 	/** Max hunks shown when collapsed (edit tool) */
 	DIFF_COLLAPSED_HUNKS: 8,
 	/** Max diff lines shown when collapsed (edit tool) */
@@ -97,6 +104,71 @@ const DEFAULT_EXPAND_KEY: KeyId = "ctrl+o";
 export function expandKeyHint(): string {
 	const keys = getKeybindings().getKeys(EXPAND_ACTION);
 	return formatKeyHints(keys.length > 0 ? keys : [DEFAULT_EXPAND_KEY]);
+}
+
+/**
+ * Whether the transcript is painting into the fullscreen viewport, where a
+ * collapsed block is opened by clicking its header instead of by the bulk
+ * keybinding. Read from the setting rather than the live `TUI` because tool
+ * renderers are pure formatters with no engine handle; `toggleViewportMode`
+ * persists the runtime choice here, so the setting is always current.
+ */
+export function isFullscreenViewport(): boolean {
+	const activeSettings = isSettingsInitialized() ? settings : undefined;
+	return (activeSettings?.get("tui.viewport") ?? getDefault("tui.viewport")) === "fullscreen";
+}
+
+/**
+ * Ambient record of what the current render hid and what identifies it.
+ *
+ * Two facts a transcript block needs are only discoverable deep inside
+ * whichever of the ~30 tool renderers drew it, none of which can see the
+ * enclosing component: whether the collapsed form omitted anything (which is
+ * what makes the block worth clicking), and the one line that identifies the
+ * call (which is all a collapsed card shows in the fullscreen viewport).
+ * Rather than widen every renderer signature, or grow a second per-tool
+ * summary system beside the titles renderers already build, the few shared
+ * helpers every renderer funnels those through report into a probe the block
+ * installs around its own render.
+ */
+interface RenderProbe {
+	overflow: boolean;
+	/** First reported identity line. A renderer draws its title before any
+	 *  detail row that reuses the same helper, so first wins. */
+	summary: string | undefined;
+}
+
+let renderProbe: RenderProbe | undefined;
+
+/** Report that the current render omitted content the expanded form would show. */
+export function recordCollapsedOverflow(): void {
+	if (renderProbe) renderProbe.overflow = true;
+}
+
+/** Report the one line that identifies the block being rendered. */
+export function recordBlockSummary(summary: string): void {
+	if (renderProbe === undefined || renderProbe.summary !== undefined) return;
+	if (summary.trim().length === 0) return;
+	renderProbe.summary = summary;
+}
+
+/**
+ * Run `render` with a probe installed and report what it hid and what it calls
+ * itself. Nested probes propagate outward: a block containing a collapsed
+ * child also has something left to reveal, and an inner block's identity
+ * stands in for an outer one that reported none.
+ */
+export function measureBlockRender<T>(render: () => T): { value: T; overflow: boolean; summary: string | undefined } {
+	const outer = renderProbe;
+	const probe: RenderProbe = { overflow: false, summary: undefined };
+	renderProbe = probe;
+	try {
+		return { value: render(), overflow: probe.overflow, summary: probe.summary };
+	} finally {
+		renderProbe = outer;
+		if (probe.overflow) recordCollapsedOverflow();
+		if (probe.summary !== undefined) recordBlockSummary(probe.summary);
+	}
 }
 
 // =============================================================================
@@ -178,13 +250,106 @@ export function formatStatusIcon(status: ToolUIStatus, theme: Theme, spinnerFram
 }
 
 /**
- * Format the expand hint with proper theming.
+ * Format the expand hint with proper theming, and record that this render hid
+ * content (the hint is only emitted when something is actually hidden, which
+ * makes it the single choke point every renderer already funnels through).
  * Returns empty string if already expanded or there is nothing more to show.
+ *
+ * In the fullscreen viewport the block's header is itself the control, so the
+ * hint names the gesture; in append mode there is no pointer target and it
+ * keeps naming the keybinding.
  */
 export function formatExpandHint(theme: Theme, expanded?: boolean, hasMore?: boolean): string {
 	if (expanded) return "";
 	if (hasMore === false) return "";
-	return theme.fg("dim", wrapBrackets(`${expandKeyHint()}: Expand`, theme));
+	recordCollapsedOverflow();
+	const label = isFullscreenViewport() ? "click to expand" : `${expandKeyHint()}: Expand`;
+	return theme.interactiveHint(wrapBrackets(label, theme));
+}
+
+/**
+ * Index just past the escape sequence starting at `i`: a CSI (styling) run
+ * ends at its final byte, an OSC (hyperlink) run at BEL or ST.
+ */
+function skipEscape(row: string, i: number): number {
+	if (row[i + 1] === "]") {
+		const bel = row.indexOf("\x07", i);
+		const st = row.indexOf("\x1b\\", i + 2);
+		if (bel === -1 && st === -1) return row.length;
+		return bel !== -1 && (st === -1 || bel < st) ? bel + 1 : st + 2;
+	}
+	let end = i + 2;
+	while (end < row.length && (row.charCodeAt(end) < 0x40 || row.charCodeAt(end) > 0x7e)) end++;
+	return end + 1;
+}
+
+/**
+ * Row on which a rendered block first draws something.
+ *
+ * Cards open with a padding row, and a state-tinted one is not plain
+ * whitespace (it carries the background escape), so a `\S` test lands on it
+ * instead of on the header. Blocks use this to place their header hit zone
+ * without having to know their own padding.
+ */
+export function firstContentRow(lines: readonly string[]): number {
+	for (let row = 0; row < lines.length; row++) {
+		const line = lines[row]!;
+		let i = 0;
+		while (i < line.length) {
+			if (line[i] === "\x1b") {
+				i = skipEscape(line, i);
+			} else if (line[i] === " ") {
+				i++;
+			} else {
+				return row;
+			}
+		}
+	}
+	return -1;
+}
+
+/**
+ * Repaint the first drawn column of an already-composed row.
+ *
+ * A card's accent rail belongs in the card's own first padding column: drawn
+ * outside it, every other block on the surface would have to give up a column
+ * to keep the same left edge. `replacement` has to be exactly one column wide,
+ * and has to restore whatever it changed, because the row's background was
+ * opened before this cell and must carry through to the end of the row.
+ */
+export function paintFirstColumn(row: string, replacement: string): string {
+	let i = 0;
+	while (i < row.length) {
+		if (row[i] === "\x1b") {
+			i = skipEscape(row, i);
+			continue;
+		}
+		const cell = (row.codePointAt(i) ?? 0) > 0xffff ? 2 : 1;
+		return row.slice(0, i) + replacement + row.slice(i + cell);
+	}
+	return row;
+}
+
+/**
+ * Draw a collapsible block's header row: the hover wash while the pointer is
+ * over it, and nothing else.
+ *
+ * There is deliberately NO disclosure triangle. A glyph in the gutter competes
+ * with the tool's own status icon two columns away and reads as clutter at this
+ * size; opencode does not draw one either. What signals that a block is
+ * interactive is the hover fill plus the explicit "click to expand" hint, both
+ * of which appear only on blocks that actually hide something.
+ *
+ * `wash` is off for a block that fills its own card on hover: the fill already
+ * carries the pointer feedback across the block's whole height, and a second
+ * background around this one row would end at the inner reset.
+ */
+export function decorateBlockHeader(
+	row: string,
+	options: { expanded: boolean; hovered: boolean; wash?: boolean },
+	theme: Theme,
+): string {
+	return options.hovered && options.wash !== false ? theme.hoverBg(row) : row;
 }
 
 /**
@@ -241,9 +406,15 @@ export function capPreviewLines(
 	theme: Theme,
 	options: { max?: number; expanded?: boolean; prefix?: string; expandHint?: boolean } = {},
 ): string[] {
-	if (options.expanded) return lines;
 	const max = options.max ?? previewWindowRows();
 	if (lines.length <= max) return lines;
+	// Recorded before the expanded early-return, and even when the hint is
+	// suppressed: the question is whether the COLLAPSED form hides lines, which
+	// stays true while the block happens to be open. A block first rendered
+	// expanded (created while a bulk expand was in force) would otherwise never
+	// learn that it is collapsible.
+	recordCollapsedOverflow();
+	if (options.expanded) return lines;
 	const visible = max <= 1 ? [] : lines.slice(lines.length - (max - 1));
 	const hidden = lines.length - visible.length;
 	const hint = options.expandHint === false ? "" : formatExpandHint(theme, false, true);
@@ -261,7 +432,12 @@ function sanitizeErrorText(message: string | undefined): string {
 }
 
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {
-	return `${theme.styledSymbol("status.error", "error")} ${theme.fg("error", `Error: ${sanitizeErrorText(message)}`)}`;
+	const line = `${theme.styledSymbol("status.error", "error")} ${theme.fg("error", `Error: ${sanitizeErrorText(message)}`)}`;
+	// A renderer that fails hard prints this instead of its usual title row, so
+	// it is the only thing left that identifies the block. A collapsed card must
+	// still show that the call failed without being expanded.
+	recordBlockSummary(line);
+	return line;
 }
 
 /**
@@ -815,27 +991,31 @@ export function capParseErrors(
 
 /**
  * Standard width+expand keyed render cache used by every search-style tool
- * renderer. `compute` re-runs only when the cache key changes; the returned
- * Component is the canonical `{ render, invalidate }` pair.
+ * renderer. `compute` re-runs only when the cache key changes. Horizontal
+ * padding is also published as selection geometry so a card containing this
+ * component composes both insets instead of copying one chrome cell.
  */
 export function createCachedComponent(
 	getExpanded: () => boolean,
 	compute: (width: number, expanded: boolean) => string[],
 	options: { paddingX?: number } = {},
-): Component {
+): Component & HitZoneProvider {
 	let cached: { key: bigint; lines: string[] } | undefined;
+	const paddingX = Math.max(0, options.paddingX ?? 0);
 	return {
 		render(width: number): readonly string[] {
 			const expanded = getExpanded();
 			const key = new Hasher().bool(expanded).u32(width).digest();
 			if (cached?.key === key) return cached.lines;
-			const paddingX = Math.max(0, options.paddingX ?? 0);
 			const innerWidth = Math.max(1, width - paddingX * 2);
 			const lines = compute(innerWidth, expanded);
 			const pad = paddingX === 0 ? "" : " ".repeat(paddingX);
 			const paddedLines = paddingX === 0 ? lines : lines.map(line => `${pad}${line}${pad}`);
 			cached = { key, lines: paddedLines };
 			return paddedLines;
+		},
+		publishHitZones(sink: HitZoneSink): void {
+			sink.selectionInset(0, cached?.lines.length ?? 0, paddingX);
 		},
 		invalidate() {
 			cached = undefined;

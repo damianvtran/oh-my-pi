@@ -13,6 +13,7 @@ import { createBackgroundTanDispatchBlock } from "../../modes/components/backgro
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
 import { CollabPromptMessageComponent } from "../../modes/components/collab-prompt-message";
+import { BlockCard } from "../../modes/components/collapsible-block";
 import {
 	BranchSummaryMessageComponent,
 	CompactionSummaryMessageComponent,
@@ -51,7 +52,7 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
-import { replaceTabs } from "../../tools/render-utils";
+import { isFullscreenViewport, replaceTabs } from "../../tools/render-utils";
 import { WAKE_PROMPT_MESSAGE_TYPE, type WakePromptDetails } from "../../wake/store";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import { createAssistantMessageComponent } from "./interactive-context-helpers";
@@ -117,19 +118,32 @@ export class UiHelpers {
 	}
 
 	/**
-	 * Show a status message in the chat.
+	 * Show a status message.
 	 *
-	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
-	 * we update the previous status line instead of appending new ones to avoid log spam.
+	 * In the fullscreen viewport these are toasts: one pinned row just above the
+	 * composer that is replaced in place and expires on its own. Startup emits a
+	 * run of them — MCP connection progress is a dozen events settling into a
+	 * summary — and appending each one put the same line above AND below the
+	 * update-available card, because the in-place path below only fires while
+	 * the previous status is still the last thing in the container.
+	 *
+	 * In append mode they stay in the transcript, where the terminal's own
+	 * scrollback is the only history there is.
 	 */
 	showStatus(message: string, options?: { dim?: boolean }): void {
-		const children = this.ctx.chatContainer.children;
-		const last = children.length > 0 ? children[children.length - 1] : undefined;
-		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 		const useDim = options?.dim ?? true;
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
+
+		if (isFullscreenViewport()) {
+			this.ctx.showTransientStatus(message, styleFn);
+			return;
+		}
+
+		const children = this.ctx.noticeContainer.children;
+		const last = children.length > 0 ? children[children.length - 1] : undefined;
+		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 
 		if (last && secondLast && last === this.ctx.lastStatusText && secondLast === this.ctx.lastStatusSpacer) {
 			this.ctx.lastStatusText.setStyleFn(styleFn);
@@ -140,7 +154,7 @@ export class UiHelpers {
 
 		const spacer = new Spacer(1);
 		const text = new Text(message, 1, 0).setStyleFn(styleFn);
-		this.ctx.present([spacer, text]);
+		this.ctx.presentNotice([spacer, text]);
 		this.ctx.lastStatusSpacer = spacer;
 		this.ctx.lastStatusText = text;
 	}
@@ -149,10 +163,8 @@ export class UiHelpers {
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.ctx.ui, message.excludeFromContext);
-				if (message.output) {
-					component.appendOutput(message.output);
-				}
 				component.setComplete(message.exitCode, message.cancelled, {
+					output: message.output,
 					truncation: message.meta?.truncation,
 				});
 				this.ctx.chatContainer.addChild(component);
@@ -160,10 +172,8 @@ export class UiHelpers {
 			}
 			case "pythonExecution": {
 				const component = new EvalExecutionComponent(message.code, this.ctx.ui, message.excludeFromContext);
-				if (message.output) {
-					component.appendOutput(message.output);
-				}
 				component.setComplete(message.exitCode, message.cancelled, {
+					output: message.output,
 					truncation: message.meta?.truncation,
 				});
 				this.ctx.chatContainer.addChild(component);
@@ -881,18 +891,31 @@ export class UiHelpers {
 
 	showNewVersionNotification(newVersion: string): void {
 		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
 		const title = "Update Available";
 		const prefix = `New version ${newVersion} is available. Run: `;
 		const command = "omp update";
-		block.addChild(
-			new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(
-				() =>
-					`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", prefix)}${theme.fg("accent", command)}`,
-			),
-		);
+		const styleFn = () =>
+			`${theme.bold(theme.fg("warning", title))}\n${theme.fg("muted", prefix)}${theme.fg("accent", command)}`;
+		if (isFullscreenViewport()) {
+			// Rules would be two bare canvas rows here, which reads as a gap rather
+			// than a notice. The card gives the copy a surface, the same one every
+			// transcript block sits on.
+			const card = new BlockCard();
+			const rows = () => [
+				theme.bold(theme.fg("warning", title)),
+				`${theme.fg("muted", prefix)}${theme.fg("accent", command)}`,
+			];
+			block.addChild({
+				render: (width: number) => card.paint(rows(), width, false),
+				invalidate: () => card.invalidate(),
+			});
+			this.ctx.presentNotice([block]);
+			return;
+		}
 		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
-		this.ctx.present(block);
+		block.addChild(new Text(`${title}\n${prefix}${command}`, 1, 0).setStyleFn(styleFn));
+		block.addChild(new DynamicBorder(text => theme.fg("warning", text)));
+		this.ctx.presentNotice([block]);
 	}
 
 	updatePendingMessagesDisplay(): void {

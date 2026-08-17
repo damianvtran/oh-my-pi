@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -24,6 +25,10 @@ function render(component: AskDialogComponent): string {
 
 describe("AskDialogComponent", () => {
 	beforeAll(async () => {
+		resetSettingsForTest();
+		// Asserts append-mode rendering: the dialog gets the terminal's full height
+		// rather than the shorter fullscreen card, so its preview pages as sized here.
+		await Settings.init({ inMemory: true, overrides: { "tui.viewport": "append" } } as never);
 		darkTheme = await getThemeByName("dark");
 		if (!darkTheme) throw new Error("Failed to load dark theme");
 	});
