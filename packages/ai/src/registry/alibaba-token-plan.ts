@@ -12,7 +12,7 @@ import { generatePKCE } from "./oauth/pkce";
 import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
-const INTERNATIONAL_AUTH_URL = "https://home.qwencloud.com/billing/subscription/token-plan-individual";
+const INTERNATIONAL_AUTH_URL = "https://www.qwencloud.com/pricing/token-plan";
 const CHINA_AUTH_URL = "https://bailian.console.aliyun.com/cn-beijing?tab=plan";
 
 /**

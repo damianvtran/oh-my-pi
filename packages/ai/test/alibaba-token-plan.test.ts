@@ -82,7 +82,7 @@ describe("QwenCloud Token Plan login", () => {
 			},
 		});
 		expect(authRequests).toHaveLength(2);
-		expect(authRequests[0]?.url).toBe("https://home.qwencloud.com/billing/subscription/token-plan-individual");
+		expect(authRequests[0]?.url).toBe("https://www.qwencloud.com/pricing/token-plan");
 		expect(authRequests[1]).toMatchObject({ url: "https://t.qwencloud.com/verify" });
 		expect(
 			urls.some(
