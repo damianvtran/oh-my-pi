@@ -1090,7 +1090,7 @@ export class AgentSession {
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
-			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
+			clearActiveRetryFallback: forgetSelector => this.#recovery.clearActiveRetryFallback(forgetSelector),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
 			magicKeywordEnabled: keyword => this.#magicKeywordEnabled(keyword),
 			emit: event => this.#emit(event),

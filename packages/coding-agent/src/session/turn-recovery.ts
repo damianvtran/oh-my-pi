@@ -49,8 +49,11 @@ import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
 	findRetryFallbackCandidates,
+	findRetryFallbackPrecedingCandidates,
+	formatRetryFallbackBaseSelector,
 	formatRetryFallbackSelector,
 	getRetryFallbackChains,
+	getRetryFallbackCycleEnabled,
 	getRetryFallbackRevertPolicy,
 	parseRetryAfterMsFromError,
 	parseRetryFallbackSelector,
@@ -73,6 +76,39 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+/**
+ * Chain-cycling anti-flap budget. A model that fails again right after its
+ * cooldown lapsed gets a doubled window, so a short cap (a 30s
+ * `RATE_LIMIT_EXCEEDED`, say) cannot become a seesaw — probe, fail, drop back,
+ * probe again 30s later, forever. The multiplier is capped so a genuinely
+ * recovered model is never locked out for long; the absolute cap stops a bogus
+ * provider `retry-after` from parking a model for days; the decay window
+ * forgets strikes once a model has behaved for a stretch.
+ */
+const RETRY_FALLBACK_STRIKE_MULTIPLIER_CAP = 8;
+const RETRY_FALLBACK_MAX_COOLDOWN_MS = 4 * 60 * 60 * 1_000;
+const RETRY_FALLBACK_STRIKE_DECAY_MS = 2 * 60 * 60 * 1_000;
+/**
+ * Quiet period a mid-chain climb waits after the last fallback switch. Only the
+ * intermediate climb honours it: restoring the configured primary stays
+ * immediate on cooldown expiry, which is the behaviour sessions already rely on.
+ */
+const RETRY_FALLBACK_CLIMB_DWELL_MS = 60 * 1_000;
+/**
+ * Backward chain hops one retry burst may take. One is enough to rescue a burst
+ * whose tail is spent while keeping the walk acyclic: with a single reversal
+ * available, no burst can produce an A→B→A→B pattern however short the
+ * provider's cooldown windows are.
+ */
+const RETRY_FALLBACK_MAX_BACKWARD_HOPS_PER_BURST = 1;
+/**
+ * Strikes past which the opportunistic climb stops re-probing an entry, leaving
+ * it to the flap ledger's decay. The cycle pass has no such limit: its
+ * alternative is failing the turn, so a wasted request there is free, whereas a
+ * climb that lands on a chronically capped entry costs a request plus two
+ * provider-session resets (prompt-cache loss) on every single turn.
+ */
+const RETRY_FALLBACK_CLIMB_MAX_STRIKES = 1;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
@@ -230,6 +266,12 @@ export class TurnRecovery {
 	#bootstrapCache:
 		| { model: Model; level: ThinkingLevel | undefined; routed: boolean; value: ServingModel }
 		| undefined;
+	/** Per-model flap ledger: consecutive failed re-probes and the window each bought. */
+	#retryFallbackFlaps = new Map<string, { strikes: number; suppressedUntilMs: number; probing: boolean }>();
+	/** Backward chain hops taken during the current retry burst; bars A→B→A oscillation. */
+	#retryFallbackBackwardHops = 0;
+	/** When the last fallback switch landed; gates the mid-chain climb's dwell window. */
+	#lastRetryFallbackAppliedAtMs = 0;
 
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
@@ -340,6 +382,18 @@ export class TurnRecovery {
 	async onAssistantSettledSuccessfully(message: AssistantMessage): Promise<void> {
 		if (!assistantTurnProducedOutput(message)) {
 			return;
+		}
+		// A model that just served a turn has demonstrably recovered, so forget its
+		// flap history. Without this the probe arm set by the move that brought us
+		// here stays latched: an unrelated failure hours later would be scored as a
+		// bounce, and repeated succeed/fail cycles would ratchet the escalation
+		// multiplier to its cap and push the entry past the climb's strike ceiling.
+		// This runs for every good turn, not only for ones that closed a retry saga.
+		const settledModel = this.#host.model();
+		if (settledModel) {
+			this.#retryFallbackFlaps.delete(
+				this.#retryFallbackFlapKey(formatRetryFallbackSelector(settledModel, this.#host.thinkingLevel())),
+			);
 		}
 		const model = this.#host.model();
 		if (model) {
@@ -1281,10 +1335,25 @@ export class TurnRecovery {
 		return getRetryFallbackRevertPolicy(this.#host.settings);
 	}
 
-	/** Clears fallback ownership after an explicit model change or a restore. */
-	clearActiveRetryFallback(): void {
+	/**
+	 * Clears fallback ownership after an explicit model change or a restore.
+	 *
+	 * `forgetSelector` names the model being switched TO, and its flap record goes
+	 * with the ownership. Every caller — an interactive `/model` pick, the prewalk
+	 * and plan-yolo transitions, the context-promotion overflow switch — clears that
+	 * model's registry suppression on the same line, and the registry owns
+	 * suppression, so a record this ledger still holds describes a window that was
+	 * just cancelled. Keeping its strike count would let the next failure draw a
+	 * doubled (up to 8x) window on a model whose cap was deliberately dropped: for
+	 * an interactive pick that is a user command silently reversed.
+	 *
+	 * The restore path passes nothing: it arms a probe strike on the primary on
+	 * purpose, and forgetting the record here would erase it in the same breath.
+	 */
+	clearActiveRetryFallback(forgetSelector?: string): void {
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
+		if (forgetSelector) this.#retryFallbackFlaps.delete(this.#retryFallbackFlapKey(forgetSelector));
 	}
 
 	/** Checks whether a fallback selector remains in cooldown. */
@@ -1292,14 +1361,92 @@ export class TurnRecovery {
 		return this.#host.modelRegistry.isSelectorSuppressed(selector.raw);
 	}
 
-	/** Records the cooldown that should suppress a failing selector. */
+	/** Stable per-model key for flap bookkeeping, ignoring thinking-level suffixes. */
+	#retryFallbackFlapKey(selector: string): string {
+		const parsed = parseRetryFallbackSelector(selector, this.#host.modelRegistry);
+		return parsed ? formatRetryFallbackBaseSelector(parsed) : selector;
+	}
+
+	#retryFallbackCycleEnabled(): boolean {
+		return getRetryFallbackCycleEnabled(this.#host.settings);
+	}
+
+	/** Marks a model as deliberately re-probed, arming strike accounting for its next failure. */
+	#markRetryFallbackProbe(selector: string): void {
+		const record = this.#retryFallbackFlaps.get(this.#retryFallbackFlapKey(selector));
+		if (record) record.probing = true;
+	}
+
+	/**
+	 * Records the cooldown that should suppress a failing selector, doubling the
+	 * window when the failure came from a deliberate re-probe so returning to a
+	 * recovered model cannot degenerate into a bounce.
+	 */
 	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
 			const reason = parseRateLimitReason(errorMessage);
 			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
 		}
-		this.#host.modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
+		const nowMs = Date.now();
+		const flapKey = this.#retryFallbackFlapKey(currentSelector);
+		const previous = this.#retryFallbackFlaps.get(flapKey);
+		// A strike means specifically "we moved back onto this model on purpose and
+		// it failed again". Two other shapes must NOT escalate: an ordinary
+		// same-model backoff retry (its delay is pinned to the very `retry-after`
+		// that set the window, so it lands exactly at expiry and would otherwise
+		// score a strike with no backward move involved), and a second failure while
+		// the window is still open, which is one outage reported twice.
+		const probed = previous?.probing === true;
+		const windowLapsed = previous !== undefined && previous.suppressedUntilMs <= nowMs;
+		const withinDecay = previous !== undefined && nowMs - previous.suppressedUntilMs < RETRY_FALLBACK_STRIKE_DECAY_MS;
+		// Escalation exists to protect cycling; with cycling off the walk never
+		// returns to a model, so leaving it on would stretch suppression windows the
+		// forward walk, the primary restore and the usage preflight all read. The
+		// carried count is gated too, not just the increment — a multiplier earned
+		// while cycling was on must not keep doubling windows after the switch is
+		// flipped off mid-session, which is the ordinary way it gets used.
+		const cycleEnabled = this.#retryFallbackCycleEnabled();
+		const strikes = !cycleEnabled
+			? 0
+			: previous && probed && windowLapsed && withinDecay
+				? previous.strikes + 1
+				: (previous?.strikes ?? 0);
+		// The absolute ceiling is cycling-only for the same reason as the multiplier:
+		// upstream honours a provider's window verbatim, however long, and the kill
+		// switch has to mean exactly that.
+		const escalatedMs = cycleEnabled
+			? Math.min(
+					cooldownMs * Math.min(2 ** strikes, RETRY_FALLBACK_STRIKE_MULTIPLIER_CAP),
+					RETRY_FALLBACK_MAX_COOLDOWN_MS,
+				)
+			: cooldownMs;
+		// Never shorten a window already promised: a failure inside an open window
+		// must not hand the model back early. Two bounds on that. It is cycling-only,
+		// because upstream's last-write-wins timing is what the kill switch has to
+		// reproduce. And it defers to the registry, which OWNS suppression: an
+		// explicit `/model` pick calls `clearSuppressedSelector` and a registry
+		// refresh drops every window, so a deadline this ledger still remembers may
+		// already have been cancelled deliberately. Flooring against that stale copy
+		// would silently reverse a user's own command — re-imposing hours of a
+		// cleared cap on the next trivial hiccup.
+		const promisedUntilMs =
+			previous !== undefined && this.#host.modelRegistry.isSelectorSuppressed(currentSelector)
+				? previous.suppressedUntilMs
+				: 0;
+		const suppressedUntilMs = cycleEnabled ? Math.max(nowMs + escalatedMs, promisedUntilMs) : nowMs + escalatedMs;
+		this.#pruneRetryFallbackFlaps(nowMs);
+		this.#retryFallbackFlaps.set(flapKey, { strikes, suppressedUntilMs, probing: false });
+		this.#host.modelRegistry.suppressSelector(currentSelector, suppressedUntilMs);
+	}
+
+	/** Drops flap records whose escalation window decayed, keeping the ledger bounded. */
+	#pruneRetryFallbackFlaps(nowMs: number): void {
+		for (const [key, record] of this.#retryFallbackFlaps) {
+			if (record.suppressedUntilMs + RETRY_FALLBACK_STRIKE_DECAY_MS <= nowMs) {
+				this.#retryFallbackFlaps.delete(key);
+			}
+		}
 	}
 
 	/**
@@ -1503,6 +1650,20 @@ export class TurnRecovery {
 		}
 	}
 
+	/** Finds chain entries that PRECEDE the active selector, most-preferred first. */
+	findRetryFallbackPrecedingCandidates(
+		role: string,
+		currentSelector: string,
+		currentModel: Model | null | undefined = this.#host.model(),
+	): RetryFallbackSelector[] {
+		return findRetryFallbackPrecedingCandidates(
+			this.#getRetryFallbackResolutionContext(),
+			role,
+			currentSelector,
+			currentModel,
+		);
+	}
+
 	async applyRetryFallbackCandidate(
 		role: string,
 		selector: RetryFallbackSelector,
@@ -1573,6 +1734,7 @@ export class TurnRecovery {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
 		}
+		this.#lastRetryFallbackAppliedAtMs = Date.now();
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
@@ -1582,20 +1744,48 @@ export class TurnRecovery {
 		return true;
 	}
 
-	async #tryRetryModelFallback(
+	/**
+	 * Apply the first candidate that is out of cooldown, present in the registry,
+	 * within the effort ceiling, and holding a usable key. Shared by the forward
+	 * walk, the cycle pass, and the turn-boundary climb so all three honour
+	 * identical eligibility rules.
+	 *
+	 * `exclude` is a set of flap keys the pass must not land on, and `maxStrikes`
+	 * caps how flap-prone a candidate may be — the climb sets it because a climb is
+	 * opportunistic and pays a provider-session reset, while the cycle pass leaves
+	 * it open because its alternative is failing the turn outright.
+	 *
+	 * `failedMessage` is the assistant turn being recovered: it is excluded when
+	 * looking back for the newest assistant response (whose Anthropic thinking
+	 * signatures a same-provider switch cannot re-sign) and it is the message the
+	 * context-fit check subtracts, since the retry drops it before resending. The
+	 * turn-boundary climb passes `undefined` — no turn is being retried there, so
+	 * nothing is dropped and the newest assistant response is the live one.
+	 */
+	async #applyFirstEligibleRetryFallback(
+		role: string,
 		currentSelector: string,
-		failedMessage: AssistantMessage,
-		options?: { pinFallback?: boolean },
+		failedMessage: AssistantMessage | undefined,
+		candidates: RetryFallbackSelector[],
+		options?: {
+			pinFallback?: boolean;
+			exclude?: ReadonlySet<string>;
+			maxStrikes?: number;
+			requireUsageHealth?: boolean;
+		},
 	): Promise<boolean> {
-		const role = this.#activeRetryFallback?.role ?? this.resolveRetryFallbackRole(currentSelector);
-		if (!role) return false;
-
 		const ceiling = this.#host.thinkingLevelCeiling();
 		const latestAssistant = this.#host.agent.state.messages.findLast(
 			(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
 		);
-		for (const selector of this.findRetryFallbackCandidates(role, currentSelector)) {
+		for (const selector of candidates) {
 			if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
+			const flapKey = this.#retryFallbackFlapKey(selector.raw);
+			if (options?.exclude?.has(flapKey)) continue;
+			if (options?.maxStrikes !== undefined) {
+				const record = this.#retryFallbackFlaps.get(flapKey);
+				if (record !== undefined && record.strikes > options.maxStrikes) continue;
+			}
 			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 			if (!candidate) continue;
@@ -1626,10 +1816,112 @@ export class TurnRecovery {
 			if (!this.#host.contextFitsModel(candidate, failedMessage)) continue;
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
+			if (options?.requireUsageHealth === true && !(await this.#isRetryFallbackCandidateUsageHealthy(candidate))) {
+				continue;
+			}
+			this.#markRetryFallbackProbe(selector.raw);
 			return this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
 		}
 
 		return false;
+	}
+
+	/**
+	 * Whether a candidate's coding-plan quota looks usable, when the session opted
+	 * into usage-aware fallback.
+	 *
+	 * The usage-aware preflight runs immediately after a turn-boundary climb and
+	 * moves the session forward again — with `pinFallback` — if it lands on a
+	 * depleted account. That pin permanently disables both future climbs and the
+	 * primary restore, so a climb has to consult the same signal the preflight
+	 * will. Fails open: unknown quota is not a reason to refuse a climb, and this
+	 * reads the same ~5-minute-cached report the preflight uses.
+	 */
+	async #isRetryFallbackCandidateUsageHealthy(candidate: Model): Promise<boolean> {
+		try {
+			const health = await this.#host.modelRegistry.authStorage.getModelUsageHealth(candidate.provider, {
+				modelId: candidate.id,
+				sessionId: this.#host.sessionId(),
+				baseUrl: candidate.baseUrl,
+				reserveFraction: this.#host.settings.get("retry.usageReservePct") / 100,
+			});
+			return health.state !== "depleted" && health.state !== "reserve";
+		} catch (error) {
+			logger.debug("Retry fallback usage health check failed open", {
+				provider: candidate.provider,
+				model: candidate.id,
+				error: String(error),
+			});
+			return true;
+		}
+	}
+
+	/** Whether backward chain movement is permitted at all for this session. */
+	#retryFallbackReversalAllowed(): boolean {
+		if (!this.#retryFallbackCycleEnabled()) return false;
+		// `never` means never: a user who pinned the session to its fallback must not
+		// be walked back up the chain by either backward move.
+		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+		// A pinned latch (classifier refusal, usage-aware quota move) deliberately
+		// leaves the model it fled unsuppressed, so reversing would hand the turn
+		// straight back to it.
+		return this.#activeRetryFallback?.pinned !== true;
+	}
+
+	async #tryRetryModelFallback(
+		currentSelector: string,
+		failedMessage: AssistantMessage,
+		options?: { pinFallback?: boolean },
+	): Promise<boolean> {
+		const role = this.#activeRetryFallback?.role ?? this.resolveRetryFallbackRole(currentSelector);
+		if (!role) return false;
+
+		const pinFallback = options?.pinFallback;
+		if (
+			await this.#applyFirstEligibleRetryFallback(
+				role,
+				currentSelector,
+				failedMessage,
+				this.findRetryFallbackCandidates(role, currentSelector),
+				{ pinFallback },
+			)
+		) {
+			return true;
+		}
+		// This turn's own refusal pins as well: the model it is fleeing is still
+		// unsuppressed at this point.
+		if (pinFallback === true || !this.#retryFallbackReversalAllowed()) return false;
+		if (this.#retryFallbackBackwardHops >= RETRY_FALLBACK_MAX_BACKWARD_HOPS_PER_BURST) return false;
+
+		// The forward tail is spent, so reverse. Most preferred first, which means
+		// the configured primary before any intermediate entry — but the primary is
+		// reached through the restore path, the one place that knows the effort level
+		// the chain replaced and that clears the latch on arrival. Everything after
+		// it is an ordinary chain hop.
+		if (await this.#maybeRestoreRetryFallbackPrimary()) {
+			this.#retryFallbackBackwardHops += 1;
+			return true;
+		}
+		const applied = await this.#applyFirstEligibleRetryFallback(
+			role,
+			currentSelector,
+			failedMessage,
+			this.findRetryFallbackPrecedingCandidates(role, currentSelector),
+			{ pinFallback, exclude: this.#retryFallbackReversalExclusions(currentSelector) },
+		);
+		if (applied) this.#retryFallbackBackwardHops += 1;
+		return applied;
+	}
+
+	/**
+	 * Flap keys a backward move must not land on: the model we are on right now,
+	 * and the configured primary, which only the restore path may install.
+	 */
+	#retryFallbackReversalExclusions(currentSelector: string): ReadonlySet<string> {
+		const exclusions = new Set([this.#retryFallbackFlapKey(currentSelector)]);
+		const originalSelector = this.#activeRetryFallback?.originalSelector;
+		if (originalSelector) exclusions.add(this.#retryFallbackFlapKey(originalSelector));
+		return exclusions;
 	}
 
 	/** The active model when it is a Fireworks Fast (`-fast`) variant, else undefined. */
@@ -1728,6 +2020,13 @@ export class TurnRecovery {
 		return true;
 	}
 
+	/**
+	 * Return to the configured primary once its cooldown lapsed, restoring the
+	 * effort level the chain replaced. Resolves true when it took ownership of the
+	 * decision — the latch was live, reversal is permitted and the primary is the
+	 * right target — regardless of whether the switch itself succeeded, so the
+	 * cycle pass can tell "handled" from "look at the intermediate entries".
+	 */
 	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
 		if (!this.#activeRetryFallback) return false;
 		if (this.#activeRetryFallback.pinned) return false;
@@ -1758,7 +2057,10 @@ export class TurnRecovery {
 			}
 			return false;
 		}
-		if (this.isRetryFallbackSelectorSuppressed(originalSelector)) return false;
+		if (this.isRetryFallbackSelectorSuppressed(originalSelector)) {
+			await this.#maybeClimbRetryFallbackChain(currentSelector);
+			return false;
+		}
 
 		const resolvedPrimary = resolveModelOverride(
 			[originalSelector.raw],
@@ -1780,11 +2082,61 @@ export class TurnRecovery {
 		// attribution in that window would see the restored primary still tagged
 		// as fallback-served.
 		this.clearActiveRetryFallback();
+		// Arm strike accounting: this is a deliberate re-probe, so if the primary
+		// fails again its next cooldown doubles instead of repeating at the same
+		// period.
+		this.#markRetryFallbackProbe(originalSelector.raw);
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
 		return true;
+	}
+
+	/**
+	 * Partial revert: the configured primary is still cooling down, so climb to
+	 * the best intermediate chain entry that is not — `codex → kimi` while `opus`
+	 * stays blocked. Without this a session rides the last chain entry until the
+	 * primary itself frees up, which on a weekly cap can be days.
+	 *
+	 * The latch stays in place (we are still on a fallback), so a later boundary
+	 * can climb again or restore the primary outright. Five properties keep this
+	 * from turning into a seesaw:
+	 *
+	 * - it only runs between turns. The restore check also fires before each
+	 *   scheduled continue inside a live retry burst, and a burst owns its own
+	 *   backward budget; letting the climb in there reproduces exactly the
+	 *   A→B→A→B the hop cap exists to prevent whenever the provider's window is
+	 *   longer than the dwell;
+	 * - movement is strictly toward the primary, and descending again costs a real
+	 *   request failure, which escalates that entry's cooldown on the way down;
+	 * - the primary is excluded — restoring it belongs to the caller, which owns
+	 *   the effort-level restore a mid-chain hop must not perform;
+	 * - an entry that has failed two re-probes is left alone until the flap ledger
+	 *   forgets it, so a chronically capped middle entry stops costing a wasted
+	 *   request and two provider-session resets every turn;
+	 * - a dwell window keeps a climb from firing in the same breath as the descent
+	 *   that stranded us.
+	 */
+	async #maybeClimbRetryFallbackChain(currentSelector: string): Promise<void> {
+		const active = this.#activeRetryFallback;
+		if (!active) return;
+		if (!this.#retryFallbackReversalAllowed()) return;
+		// `#retryAttempt` is the in-flight proxy: non-zero from the moment a burst
+		// enters #handleRetryableError until it settles, including across the
+		// continues the burst schedules. It can also stay latched when a turn is
+		// aborted mid-stream (no settle path resets it), which costs at most one
+		// skipped climb and heals on the next good turn — a skipped climb is the
+		// safe direction to fail.
+		if (this.#retryAttempt > 0) return;
+		if (Date.now() - this.#lastRetryFallbackAppliedAtMs < RETRY_FALLBACK_CLIMB_DWELL_MS) return;
+		const candidates = this.findRetryFallbackPrecedingCandidates(active.role, currentSelector);
+		if (candidates.length === 0) return;
+		await this.#applyFirstEligibleRetryFallback(active.role, currentSelector, undefined, candidates, {
+			exclude: this.#retryFallbackReversalExclusions(currentSelector),
+			maxStrikes: RETRY_FALLBACK_CLIMB_MAX_STRIKES,
+			requireUsageHealth: this.#host.settings.get("retry.usageAwareFallback") === true,
+		});
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
@@ -1816,6 +2168,11 @@ export class TurnRecovery {
 		const classifierRefusal = this.isClassifierRefusal(message);
 
 		const generation = this.#host.promptGeneration();
+		// A fresh retry burst gets a fresh backward-hop budget. The "reverse
+		// direction at most once" rule that keeps cycling from oscillating is scoped
+		// to one burst, not to the session, so a long agentic run can still climb
+		// back toward its primary again an hour and forty turns later.
+		if (this.#retryAttempt === 0) this.#retryFallbackBackwardHops = 0;
 		this.#retryAttempt++;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
