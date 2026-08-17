@@ -1137,3 +1137,61 @@ describe("AuthStorage usage cache: org-only identity stability", () => {
 		}
 	});
 });
+
+describe("AuthStorage usage cache: Token Plan multi-account identity", () => {
+	/** Report cache keys AuthStorage wrote for one Token Plan credential. */
+	async function reportKeysFor(token: string, cookie: string): Promise<string[]> {
+		const store = makeStore([
+			{
+				id: 1,
+				provider: "alibaba-token-plan",
+				credential: { type: "api_key", key: serializeAlibabaTokenPlanCredential(token, cookie) },
+				disabledCause: null,
+			},
+		]);
+		const usageFetch = Object.assign(
+			(input: string | URL | Request) =>
+				Promise.resolve(
+					String(input).endsWith("/tool/user/info.json")
+						? Response.json({ code: "200", data: { secToken: "sec-token" } })
+						: Response.json({
+								data: { DataV2: { data: { data: { per5HourPercentage: 10, per1WeekPercentage: 20 } } } },
+							}),
+				),
+			{ preconnect: fetch.preconnect },
+		);
+		const storage = new AuthStorage(store, {
+			usageFetch,
+			usageProviderResolver: provider =>
+				provider === "alibaba-token-plan" ? alibabaTokenPlanUsageProvider : undefined,
+		});
+		await storage.reload();
+		try {
+			const reports = (await storage.fetchUsageReports()) ?? [];
+			expect(reports.filter(report => report.provider === "alibaba-token-plan")).toHaveLength(1);
+			return [...store.cache.keys()].filter(key => key.startsWith("usage_cache:report:")).sort();
+		} finally {
+			storage.close();
+		}
+	}
+
+	it("keeps one identity when the session cookie is re-pasted", async () => {
+		// The console Cookie expires and gets re-pasted routinely. Hashing the
+		// whole credential blob would mint a fresh identity each time, orphaning
+		// this account's usage history and the ranking signal built on it.
+		const before = await reportKeysFor("sk-sp-alpha", "session=old");
+		const after = await reportKeysFor("sk-sp-alpha", "session=fresh");
+
+		expect(before).not.toHaveLength(0);
+		expect(after).toEqual(before);
+	});
+
+	it("gives each Token Plan key its own identity so accounts stay load balanced", async () => {
+		const alpha = await reportKeysFor("sk-sp-alpha", "session=one");
+		const beta = await reportKeysFor("sk-sp-beta", "session=two");
+
+		expect(alpha).not.toHaveLength(0);
+		expect(beta).not.toHaveLength(0);
+		expect(beta).not.toEqual(alpha);
+	});
+});

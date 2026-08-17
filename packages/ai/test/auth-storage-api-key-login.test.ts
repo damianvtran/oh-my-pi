@@ -188,6 +188,39 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(store.getApiKey("kagi")).toBe("new-key-456");
 	});
 
+	it("blocks an exhausted key until the reset the provider stated, not the short default", async () => {
+		if (!store || !authStorage) throw new Error("test setup failed");
+		const P = "alibaba-token-plan";
+		for (const key of ["sk-sp-first0000000", "sk-sp-second000000"]) {
+			store.upsertAuthCredentialForProvider(P, { type: "api_key", key, source: "login" });
+		}
+		await authStorage.reload();
+
+		const session = "session-quota-backoff";
+		const first = await authStorage.getApiKey(P, session);
+		expect(first).toBeDefined();
+
+		// Alibaba states the reopen time in prose rather than a Retry-After header.
+		const resetAt = new Date(Date.now() + 4 * 60 * 60 * 1000);
+		const pad = (value: number) => String(value).padStart(2, "0");
+		const stamp =
+			`${pad(resetAt.getUTCMonth() + 1)}-${pad(resetAt.getUTCDate())} ` +
+			`${pad(resetAt.getUTCHours())}:${pad(resetAt.getUTCMinutes())}:${pad(resetAt.getUTCSeconds())}`;
+		const switched = await authStorage.rotateSessionCredential(P, session, {
+			error: Object.assign(
+				new Error(`Your token-plan 5-hour quota has been exhausted. The quota will reset at ${stamp} UTC.`),
+				{ status: 429 },
+			),
+			apiKey: first,
+		});
+		expect(switched).toBe(true);
+
+		// The exhausted key must still be blocked well past the 60s default.
+		const blocks = authStorage.listCredentialBlocks(store.listAuthCredentials(P).map(row => row.id));
+		const longest = Math.max(0, ...blocks.map(block => block.blockedUntilMs - Date.now()));
+		expect(longest).toBeGreaterThan(3 * 60 * 60 * 1000);
+	});
+
 	it("reuses the stored api-key row when ollama-cloud re-login returns the same key", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
 

@@ -1799,7 +1799,7 @@ export class SelectorController {
 		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
 		const accounts = toLogoutAccounts(providerId, authStorage.listStoredCredentials(providerId), {
 			activeIdentity: authStorage.getOAuthAccountIdentity(providerId, this.ctx.session.sessionId),
-			activeApiKey: authStorage.getCredentialOrigin(providerId)?.kind === "api_key",
+			activeCredentialId: authStorage.getActiveCredentialId(providerId, this.ctx.session.sessionId),
 		});
 		if (accounts.length === 0) {
 			const source = authStorage.describeCredentialSource(providerId, this.ctx.session.sessionId);

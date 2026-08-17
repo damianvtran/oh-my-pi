@@ -109,3 +109,46 @@ describe("extractRetryHint – body text parsing", () => {
 		expect(extractRetryHint(undefined, "")).toBeUndefined();
 	});
 });
+
+describe("extractRetryHint – absolute reset instants", () => {
+	/** `MM-DD HH:MM:SS` in UTC, as Alibaba's Token Plan 429 states it. */
+	function utcStamp(at: Date, withYear = false): string {
+		const p = (value: number) => String(value).padStart(2, "0");
+		const date = `${p(at.getUTCMonth() + 1)}-${p(at.getUTCDate())}`;
+		const time = `${p(at.getUTCHours())}:${p(at.getUTCMinutes())}:${p(at.getUTCSeconds())}`;
+		return withYear ? `${at.getUTCFullYear()}-${date} ${time}` : `${date} ${time}`;
+	}
+
+	it("parses the Token Plan year-less reset stamp", () => {
+		const target = new Date(Date.now() + 3 * 60 * 60 * 1000);
+		const body = `Your token-plan 1-week quota has been exhausted. The quota will reset at ${utcStamp(target)} UTC.`;
+		const hint = extractRetryHint(undefined, body);
+		expect(hint).toBeDefined();
+		// Within a second of three hours — the clock moves between the two calls.
+		expect(Math.abs(hint! - 3 * 60 * 60 * 1000)).toBeLessThan(1000);
+	});
+
+	it("parses an explicit-year reset stamp", () => {
+		const target = new Date(Date.now() + 26 * 60 * 60 * 1000);
+		const hint = extractRetryHint(undefined, `quota will reset at ${utcStamp(target, true)} UTC`);
+		expect(hint).toBeDefined();
+		expect(Math.abs(hint! - 26 * 60 * 60 * 1000)).toBeLessThan(1000);
+	});
+
+	it("rolls a already-passed year-less stamp forward to next year", () => {
+		// A stamp one day in the past resolves to the same date next year, which
+		// exceeds the sanity ceiling and is rejected rather than returned negative.
+		const past = new Date(Date.now() - 24 * 60 * 60 * 1000);
+		expect(extractRetryHint(undefined, `quota will reset at ${utcStamp(past)} UTC`)).toBeUndefined();
+	});
+
+	it("ignores an impossible calendar date instead of normalising it", () => {
+		expect(extractRetryHint(undefined, "quota will reset at 02-31 09:25:00 UTC")).toBeUndefined();
+	});
+
+	it("leaves a relative hint in the same body taking precedence", () => {
+		const target = new Date(Date.now() + 5 * 60 * 60 * 1000);
+		const body = `try again in 30s; quota will reset at ${utcStamp(target)} UTC`;
+		expect(extractRetryHint(undefined, body)).toBe(30_000);
+	});
+});

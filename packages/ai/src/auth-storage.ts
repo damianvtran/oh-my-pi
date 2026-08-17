@@ -8,7 +8,10 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
-import { $env, $envExact, extractRetryHint, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { $env, $envExact, extractRetryHint, getAgentDbPath, getDbBusyTimeoutMs, logger } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
@@ -2824,6 +2827,22 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Row id of the credential this session is currently pinned to, or
+	 * `undefined` before the session has resolved one.
+	 *
+	 * Works for both credential types, which is what api-key providers need:
+	 * {@link getOAuthAccountIdentity} can only identify an OAuth row, so a
+	 * provider holding several API keys had no way to say which one is live.
+	 * Read-only — it never advances selection or refreshes anything.
+	 */
+	getActiveCredentialId(provider: string, sessionId?: string): number | undefined {
+		const sticky = this.#getSessionCredential(provider, sessionId);
+		if (!sticky) return undefined;
+		const stored = this.#getStoredCredentials(provider)[sticky.index];
+		return stored?.credential.type === sticky.type ? stored.id : undefined;
+	}
+
+	/**
 	 * Get the OAuth account identity for a provider, preferring the credential that
 	 * is session-sticky for `sessionId`. This is a read-only lookup for display and
 	 * metadata paths; it does not refresh tokens, rank usage, or advance selection.
@@ -2993,7 +3012,15 @@ export class AuthStorage {
 		if (!hasStableIdentifier) {
 			const secret = credential.apiKey?.trim() || credential.refreshToken?.trim() || credential.accessToken?.trim();
 			if (secret) {
-				parts.push(`secret:${Bun.hash(secret).toString(16)}`);
+				// A QwenCloud Token Plan credential is a JSON blob whose `cookie`
+				// member is a session-lived console cookie the user re-pastes
+				// whenever it expires. Hashing the whole blob would mint a new
+				// identity on every re-paste, orphaning that account's usage
+				// history and cache entry — and with them the signal that
+				// usage-based ranking uses to load balance several Token Plan
+				// accounts. The `sk-sp-` token is the stable part, so key off it.
+				const stable = parseAlibabaTokenPlanCredential(secret)?.token ?? secret;
+				parts.push(`secret:${Bun.hash(stable).toString(16)}`);
 			} else {
 				parts.push("anonymous");
 			}
@@ -6221,6 +6248,13 @@ export class AuthStorage {
 		const error = options?.error;
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+		// The provider usually states when the window reopens — as a Retry-After
+		// header folded into the message, or as prose ("The quota will reset at
+		// 07-27 09:25:00 UTC", which is all Alibaba's Token Plan gives). Without
+		// it the credential is blocked for the short default and re-probed long
+		// before it can succeed, burning one doomed request per key per minute
+		// while a multi-key pool is genuinely exhausted.
+		const retryAfterMs = extractRetryHint(undefined, message);
 		if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
@@ -6275,7 +6309,7 @@ export class AuthStorage {
 			provider,
 			providerKey,
 			sessionCredential.index,
-			Date.now() + AuthStorage.#defaultBackoffMs,
+			Date.now() + (retryAfterMs ?? AuthStorage.#defaultBackoffMs),
 		);
 
 		if (target && AIError.isInvalidatedOAuthTokenError(error)) {

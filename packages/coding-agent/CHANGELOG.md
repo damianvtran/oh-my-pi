@@ -407,6 +407,14 @@
 - Fixed install.sh falsely reporting success on musl-based systems (such as Alpine Linux) when the binary fails to start; the installer now smoke-tests the binary, exits non-zero on failure, and provides remediation steps.
 - Fixed Codex config.toml discovery incorrectly importing MCP servers that are configured with enabled = false.
 - Fixed bash.patterns allow rules rejecting valid commands when quoted arguments contained shell metacharacters (such as Cargo benchmark regex filters).
+- Fixed the `/logout` credential picker being unusable for a provider holding several API keys. Every api-key row was labelled `API key #<row id>` with no way to tell one key from another, and the active marker was computed provider-wide (`getCredentialOrigin(...).kind === "api_key"`), so **all** rows showed as active. Rows are now labelled with the key's prefix and last four characters (`sk-sp-…WxYz`), a JSON-enveloped credential is unwrapped so the key is masked rather than the envelope, the detail line carries the region for a credential pinned to a non-default endpoint, and exactly the row the session is pinned to is marked active. The secret itself never reaches the picker.
+- Fixed extension/custom/hook tool wrappers stripping schema methods off `parameters`: `applyToolProxy` bound every callable property, and binding a schema (a plain function carrying `toJsonSchema`/`assert`) dropped those properties, breaking wire-schema detection and crashing the status-line token estimator with `JSON.stringify(schema) === undefined`. Prototype methods are still bound; own data properties and schema callables now pass through untouched.
+- Fixed bug where `agent()` calls in eval cells ignored turn cancellation and continued running indefinitely
+- Fixed the built-in `tail` printing `tail: Broken pipe` and failing when a downstream pipeline reader exited early (e.g. `tail -c N file.jsonl | jq …` with jq aborting on a parse error); it now exits silently with 141 (128+SIGPIPE) like a real tail, in every output path including `--follow`.
+- Fixed the in-process ps shell builtin rejecting common procps/BSD format specifiers (`ps -o tpgid,...` failed with `unknown output format specifier`); added `tpgid`, `pri`, `flags`, real/effective user and group columns, `wchan`, fault counters, `sz`, and the STAT `+` foreground flag.
+### Fixed
+
+- Fixed `install.sh` reporting success (exit 0) for a musl binary that cannot start: the installer now smoke-runs the downloaded binary and, on failure, prints the captured error plus the `apk add libstdc++ libgcc` remediation for musl targets and exits non-zero. Documented the Alpine/musl runtime requirement in the README ([#7545](https://github.com/can1357/oh-my-pi/issues/7545)).
 
 ## [17.2.6] - 2026-08-03
 
