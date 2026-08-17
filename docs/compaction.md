@@ -429,6 +429,7 @@ From `settings-schema.ts`:
 - `compaction.remoteStreamingV2Enabled` = `true`
 - `compaction.v2RetainedMessageBudget` = `64000`
 - `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; a positive fixed token limit takes precedence over percentage, and otherwise the reserve-based threshold is used.
+- `compaction.maxThresholdTokens` = `-1`; when positive, an absolute ceiling applied on top of whichever mode above produced the threshold. It only ever lowers the trigger, so a window whose own threshold already sits below the ceiling is untouched. Use it — not `thresholdTokens` — to bound session size across models with different context windows: a fixed `thresholdTokens` is clamped up to `contextWindow - 1` on any window smaller than it, which pushes the trigger past the reserve-based default and into provider overflow, whereas a ceiling of `600000` gives a 1M model a 600k trigger and leaves a 200k model on its usual 170k
 - `compaction.idleEnabled` = `false`
 - `compaction.idleThresholdTokens` = `200000`
 - `compaction.idleTimeoutSeconds` = `300`
