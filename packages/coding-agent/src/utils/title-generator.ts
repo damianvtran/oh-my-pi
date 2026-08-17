@@ -13,8 +13,8 @@ import {
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { isConPTYHosted } from "@oh-my-pi/pi-tui";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { isConPTYHosted } from "@oh-my-pi/pi-tui";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 

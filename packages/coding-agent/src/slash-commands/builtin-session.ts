@@ -9,6 +9,7 @@ import {
 	RECENT_CHANGELOG_ENTRY_LIMIT,
 	renderChangelogEntries,
 } from "../utils/changelog";
+import { describeWakeSchedule, type WakeSchedule } from "../wake/schedule";
 import { formatTokenCount, refreshStatusLine, shortDetail } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
 import {
@@ -26,7 +27,6 @@ import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
-import { describeWakeSchedule, type WakeSchedule } from "../wake/schedule";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 
 async function handleUsageResetCommand(

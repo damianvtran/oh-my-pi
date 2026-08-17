@@ -286,7 +286,6 @@ import {
 } from "./launch-completion";
 import {
 	type BashExecutionMessage,
-	buildReplanTitleContext,
 	buildSessionThemeContext,
 	CHECKPOINT_ACTIVE_REMINDER_TYPE,
 	type CustomMessage,

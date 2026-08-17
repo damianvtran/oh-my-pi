@@ -283,7 +283,9 @@ describe("job renderer task-result preview", () => {
 					details: {
 						op: "jobs" as const,
 						jobs: [jobsData[0]!],
-						agents: [{ id: "Worker", parentId: "Main", activity: "grepping the tree", ageMs: 65_000, live: true }],
+						agents: [
+							{ id: "Worker", parentId: "Main", activity: "grepping the tree", ageMs: 65_000, live: true },
+						],
 					},
 				};
 				const component = hubToolRenderer.renderResult(
