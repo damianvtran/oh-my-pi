@@ -52,6 +52,7 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
+import { backfillSessionIndex, createSessionSignalMatcher } from "../../session/session-search-signals";
 import { FileSessionStorage } from "../../session/session-storage";
 import { type LogoutAccount, toLogoutAccounts } from "../../slash-commands/helpers/logout";
 import {
@@ -1473,10 +1474,10 @@ export class SelectorController {
 				this.ctx.sessionManager.getCwd(),
 				this.ctx.sessionManager.getSessionDir(),
 			);
-			const historyStorage = this.ctx.historyStorage;
-			const historyMatcher = historyStorage
-				? (query: string) => historyStorage.matchingSessionIds(query)
-				: undefined;
+			const signalMatcher = createSessionSignalMatcher(this.ctx.historyStorage);
+			// Index whatever the listing already knows about sessions that predate
+			// the keyword index, so the very first search after an upgrade has data.
+			backfillSessionIndex(sessions);
 			onSelectSession = session => this.handleResumeSession(session.path);
 			selectorOptions = {
 				onDelete: async (session: SessionInfo) => {
@@ -1494,8 +1495,12 @@ export class SelectorController {
 						);
 					}
 				},
-				historyMatcher,
-				loadAllSessions: () => SessionManager.listAll(),
+				signalMatcher,
+				loadAllSessions: async () => {
+					const all = await SessionManager.listAll();
+					backfillSessionIndex(all);
+					return all;
+				},
 			};
 		}
 

@@ -575,6 +575,16 @@
 - Fixed the live Ask dialog crashing the whole session with a `replaceTabs` TypeError when a question reached `AskDialogComponent` without a string `question` field; questions are now normalized at dialog entry, mirroring the transcript renderer ([#7211](https://github.com/can1357/oh-my-pi/issues/7211)).
 - Fixed Codex web search collapsing backend errors to `Codex error (): Unknown error`; the SSE error parser now preserves the backend code and message from top-level, nested `error`, and `response.error` envelopes ([#7200](https://github.com/can1357/oh-my-pi/issues/7200)).
 
+### Added
+
+- Added a session keyword index (session-index.db) recording each session's title, harvested topic terms, and a theme blurb, plus a Porter-stemmed search over it that the resume picker blends into its ranking; existing sessions are backfilled in the background the first time the picker opens, and rows whose title has since drifted from the session file are re-indexed rather than left describing a name the picker no longer shows.
+
+### Changed
+
+- Session auto-titling now names the conversation's overall theme instead of its latest turn: the refresh samples the whole trajectory (head and tail) rather than the last six turns, is anchored on the existing title so a stable subject keeps a stable name, and is growth-gated so a session is re-titled at most five times instead of on every todo replan. The refresh budget is bound to the session and recovered from its transcript, so switching sessions with `/resume`, `/new`, `/fork` or `/tree` neither renames a long, well-named transcript on its first replan nor leaves the session it switched to unable to be titled at all.
+- The trajectory sample sent to the naming model is now bounded per turn rather than as one string, so every sampled turn, its role tags and the `<elided/>` gap marker survive on a real session instead of the middle of the sample being cut away; a long opening request is given the budget its short neighbours do not use.
+- Rewrote resume-search ranking as a field-weighted relevance score (title above project directory above first message above transcript body), with prompt-history and keyword-index hits contributing weight rather than reordering results wholesale, so an exact title match is no longer displaced by a newer session that merely mentions the query.
+
 ## [17.2.2] - 2026-07-31
 
 ### Added

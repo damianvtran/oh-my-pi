@@ -286,6 +286,7 @@ import {
 import {
 	type BashExecutionMessage,
 	buildReplanTitleContext,
+	buildSessionThemeContext,
 	CHECKPOINT_ACTIVE_REMINDER_TYPE,
 	type CustomMessage,
 	type CustomMessagePayload,
@@ -323,8 +324,9 @@ import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import { type BranchSummaryEntry, type NewSessionOptions, TITLE_CHANGE_ENTRY_TYPE } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
+import { SessionIndexStorage } from "./session-index-storage";
 import {
 	COMPACTION_CHECK_NONE,
 	createCodexCompactionContext as createMaintenanceCodexCompactionContext,
@@ -336,6 +338,7 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
+import { harvestSessionTheme, shouldRefreshSessionTheme, THEME_TITLE_SYSTEM_PROMPT } from "./session-titling";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -546,7 +549,21 @@ export class AgentSession {
 	 * async queue-insertion race.
 	 */
 	readonly #cancelledWakeScheduleKeys = new Set<string>();
-	#replanTitleRefreshInFlight: Promise<void> | undefined = undefined;
+	#themeTitleRefreshInFlight: Promise<void> | undefined = undefined;
+	/**
+	 * Turn count at the last accepted automatic title, and how many theme
+	 * refreshes have been spent. Both feed {@link shouldRefreshSessionTheme}.
+	 *
+	 * Scoped to {@link AgentSession.#themeBudgetSessionId}, not to the process:
+	 * one AgentSession outlives the session loaded into it, so these are
+	 * re-seeded from the transcript whenever the manager moves to another one.
+	 * See {@link AgentSession.#syncThemeBudget}.
+	 */
+	#lastTitledTurnCount = 0;
+	#themeRefreshCount = 0;
+	/** Session the two counters above were seeded for; undefined until the first
+	 *  titling decision. */
+	#themeBudgetSessionId: string | undefined;
 	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
 	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
 	 *  the session cwd changes. */
@@ -982,6 +999,12 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
+		// Keep the picker's keyword index in step with the session's name from the
+		// one place every rename passes through. Nine call sites set a session name
+		// (auto titling, /rename, RPC, ACP, extensions, task executor, imports);
+		// subscribing here is the only way to catch all of them, and the callback
+		// set dies with the manager, which shares this session's lifetime.
+		this.sessionManager.onSessionNameChanged(() => this.#recordSessionIndex());
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
@@ -2816,7 +2839,7 @@ export class AgentSession {
 					this.#streamingEditGuard.invalidate(editedPath);
 				}
 				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
-					this.#scheduleReplanTitleRefresh();
+					this.#scheduleThemeTitleRefresh();
 				}
 				if (toolName === "todo" && isError) {
 					const errorText = content.find(part => part.type === "text")?.text;
@@ -6634,11 +6657,122 @@ export class AgentSession {
 		});
 	}
 
-	#buildReplanTitleContext(): string {
-		return buildReplanTitleContext(this.agent.state.messages);
+	/**
+	 * Mirror this session's searchable attributes into the picker's keyword index.
+	 *
+	 * The picker's in-memory corpus is the first 4KB of the session file, so a
+	 * session is findable by roughly its opening turns and nothing else. This
+	 * writes the two things that actually identify it later: its current name,
+	 * and — when a theme pass has just sampled the whole trajectory — the topic
+	 * vocabulary and a blurb harvested from that sample. Fields left undefined
+	 * are preserved by the upsert, so a rename never erases harvested keywords
+	 * and a theme pass never erases a user's chosen name.
+	 *
+	 * Skipped for sessions with no file on disk: they cannot be resumed from the
+	 * picker, so an index row for them would only be a row that never matches
+	 * anything reachable.
+	 */
+	#recordSessionIndex(theme?: { keywords: string; summary: string }): void {
+		if (!this.sessionManager.getSessionFile()) return;
+		const title = this.sessionName;
+		if (!title && !theme) return;
+		try {
+			SessionIndexStorage.open().upsert({
+				sessionId: this.sessionId,
+				cwd: this.sessionManager.getCwd(),
+				title,
+				keywords: theme?.keywords,
+				summary: theme?.summary,
+			});
+		} catch (error) {
+			// Being unfindable later is a worse session, not a broken one.
+			logger.warn("session-index: record failed", {
+				sessionId: this.sessionId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
-	#scheduleReplanTitleRefresh(): void {
+	/** Convertible user/assistant turns, the unit {@link shouldRefreshSessionTheme} gates on. */
+	#titleTurnCount(): number {
+		let turns = 0;
+		for (const message of this.agent.state.messages) {
+			if (message.role === "user" || message.role === "assistant") turns++;
+		}
+		return turns;
+	}
+
+	/**
+	 * Re-seed the theme refresh budget when the manager has moved to a different
+	 * session, and report the turn count under the budget now in force.
+	 *
+	 * `/resume`, `/new`, `/fork` and `/tree` rebind the manager in place instead
+	 * of constructing a new AgentSession, so a budget kept purely in process
+	 * fields belongs to whichever session happened to run first. Both directions
+	 * are wrong: a session resumed into a spent budget can never be re-titled,
+	 * and one resumed into a fresh budget has `lastTitledTurnCount` 0, which
+	 * collapses the growth gate to {@link THEME_REFRESH_MIN_TURNS} and renames a
+	 * long, well-named transcript on its very first replan.
+	 *
+	 * Seeded by replaying the transcript rather than from zero, because both
+	 * counters describe history the resumed session already carries and that
+	 * history is written down. The automatic renames recorded on the branch are
+	 * the refreshes already spent — less the first, which named the session
+	 * rather than refreshing it — so {@link THEME_REFRESH_MAX} bounds renames
+	 * per session instead of per process, and the turns preceding the last of
+	 * them are where growth is measured from.
+	 *
+	 * Three things the replay is deliberately careful about:
+	 *
+	 * - It walks `getBranch()`, not `getEntries()`. Entries are append-only and
+	 *   a rewind only moves the leaf, so `getEntries()` still holds every
+	 *   abandoned path — counting those would charge the session for renames on
+	 *   a branch the user walked away from.
+	 * - The seed is clamped to the live turn count. The counter it is compared
+	 *   against comes from `agent.state.messages`, which is the *resolved*
+	 *   context: compaction collapses everything before its cut point into a
+	 *   single summary message, so an uncompacted branch walk can name a
+	 *   baseline far beyond anything the live count will reach, and the gate
+	 *   would never open again.
+	 * - An untitled session gets a zeroed budget outright. It has no name to
+	 *   protect and therefore no budget to recover, and `/tree` hands a branched
+	 *   session its parent's `title_change` entries alongside a header carrying
+	 *   no title — those renames belong to the parent.
+	 *
+	 * One spend is invisible here: {@link AgentSession.#refreshSessionTheme}
+	 * also charges a refresh when the model returns the current name verbatim,
+	 * and that writes no entry because nothing was renamed. A resumed session
+	 * therefore recovers renames rather than model calls, and may spend one
+	 * extra call on its first replan after a resume.
+	 */
+	#syncThemeBudget(): number {
+		const turnCount = this.#titleTurnCount();
+		const sessionId = this.sessionManager.getSessionId();
+		if (this.#themeBudgetSessionId === sessionId) return turnCount;
+		this.#themeBudgetSessionId = sessionId;
+		if (!this.sessionName) {
+			this.#themeRefreshCount = 0;
+			this.#lastTitledTurnCount = 0;
+			return turnCount;
+		}
+		let autoTitles = 0;
+		let turnsSoFar = 0;
+		let turnsAtLastAutoTitle = 0;
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type === "message") {
+				const role = entry.message.role;
+				if (role === "user" || role === "assistant") turnsSoFar++;
+			} else if (entry.type === TITLE_CHANGE_ENTRY_TYPE && entry.source === "auto") {
+				autoTitles++;
+				turnsAtLastAutoTitle = turnsSoFar;
+			}
+		}
+		this.#themeRefreshCount = Math.max(0, autoTitles - 1);
+		this.#lastTitledTurnCount = Math.min(turnsAtLastAutoTitle, turnCount);
+		return turnCount;
+	}
+
+	#scheduleThemeTitleRefresh(): void {
 		// Headless subagent sessions have no operator-visible title, so a todo-init
 		// replan refresh only burns a tiny-model call whose result lands in JSONL
 		// and is never shown (issue #5910). In an interactive host the operator can
@@ -6646,32 +6780,56 @@ export class AgentSession {
 		// its session name — so keep the refresh there and only skip subagents when
 		// no focusable UI exists (print/RPC/ACP/eval/SDK/CI).
 		if (this.#agentKind === "sub" && !isInteractiveHost()) return;
-		if (this.#replanTitleRefreshInFlight) return;
+		if (this.#themeTitleRefreshInFlight) return;
 		if (!this.settings.get("title.refreshOnReplan")) return;
 		if (this.sessionManager.titleSource === "user") return;
-		const context = this.#buildReplanTitleContext();
+		// A todo replan is the trigger, not the licence. Every replan used to
+		// rename the session; now the transcript has to have grown enough since
+		// the last name for a new one to plausibly describe something different —
+		// measured against the budget of the session actually loaded right now,
+		// which is not necessarily the one this AgentSession started with.
+		const turnCount = this.#syncThemeBudget();
+		if (
+			!shouldRefreshSessionTheme({
+				turnCount,
+				lastTitledTurnCount: this.#lastTitledTurnCount,
+				refreshCount: this.#themeRefreshCount,
+			})
+		) {
+			return;
+		}
+		const context = buildSessionThemeContext(this.agent.state.messages, {
+			currentTitle: this.sessionName,
+		});
 		if (!context) return;
+		// Harvest before the model call, not after it: the attributes are derived
+		// from the trajectory sample, not from the title, so a provider outage or
+		// a disabled tiny model must not also cost the session its findability.
+		this.#recordSessionIndex(harvestSessionTheme(context));
 		const sessionId = this.sessionManager.getSessionId();
-		const refresh = this.#refreshTitleAfterReplan(context, sessionId)
+		const refresh = this.#refreshSessionTheme(context, sessionId, turnCount)
 			.catch(err => {
-				logger.warn("title-generator: replan refresh failed", {
+				logger.warn("title-generator: theme refresh failed", {
 					sessionId,
 					error: err instanceof Error ? err.message : String(err),
 				});
 			})
 			.finally(() => {
-				if (this.#replanTitleRefreshInFlight === refresh) {
-					this.#replanTitleRefreshInFlight = undefined;
+				if (this.#themeTitleRefreshInFlight === refresh) {
+					this.#themeTitleRefreshInFlight = undefined;
 				}
 			});
-		this.#replanTitleRefreshInFlight = refresh;
+		this.#themeTitleRefreshInFlight = refresh;
 	}
 
 	/**
 	 * Start automatic title generation when the session and input are eligible.
 	 * Interactive and CLI-bootstrap submissions share this gate so every first
 	 * user message persists titles with the same environment, signal, and local
-	 * extension-command policy.
+	 * extension-command policy. A collab guest prompt (the phone portal, the web
+	 * client, another TUI) reaches the same gate through the host, so a session
+	 * driven entirely from a phone is named exactly like one driven from the
+	 * keyboard.
 	 */
 	maybeStartTitleGeneration(firstMessage: string, onStart?: () => void): void {
 		const extensionCommandSpace = firstMessage.indexOf(" ");
@@ -6684,11 +6842,30 @@ export class AgentSession {
 			return;
 		}
 		onStart?.();
+		// Seed the keyword index from the opening request even if titling fails or
+		// is unavailable: an unnamed session is still one the user needs to find.
+		this.#recordSessionIndex(harvestSessionTheme(firstMessage));
+		// The session this title describes. The manager is rebound in place by
+		// /resume, /new, /fork and /tree, and a process-scoped collab room follows
+		// it, so a phone prompt and a desktop session switch are independent
+		// actors racing this generation window. Without the check the title lands
+		// on whatever session happens to be loaded when the worker answers.
+		// Mirrors #refreshSessionTheme.
+		const sessionId = this.sessionManager.getSessionId();
 		this.generateTitle(firstMessage)
 			.then(async title => {
+				if (this.sessionManager.getSessionId() !== sessionId) return;
 				// Re-check after generation so concurrent attempts cannot replace
 				// the first title that completed.
 				if (title && !this.sessionName) {
+					// This naming is where the session's refresh budget starts, so it
+					// owns the budget outright: stamping the id here stops a later
+					// refresh from re-seeding `lastTitledTurnCount` off a transcript
+					// that has grown since, which would raise the bar for the first
+					// re-title for no reason. `sessionId` is re-verified above.
+					this.#themeBudgetSessionId = sessionId;
+					this.#themeRefreshCount = 0;
+					this.#lastTitledTurnCount = this.#titleTurnCount();
 					await this.sessionManager.setSessionName(title, "auto");
 				}
 			})
@@ -6703,28 +6880,48 @@ export class AgentSession {
 
 	/**
 	 * Generate an automatic session title tied to this session's lifecycle.
-	 * Input and replan callers share the signal so disposal cancels provider and
+	 * Input and theme callers share the signal so disposal cancels provider and
 	 * local-worker requests instead of leaving background inference alive.
+	 *
+	 * `themeContext` selects the prompt: a bare first message is titled by the
+	 * stock single-message prompt, while a `<chat>` trajectory needs the theme
+	 * prompt that knows what `<current-title>` and `<elided/>` mean. A user's
+	 * TITLE_SYSTEM.md override still wins over both — it is the whole point of
+	 * the override, and re-appending our wording would fight it.
 	 */
-	generateTitle(firstMessage: string): Promise<string | null> {
+	generateTitle(message: string, options?: { themeContext?: boolean }): Promise<string | null> {
+		const systemPrompt = this.#titleSystemPrompt ?? (options?.themeContext ? THEME_TITLE_SYSTEM_PROMPT : undefined);
 		return generateSessionTitle(
-			firstMessage,
+			message,
 			this.#modelRegistry,
 			this.settings,
 			this.sessionId,
 			this.model,
 			provider => this.agent.metadataForProvider(provider),
-			this.#titleSystemPrompt,
+			systemPrompt,
 			this.#titleGenerationAbortController.signal,
 		);
 	}
 
-	async #refreshTitleAfterReplan(context: string, sessionId: string): Promise<void> {
-		const title = await this.generateTitle(context);
+	async #refreshSessionTheme(context: string, sessionId: string, turnCount: number): Promise<void> {
+		const title = await this.generateTitle(context, { themeContext: true });
 		if (!title) return;
 		if (this.sessionManager.getSessionId() !== sessionId) return;
 		if (!this.settings.get("title.refreshOnReplan")) return;
 		if (this.sessionManager.titleSource === "user") return;
+		// Spend a refresh even when the model returned the current name verbatim
+		// (the anchored prompt's success case). The budget bounds model calls, not
+		// renames, and re-asking the same question on the next replan would put
+		// the drift back on a slower clock.
+		//
+		// Stamp the owner with them. A generation started before a session switch
+		// resolves after it — the guard above only proves the manager is back on
+		// `sessionId`, not that it never left — and an unstamped write would leave
+		// these counters attributed to whichever session was loaded in between.
+		this.#themeBudgetSessionId = sessionId;
+		this.#lastTitledTurnCount = turnCount;
+		this.#themeRefreshCount++;
+		if (title === this.sessionName) return;
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 		await setSessionName.call(this.sessionManager, title, "auto", "replan");
 	}

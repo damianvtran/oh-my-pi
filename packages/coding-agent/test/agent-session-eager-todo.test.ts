@@ -12,6 +12,7 @@ import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { THEME_REFRESH_MAX } from "@oh-my-pi/pi-coding-agent/session/session-titling";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools";
 import { setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
@@ -336,13 +337,18 @@ describe("AgentSession eager todo enforcement", () => {
 		await recreateSession({ "title.refreshOnReplan": true });
 		session.setTitleSystemPrompt(customPrompt);
 		await session.setSessionName("Old auto title", "auto");
+		// Four convertible turns: the theme refresh is growth-gated, so a session
+		// this short would otherwise be too new to have earned a re-title.
 		const priorUser: AgentMessage = {
 			role: "user",
 			content: "rework parser diagnostics",
-			timestamp: Date.now() - 1,
+			timestamp: Date.now() - 2,
 		};
 		session.agent.appendMessage(priorUser);
 		session.sessionManager.appendMessage(priorUser);
+		const priorAssistant = createAssistantMessage("Looking at the parser recovery path.");
+		session.agent.appendMessage(priorAssistant);
+		session.sessionManager.appendMessage(priorAssistant);
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "stop",
 			content: [{ type: "text", text: "<title>plan/parser-diagnostics</title>" }],
@@ -363,6 +369,234 @@ describe("AgentSession eager todo enforcement", () => {
 		const request = completeSimpleMock.mock.calls[0]?.[1] as { systemPrompt?: string[] } | undefined;
 		expect(request?.systemPrompt?.[0]).toBe(customPrompt);
 		expect(request?.systemPrompt?.[1]).toContain("<title>");
+	});
+
+	it("does not re-title a session whose transcript has barely grown since the last replan", async () => {
+		// The reported bug: every todo replan renamed the session, so a session
+		// that replans each turn was renamed each turn, to whatever had just been
+		// typed. A two-turn session has not earned a re-title.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("Old auto title", "auto");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		await session.prompt("replan parser diagnostics");
+
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe("Old auto title");
+	});
+
+	it("anchors the theme refresh on the opening turn and the current title", async () => {
+		// The refresh must see what the session was originally about, not just its
+		// tail: a tail-only window is why the name used to track the cursor.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("Rework parser diagnostics", "auto");
+		const opening: AgentMessage = {
+			role: "user",
+			content: "rework parser diagnostics end to end",
+			timestamp: Date.now() - 5,
+		};
+		session.agent.appendMessage(opening);
+		session.sessionManager.appendMessage(opening);
+		// Enough filler that a last-few-turns window would have dropped the opening.
+		for (let i = 0; i < 8; i++) {
+			const filler = createAssistantMessage(`intermediate step ${i} touching unrelated-file-${i}.ts`);
+			session.agent.appendMessage(filler);
+			session.sessionManager.appendMessage(filler);
+		}
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Rework parser diagnostics</title>" }],
+		} as never);
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		await session.prompt("now check unrelated-file-9.ts");
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		const request = completeSimpleMock.mock.calls[0]?.[1] as { messages?: Array<{ content?: string }> } | undefined;
+		const titleInput = request?.messages?.[0]?.content ?? "";
+		expect(titleInput).toContain("rework parser diagnostics end to end");
+		expect(titleInput).toContain("<current-title>\nRework parser diagnostics\n</current-title>");
+		expect(titleInput).toContain("<elided/>");
+		expect(session.sessionManager.getSessionName()).toBe("Rework parser diagnostics");
+	});
+
+	it("does not spend a resumed session's first replan on a rename it has not earned", async () => {
+		// The budget used to arrive at 0 for a transcript this AgentSession did not
+		// title itself, so the growth gate collapsed to its four-turn floor and a
+		// long session with a name the user recognized was renamed on the first
+		// replan after every resume. It has to be read back off the transcript.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.sessionManager.newSession();
+		session.agent.state.messages.length = 0;
+		for (let i = 0; i < 10; i++) {
+			const turn = createAssistantMessage(`established work step ${i}`);
+			session.agent.appendMessage(turn);
+			session.sessionManager.appendMessage(turn);
+		}
+		// Named ten turns in, exactly as the original run would have left it.
+		await session.setSessionName("Established session name", "auto");
+		for (let i = 0; i < 2; i++) {
+			const turn = createAssistantMessage(`post-resume step ${i}`);
+			session.agent.appendMessage(turn);
+			session.sessionManager.appendMessage(turn);
+		}
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		await session.prompt("replan parser diagnostics");
+
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe("Established session name");
+	});
+
+	it("reads the refresh budget off the live branch, not off abandoned ones", async () => {
+		// Entries are append-only and a rewind only moves the leaf, so a replay
+		// over every entry ever written charges the session for renames on a path
+		// the user walked away from — and measures growth against turns that are
+		// no longer in the context the gate compares with, which pins it shut.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.sessionManager.newSession();
+		session.agent.state.messages.length = 0;
+		const opening = createAssistantMessage("opening step on the kept path");
+		session.agent.appendMessage(opening);
+		const branchPoint = session.sessionManager.appendMessage(opening);
+		await session.setSessionName("Kept path name", "auto");
+		// A long, separately-titled path that is then abandoned.
+		for (let i = 0; i < 20; i++) {
+			session.sessionManager.appendMessage(createAssistantMessage(`abandoned step ${i}`));
+		}
+		await session.setSessionName("Abandoned path name", "auto");
+		session.sessionManager.branch(branchPoint);
+		// Back on the kept path, which has grown well past its own naming point.
+		for (let i = 0; i < 8; i++) {
+			const turn = createAssistantMessage(`kept path step ${i}`);
+			session.agent.appendMessage(turn);
+			session.sessionManager.appendMessage(turn);
+		}
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Kept path renamed</title>" }],
+		} as never);
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan the kept path"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		const renamed = waitForSessionName("Kept path renamed");
+		await session.prompt("replan the kept path");
+		await renamed;
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the per-session refresh cap after a session switch", async () => {
+		// The cap is the reason a long-running session's name eventually stops
+		// moving. Reconstructing it from the transcript is only worth anything if
+		// a spent cap survives the switch — zeroing the counters would pass every
+		// other test here and silently restore unbounded renaming.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.sessionManager.newSession();
+		session.agent.state.messages.length = 0;
+		// One naming plus THEME_REFRESH_MAX refreshes: the budget is spent.
+		for (let i = 0; i <= THEME_REFRESH_MAX; i++) {
+			await session.setSessionName(`Auto name ${i}`, "auto");
+		}
+		for (let i = 0; i < 40; i++) {
+			const turn = createAssistantMessage(`step ${i}`);
+			session.agent.appendMessage(turn);
+			session.sessionManager.appendMessage(turn);
+		}
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		await session.prompt("replan parser diagnostics");
+
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+		expect(session.sessionManager.getSessionName()).toBe(`Auto name ${THEME_REFRESH_MAX}`);
+	});
+
+	it("does not carry one session's spent refresh budget into the next", async () => {
+		// The same rebinding in the other direction: the counters outlived the
+		// session that earned them, so a session switched into after a busy one
+		// inherited its high-water mark and could never be re-titled at all.
+		await recreateSession({ "title.refreshOnReplan": true });
+		await session.setSessionName("First session name", "auto");
+		for (let i = 0; i < 10; i++) {
+			const turn = createAssistantMessage(`first session step ${i}`);
+			session.agent.appendMessage(turn);
+			session.sessionManager.appendMessage(turn);
+		}
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>First session renamed</title>" }],
+		} as never);
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan parser diagnostics"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+		const firstRename = waitForSessionName("First session renamed");
+		await session.prompt("replan parser diagnostics");
+		await firstRename;
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+
+		// Switch sessions the way /new does: same AgentSession, new session id.
+		await session.sessionManager.newSession();
+		session.agent.state.messages.length = 0;
+		await session.setSessionName("Second session name", "auto");
+		for (let i = 0; i < 6; i++) {
+			const turn = createAssistantMessage(`second session step ${i}`);
+			session.agent.appendMessage(turn);
+			session.sessionManager.appendMessage(turn);
+		}
+		completeSimpleMock.mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Second session renamed</title>" }],
+		} as never);
+		scriptedResponses = [
+			createToolCallAssistantMessage("todo", {
+				op: "init",
+				list: [{ phase: "Parser", items: ["Replan second session"] }],
+			}),
+			createAssistantMessage("todo initialized"),
+		];
+
+		const secondRename = waitForSessionName("Second session renamed");
+		await session.prompt("replan the second session");
+		await secondRename;
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(session.sessionManager.getSessionName()).toBe("Second session renamed");
 	});
 
 	it("does not refresh todo-init titles when the current title is user-authored", async () => {
@@ -419,13 +653,17 @@ describe("AgentSession eager todo enforcement", () => {
 		try {
 			await recreateSession({ "title.refreshOnReplan": true }, { agentKind: "sub" });
 			await session.setSessionName("Old auto title", "auto");
+			// Four convertible turns: see the growth gate note above.
 			const priorUser: AgentMessage = {
 				role: "user",
 				content: "rework parser diagnostics",
-				timestamp: Date.now() - 1,
+				timestamp: Date.now() - 2,
 			};
 			session.agent.appendMessage(priorUser);
 			session.sessionManager.appendMessage(priorUser);
+			const priorAssistant = createAssistantMessage("Looking at the parser recovery path.");
+			session.agent.appendMessage(priorAssistant);
+			session.sessionManager.appendMessage(priorAssistant);
 			const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 				stopReason: "stop",
 				content: [{ type: "text", text: "<title>Parser diagnostics replan</title>" }],

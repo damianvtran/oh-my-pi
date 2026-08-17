@@ -60,7 +60,19 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 }
 
 const EPHEMERAL_REPLY_MAX_BYTES = 4096;
-const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
+
+/**
+ * Turns taken from the start of the conversation. The first convertible turn is
+ * the anchor: it is what the session was opened to do, and it is the only turn
+ * that reliably states the subject rather than a step within it.
+ */
+export const THEME_CONTEXT_HEAD_TURNS = 3;
+/**
+ * Turns taken from the end, so a genuine change of subject is still visible.
+ * Deliberately small relative to the head: the tail refines the theme, it does
+ * not define it.
+ */
+export const THEME_CONTEXT_TAIL_TURNS = 4;
 
 /**
  * Removes replay-bound provider state before reparenting an assistant message
@@ -111,17 +123,37 @@ export function dedupeEphemeralReply(text: string): string {
 	return result;
 }
 
-/** Builds the recent user/assistant context supplied to title regeneration. */
-export function buildReplanTitleContext(messages: AgentMessage[]): string {
+/**
+ * Builds the whole-trajectory context supplied to session theme titling.
+ *
+ * Samples the head and the tail instead of the last N turns. A tail-only window
+ * is precisely why the auto title used to chase the newest message: by turn 40
+ * the opening request — the one message that says what the session is about —
+ * had scrolled out of the window entirely, leaving the model to name whatever
+ * file was open at that moment.
+ *
+ * Head and tail are deduplicated by position and kept in conversation order, so
+ * a short conversation yields each turn exactly once. When turns fall between
+ * the two halves the gap is marked, because two disjoint fragments presented as
+ * adjacent read as an abrupt topic switch and invite exactly the drift this
+ * sampler exists to prevent.
+ */
+export function buildSessionThemeContext(messages: AgentMessage[], options?: { currentTitle?: string }): string {
 	const turns: TitleConversationTurn[] = [];
-	for (let i = messages.length - 1; i >= 0 && turns.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
-		const message = messages[i];
-		if (!message) continue;
+	for (const message of messages) {
 		const turn = titleConversationTurnFromMessage(message);
 		if (turn) turns.push(turn);
 	}
-	turns.reverse();
-	return formatTitleConversationContext(turns);
+	if (turns.length === 0) return "";
+	const headEnd = Math.min(THEME_CONTEXT_HEAD_TURNS, turns.length);
+	const tailStart = Math.max(headEnd, turns.length - THEME_CONTEXT_TAIL_TURNS);
+	const sampled = [...turns.slice(0, headEnd), ...turns.slice(tailStart)];
+	return formatTitleConversationContext(sampled, {
+		currentTitle: options?.currentTitle,
+		// Indexes into `sampled`: the head occupies [0, headEnd), so the seam sits
+		// after its last turn. Undefined when nothing was dropped.
+		elidedAfter: tailStart > headEnd ? headEnd - 1 : undefined,
+	});
 }
 
 /**

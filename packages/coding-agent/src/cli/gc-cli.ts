@@ -8,6 +8,7 @@ import {
 	getBlobsDir,
 	getHistoryDbPath,
 	getModelDbPath,
+	getSessionIndexDbPath,
 	getSessionsDir,
 	getStatsDbPath,
 	readLines,
@@ -15,6 +16,7 @@ import {
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
+import { SessionIndexStorage } from "../session/session-index-storage";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
@@ -626,6 +628,18 @@ async function cleanupHistoryRowsForArchivedSessions(
 		result.ftsRebuilt = cleanup.ftsRebuilt;
 	} catch (error) {
 		result.errors.push(`history cleanup: ${errorMessage(error)}`);
+	}
+
+	// The keyword index is keyed by the same session IDs, so an archived session
+	// would otherwise keep matching in the picker and resolve to a file that is
+	// no longer there.
+	try {
+		const indexDbPath = getSessionIndexDbPath(options.agentDir);
+		if (await pathExists(indexDbPath)) {
+			SessionIndexStorage.open(indexDbPath).prune([...cleanupIds]);
+		}
+	} catch (error) {
+		result.errors.push(`session index cleanup: ${errorMessage(error)}`);
 	}
 }
 

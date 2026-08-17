@@ -67,6 +67,17 @@ const SESSION_LIST_PARALLEL_THRESHOLD = 64;
 const SESSION_LIST_MAX_WORKERS = 16;
 
 /**
+ * Windows read by {@link readSessionSearchCorpus}. Twenty-four times the
+ * listing prefix, because this runs once per session for the lifetime of the
+ * keyword index rather than on every listing, and a 4KB head does not reach
+ * the first user message on a real session. The corpus cap then bounds what
+ * reaches the keyword extractor regardless of how much of the window parsed.
+ */
+const SESSION_INDEX_PREFIX_BYTES = 98_304;
+const SESSION_INDEX_SUFFIX_BYTES = 98_304;
+const SESSION_INDEX_CORPUS_MAX_CHARS = 32_768;
+
+/**
  * Memoizes {@link scanSessionFile} results keyed by stat identity so listing
  * refreshes (resume picker opens, startup recent-sessions, cross-project
  * scans) skip the open+read+parse for unchanged files. The `statSync` still
@@ -477,6 +488,59 @@ async function scanSessionFile(
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Read a session's conversation text for keyword indexing, over a much larger
+ * window than the listing scan uses.
+ *
+ * {@link SESSION_LIST_PREFIX_BYTES} is 4KB, which on a real session is consumed
+ * by the title slot, the header, and the session-init entries before the first
+ * message is reached — so `SessionInfo.allMessagesText` is routinely empty and
+ * the picker has nothing but the title to match on. That is affordable for a
+ * scan that runs over every session on every listing; it is not the right
+ * budget for a one-time-per-session index build, which is what this feeds.
+ *
+ * Reads a head and a tail window for the same reason session titling samples
+ * head and tail: the opening turns say what the session is about and the
+ * closing ones say where it ended up. Everything between is skipped rather than
+ * streamed, so cost stays bounded no matter how large the file grew.
+ */
+export async function readSessionSearchCorpus(file: string, storage: SessionStorage): Promise<string> {
+	let content: string;
+	let suffix: string;
+	try {
+		[content, suffix] = await storage.readTextSlices(file, SESSION_INDEX_PREFIX_BYTES, SESSION_INDEX_SUFFIX_BYTES);
+	} catch {
+		return "";
+	}
+	const parts: string[] = [];
+	let budget = SESSION_INDEX_CORPUS_MAX_CHARS;
+	// A window boundary almost always lands mid-line; `parseJsonlLenient` drops
+	// the truncated record rather than throwing, which is exactly the tolerance
+	// this needs.
+	for (const slice of [content, suffix]) {
+		if (!slice || budget <= 0) continue;
+		for (const entry of parseJsonlLenient<Record<string, unknown>>(slice)) {
+			if (budget <= 0) break;
+			const record = entry as { type?: string; message?: Message; shortSummary?: string };
+			let text = "";
+			if (record.type === "compaction" && typeof record.shortSummary === "string") {
+				text = record.shortSummary;
+			} else if (
+				record.type === "message" &&
+				record.message &&
+				(record.message.role === "user" || record.message.role === "assistant")
+			) {
+				text = extractTextFromContent(record.message.content);
+			}
+			if (!text) continue;
+			const clipped = text.length > budget ? text.slice(0, budget) : text;
+			parts.push(clipped);
+			budget -= clipped.length;
+		}
+	}
+	return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
 async function collectSessionsFromFileStride(
