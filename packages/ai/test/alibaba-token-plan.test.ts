@@ -124,7 +124,7 @@ describe("QwenCloud Token Plan login", () => {
 
 		expect(requestedUrl).toBe("https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/models");
 		expect(authRequests).toEqual([
-			{ url: "https://www.aliyun.com/benefit/scene/tokenplan", instructions: expect.any(String) },
+			{ url: "https://bailian.console.aliyun.com/cn-beijing?tab=plan", instructions: expect.any(String) },
 		]);
 		expect(cookiePrompt).toContain("bailian-cs.console.aliyun.com/data/api.json");
 		expect(urls.filter(url => url.includes("t.qwencloud.com"))).toEqual([]);

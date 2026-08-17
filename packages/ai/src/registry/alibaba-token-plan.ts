@@ -13,7 +13,7 @@ import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
 const INTERNATIONAL_AUTH_URL = "https://home.qwencloud.com/billing/subscription/token-plan-individual";
-const CHINA_AUTH_URL = "https://www.aliyun.com/benefit/scene/tokenplan";
+const CHINA_AUTH_URL = "https://bailian.console.aliyun.com/cn-beijing?tab=plan";
 
 /**
  * QwenCloud management-OAuth surface. Mirrors the endpoints the official
