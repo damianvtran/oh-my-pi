@@ -492,6 +492,33 @@ export class SessionManager {
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
 
+	/**
+	 * Session-id observers: invoked after the active session id changes —
+	 * resume, new/clear, fork, branch/tree navigation, and the rollback that
+	 * restores a failed switch.
+	 *
+	 * A set rather than a single slot because two independent features follow
+	 * the process across a switch and neither may silently unhook the other: a
+	 * room whose lifetime is the *process* (`collab.autoStart`) rebinds so an
+	 * in-session `/resume` does not drop remote access until the next launch,
+	 * and the cmux resume binding re-points the surface at the session the user
+	 * actually ended up in (see `cmux/resume.ts`).
+	 *
+	 * Fired mid-transition (the manager has adopted the new session before
+	 * AgentSession finishes restoring model/thinking/messages), so an observer
+	 * that reads more than the id MUST defer its work — see
+	 * `CollabHost.#scheduleSessionRebind`.
+	 */
+	readonly #sessionIdListeners = new Set<(sessionId: string) => void>();
+
+	/** Subscribe to {@link #sessionIdListeners}; call the result to unsubscribe. */
+	onSessionIdChanged(listener: (sessionId: string) => void): () => void {
+		this.#sessionIdListeners.add(listener);
+		return () => {
+			this.#sessionIdListeners.delete(listener);
+		};
+	}
+
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
 	#turnOutputBaseline = 0;
@@ -1084,10 +1111,30 @@ export class SessionManager {
 		}
 	}
 
+	/**
+	 * Single funnel for every session-id write, so {@link onSessionIdChanged}
+	 * subscribers cannot be bypassed by a transition that assigns the field
+	 * directly. Only a genuine change notifies, and an observer's failure is
+	 * contained twice over: a broken tap must never abort a session switch, and
+	 * must never cost a healthy tap its notification either — hence the
+	 * per-listener try rather than one around the loop.
+	 */
+	#setSessionId(sessionId: string): void {
+		if (this.#sessionId === sessionId) return;
+		this.#sessionId = sessionId;
+		for (const listener of this.#sessionIdListeners) {
+			try {
+				listener(sessionId);
+			} catch (err) {
+				logger.warn("session-id hook failed", { error: String(err) });
+			}
+		}
+	}
+
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
-		this.#sessionId = options?.sessionId ?? mintSessionId();
+		this.#setSessionId(options?.sessionId ?? mintSessionId());
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -1144,7 +1191,7 @@ export class SessionManager {
 	#applyEntries(header: SessionHeader, entries: SessionEntry[]): void {
 		this.#header = header;
 		this.#entries = entries;
-		this.#sessionId = header.id;
+		this.#setSessionId(header.id);
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = header.timestamp;
@@ -1429,7 +1476,7 @@ export class SessionManager {
 		this.#clearDiskError();
 
 		const timestamp = nowIso();
-		this.#sessionId = mintSessionId();
+		this.#setSessionId(mintSessionId());
 		this.#sessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
 		this.#header = {
 			type: "session",
@@ -2564,7 +2611,7 @@ export class SessionManager {
 
 		this.#header = header;
 		this.#entries = [...entriesToKeep, ...labels];
-		this.#sessionId = newSessionId;
+		this.#setSessionId(newSessionId);
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = timestamp;

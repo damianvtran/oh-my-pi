@@ -30,6 +30,7 @@ import { resolveRenderer } from "./resolve";
 import { thinkToolRenderer } from "./think";
 import { todoToolRenderer } from "./todo";
 import { createVibeToolRenderer } from "./vibe";
+import { wakeToolRenderer } from "./wake";
 import { writeToolRenderer } from "./write";
 import { setXdevRendererLookup } from "./xdev";
 
@@ -118,6 +119,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	},
 	think: thinkToolRenderer as ToolRenderer,
 	todo: todoToolRenderer as ToolRenderer,
+	wake: wakeToolRenderer as ToolRenderer,
 	github: githubToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,

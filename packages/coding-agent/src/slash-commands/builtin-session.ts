@@ -8,7 +8,7 @@ import {
 	RECENT_CHANGELOG_ENTRY_LIMIT,
 	renderChangelogEntries,
 } from "../utils/changelog";
-import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
+import { formatTokenCount, refreshStatusLine, shortDetail } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
 import { handleMcpAcp } from "./helpers/mcp";
@@ -18,6 +18,7 @@ import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session
 import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
+import { describeWakeSchedule, type WakeSchedule } from "../wake/schedule";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 
 async function handleUsageResetCommand(
@@ -135,6 +136,19 @@ async function handleSessionPinCommand(
 		return;
 	}
 	await output(`Pinned ${account.label} to this session for ${providerName}.`);
+}
+
+/**
+ * Clip for the prompt preview in a `/wake` row. A wake message can run to
+ * `MAX_WAKE_MESSAGE_CHARS`, and a listing that wraps for pages is unusable for
+ * the one thing it exists for: reading off the id to cancel.
+ */
+const WAKE_LIST_MESSAGE_LIMIT = 72;
+
+/** One `/wake` listing row: handle, schedule summary, clipped prompt. */
+function formatWakeScheduleLine(schedule: WakeSchedule, nowMs: number): string {
+	const preview = shortDetail(schedule.message, WAKE_LIST_MESSAGE_LIMIT);
+	return `  ${schedule.id}  ${describeWakeSchedule(schedule, nowMs)} — ${preview}`;
 }
 
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -587,6 +601,53 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMCPCommand(command.text);
+		},
+	},
+	{
+		name: "wake",
+		description: "List or cancel scheduled wakeups",
+		acpDescription: "List or cancel scheduled wakeups",
+		inlineHint: "[cancel <id|all>]",
+		subcommands: [{ name: "cancel", description: "Cancel a scheduled wakeup", usage: "<id|all>" }],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const schedules = runtime.session.getWakeSchedules();
+			const { verb, rest } = parseSubcommand(command.args);
+			if (!verb) {
+				if (schedules.length === 0) {
+					await runtime.output("No scheduled wakeups. The agent creates them with the wake tool.");
+					return commandConsumed();
+				}
+				const now = Date.now();
+				const lines = schedules.map(schedule => formatWakeScheduleLine(schedule, now));
+				await runtime.output(`Scheduled wakeups:\n${lines.join("\n")}`);
+				return commandConsumed();
+			}
+			if (verb !== "cancel") {
+				return usage(`Unknown /wake subcommand "${verb}". Usage: /wake [cancel <id|all>]`, runtime);
+			}
+			const target = rest.trim();
+			if (!target) return usage("Usage: /wake cancel <id|all>", runtime);
+			if (schedules.length === 0) return usage("No scheduled wakeups to cancel.", runtime);
+			if (target.toLowerCase() === "all") {
+				const purged = runtime.session.setWakeSchedules([]);
+				await runtime.output(
+					`Cancelled ${schedules.length} scheduled wakeup${schedules.length === 1 ? "" : "s"} and purged ${purged} queued ${purged === 1 ? "delivery" : "deliveries"}.`,
+				);
+				return commandConsumed();
+			}
+			// Ids are the handles the agent itself uses (`w1`, `w2`), so an
+			// unknown one is almost always a typo — echo the live set rather
+			// than a bare rejection.
+			const doomed = schedules.find(schedule => schedule.id === target);
+			if (!doomed) {
+				return usage(`No scheduled wakeup "${target}". Active: ${schedules.map(s => s.id).join(", ")}`, runtime);
+			}
+			const purged = runtime.session.setWakeSchedules(schedules.filter(schedule => schedule.id !== doomed.id));
+			await runtime.output(
+				`Cancelled wakeup ${doomed.id} and purged ${purged} queued ${purged === 1 ? "delivery" : "deliveries"} — ${preview}`,
+			);
+			return commandConsumed();
 		},
 	},
 ];

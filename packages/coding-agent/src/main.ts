@@ -30,6 +30,7 @@ import { buildInitialMessage } from "./cli/initial-message";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
+import { CmuxResumeBinder } from "./cmux/resume";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
@@ -59,6 +60,7 @@ import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
+import { ensureMobileServices } from "./mobile/ensure";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
@@ -87,6 +89,7 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
+import { startCollabHosting } from "./slash-commands/builtin-collaboration";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
@@ -547,6 +550,61 @@ async function runInteractiveMode(
 	// `/join` so collab guards and error rendering stay in one place.
 	if (joinLink !== undefined) {
 		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
+	}
+
+	// Tell cmux how to bring this session back if the machine restarts under it.
+	// Independent of collab and of the mobile stack: it costs one background
+	// subprocess and it is the difference between a restored workspace resuming
+	// this session and coming back as an empty shell. Re-asserted on every
+	// session change, so `/resume` and friends move the binding with the process.
+	const cmuxResume = new CmuxResumeBinder();
+	cmuxResume.register(mode.sessionManager.getSessionId());
+	mode.sessionManager.onSessionIdChanged(sessionId => cmuxResume.register(sessionId));
+
+	// `collab.autoStart` hosts the session without a keystroke, so a local
+	// supervisor can discover and drive every running omp (see
+	// `collab.publishLink`). Placed after the `omp join` dispatch above, and
+	// skipped whenever a join was requested at all: a process launched to join
+	// someone else's room must never end up hosting its own, including when the
+	// join failed.
+	// Matched against the schema values rather than `!== "off"`: merged settings
+	// are not validated against the enum, so a typo or an unquoted YAML boolean
+	// would otherwise fall through to a full-control room the user never asked for.
+	// `followSession` keeps the room bound to the *process*: an in-session
+	// `/resume`, `/new`, `/fork` or `/tree` re-welcomes guests into the session
+	// the user moved to, so remote access does not silently end at the first
+	// resume and require a relaunch.
+	const autoStartCollab = settings.get("collab.autoStart");
+	const autoStartHosts = autoStartCollab === "full" || autoStartCollab === "view";
+
+	// Heal the mobile services (`omp mobile install`) if they are installed,
+	// enabled and not answering. launchd handles the normal cases; this covers a
+	// crash still inside `ThrottleInterval`, a manual `bootout`, and the first
+	// launch after an install. Unawaited and self-silencing: a relay that will not
+	// start costs phone access, never this session. Gated on the same
+	// `autoStartHosts` check, because a session that hosts no room has nothing for
+	// the portal to aggregate.
+	const mobileServicesHealed = autoStartHosts ? ensureMobileServices().catch(() => {}) : undefined;
+
+	if (autoStartHosts && joinLink === undefined && !mode.collabHost && !mode.collabGuest) {
+		// Hosting waits for that heal rather than racing it. A session launched at
+		// login — a cmux workspace restored after a reboot, a Terminal window
+		// macOS reopened — routinely starts before launchd has the relay
+		// listening, and a first connect that fails is terminal: the host
+		// reconnects a connection it *lost*, never one that never opened. The room
+		// is then silently never published and the session is invisible from the
+		// phone until someone types `/collab` into it. Awaiting costs one loopback
+		// probe when the relay is already up, and is the entire fix when it is not.
+		// Still off the critical path: the whole chain is unawaited, so the prompt
+		// appears while this settles.
+		void (async () => {
+			await mobileServicesHealed;
+			await startCollabHosting(mode, {
+				view: autoStartCollab === "view",
+				qr: false,
+				followSession: true,
+			});
+		})().catch(() => {});
 	}
 
 	if (initialMessage !== undefined) {

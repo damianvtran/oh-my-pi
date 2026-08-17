@@ -914,7 +914,7 @@ export class InputController {
 				});
 				// Start titling only after the optimistic row painted, so the local
 				// tiny-title worker's subprocess spawn never blocks the first frame.
-				this.#maybeStartTitleGeneration(text);
+				this.maybeStartTitleGeneration(text);
 
 				this.ctx.onInputCallback(submission);
 			} else {
@@ -929,7 +929,7 @@ export class InputController {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.editor.pendingImages = [];
 				this.ctx.editor.pendingImageLinks = [];
-				this.#maybeStartTitleGeneration(text);
+				this.maybeStartTitleGeneration(text);
 				try {
 					await this.ctx.withLocalSubmission(
 						text,
@@ -974,7 +974,7 @@ export class InputController {
 		);
 	}
 
-	#maybeStartTitleGeneration(text: string): void {
+	maybeStartTitleGeneration(text: string): void {
 		if (this.#isLocalExtensionCommand(text)) {
 			return;
 		}

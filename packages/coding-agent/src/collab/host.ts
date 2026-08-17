@@ -12,7 +12,7 @@
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
 	CollabUiRequest,
@@ -21,6 +21,7 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
+import { INTERNAL_RESUME_PROMPT } from "../mobile/types";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
@@ -30,10 +31,12 @@ import type { SessionEntry as StoredSessionEntry } from "../session/session-entr
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
+import { publishCollabLink, unpublishCollabLink } from "./link-file";
 import {
 	type AgentSnapshot,
 	COLLAB_PROMPT_MESSAGE_TYPE,
 	COLLAB_PROTO,
+	type CollabClientKind,
 	type CollabFrame,
 	type CollabParticipant,
 	type CollabPromptDetails,
@@ -112,12 +115,50 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
  */
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
 /**
+ * Trailing debounce before a session-following room rebinds (see
+ * {@link CollabHost.#scheduleSessionRebind}). One user-visible transition moves
+ * the session id more than once — `/tree` mints a branch session, a failed
+ * resume rolls back to the previous one — and the tap fires while AgentSession
+ * is still restoring model, thinking level and messages. Waiting for the
+ * transition to go quiet means guests are re-welcomed once, with the state the
+ * user actually ended up in.
+ */
+const SESSION_REBIND_DEBOUNCE_MS = 250;
+/**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
  * response (an `undefined` value is a genuine guest cancel); `unavailable`
  * means the collab channel went away (teardown, relay drop) or the request was
  * aborted before any guest answered — callers MUST NOT treat it as a cancel.
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
+
+type HelloFrame = Extract<CollabFrame, { t: "hello" }>;
+
+/**
+ * The mobile portal (`omp mobile serve`) joins every local room as a guest to
+ * aggregate it for a phone, so "someone joined" is the wrong story: nobody
+ * arrived, the session just became reachable from the user's phone.
+ *
+ * Keyed off the declared `client` kind ONLY. The display name is deliberately
+ * not a fallback signal: it is a self-chosen string, so name-matching would let
+ * any guest called "omp-mobile" impersonate the relay — and a notice the user
+ * may act on is worse fabricated than absent. A portal too old to send `client`
+ * simply gets the generic wording.
+ */
+function joinNotice(name: string, canWrite: boolean, client: CollabClientKind | undefined): string {
+	if (client === "mobile-portal") {
+		return canWrite
+			? "Mobile relay registered this session — reachable from your phone"
+			: "Mobile relay registered this session (read-only)";
+	}
+	return `${name} joined the collab session${canWrite ? "" : " (read-only)"}`;
+}
+
+/** Counterpart to {@link joinNotice}: the portal going away un-aggregates the session. */
+function leaveNotice(name: string, client: CollabClientKind | undefined): string {
+	if (client === "mobile-portal") return "Mobile relay disconnected — this session is no longer aggregated";
+	return `${name} left the collab session`;
+}
 
 export class CollabHost {
 	#ctx: InteractiveModeContext;
@@ -129,7 +170,8 @@ export class CollabHost {
 	#writeToken: Uint8Array | null = null;
 	#sessionId = "";
 	#unsubscribe?: () => void;
-	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	/** `client` is remembered only so the leave notice can match the join wording. */
+	#peers = new Map<number, { name: string; canWrite: boolean; client?: CollabClientKind }>();
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
@@ -138,7 +180,28 @@ export class CollabHost {
 	#agentsDebounce: Timer | null = null;
 	#busUnsubscribers: (() => void)[] = [];
 	#registryUnsubscribe?: () => void;
+	/** Detaches the session-id tap; set only while `#followSession` is on. */
+	#sessionIdUnsubscribe?: () => void;
 	#stopped = false;
+	/** Unregisters the postmortem cleanup; set only while a link file is published. */
+	#unregisterLinkFileCleanup?: () => void;
+	/** Rejects a `start()` blocked on the relay handshake; set only for that window. */
+	#abortStart?: (reason: Error) => void;
+	/**
+	 * True for a room whose lifetime is the process rather than the session
+	 * (`collab.autoStart`): it rebinds to whatever session is loaded instead of
+	 * ending when the user resumes, clears, forks or branches. A hand-shared
+	 * `/collab` room keeps the opposite contract — a guest was given access to
+	 * one session and must never be silently moved to another.
+	 */
+	#followSession = false;
+	/** Publication inputs, retained so a rebind can re-publish the record in place. */
+	#relayUrl = "";
+	#publishLink = false;
+	#publishView = false;
+	/** Room start time; stable across rebinds — the room, not the session, started then. */
+	#startedAt = "";
+	#rebindDebounce: Timer | null = null;
 
 	constructor(ctx: InteractiveModeContext) {
 		this.#ctx = ctx;
@@ -208,10 +271,32 @@ export class CollabHost {
 		}
 	}
 
-	async start(relayUrl: string, webUrl = ""): Promise<void> {
+	/**
+	 * `options.view` shares the room read-only: the write token still exists (one
+	 * room, one key pair), it is simply not the link handed out or published.
+	 * `options.publishLink` opts into the `<config-root>/run/collab` discovery
+	 * record; the caller owns that policy decision so config scoping lives beside
+	 * the rest of it in `startCollabHosting`.
+	 *
+	 * `options.followSession` makes the room process-scoped: an in-session
+	 * `/resume`, `/new`, `/fork` or `/tree` rebinds it to the newly loaded
+	 * session instead of ending it (see {@link #scheduleSessionRebind}). Only
+	 * `collab.autoStart` passes it — a room the user hand-shared stays bound to
+	 * the session its guests were invited to.
+	 */
+	async start(
+		relayUrl: string,
+		webUrl = "",
+		options: { view?: boolean; publishLink?: boolean; followSession?: boolean } = {},
+	): Promise<void> {
 		const rawKey = generateRoomKey();
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
+		this.#followSession = options.followSession === true;
+		this.#relayUrl = relayUrl;
+		this.#publishLink = options.publishLink === true;
+		this.#publishView = options.view === true;
+		this.#startedAt = new Date().toISOString();
 		this.#writeToken = writeToken;
 		this.#link = formatCollabLink(relayUrl, roomId, rawKey, writeToken);
 		this.#webLink = formatCollabWebLink(relayUrl, roomId, rawKey, writeToken, webUrl);
@@ -220,6 +305,12 @@ export class CollabHost {
 		const parsed = parseCollabLink(this.#link);
 		if ("error" in parsed) throw new Error(parsed.error);
 		const key = await importRoomKey(rawKey);
+		// Auto-start runs unawaited, so `/collab stop` and `/leave` can reach a host
+		// that is still starting. `#teardown` is `#stopped`-guarded and can only run
+		// once, so without this check the rest of `start()` would reinstall the
+		// session tap, the status segment and the link file on a torn-down host that
+		// nothing can stop again. Re-checked after every await below.
+		if (this.#stopped) throw new Error("collab stopped before the relay handshake completed");
 
 		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
 		this.#socket = socket;
@@ -256,6 +347,7 @@ export class CollabHost {
 			() => firstOpen.reject(new Error("timed out connecting to relay")),
 			CONNECT_TIMEOUT_MS,
 		);
+		this.#abortStart = firstOpen.reject;
 		try {
 			await firstOpen.promise;
 		} catch (err) {
@@ -265,6 +357,12 @@ export class CollabHost {
 			throw err;
 		} finally {
 			clearTimeout(timeout);
+			this.#abortStart = undefined;
+		}
+		if (this.#stopped) {
+			socket.close();
+			this.#socket = null;
+			throw new Error("collab stopped before the relay handshake completed");
 		}
 
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
@@ -284,7 +382,53 @@ export class CollabHost {
 			// guest state promptly (debounce + JSON diff dedupe).
 			this.#scheduleStateBroadcast();
 		};
+		// Session tap: a process-scoped room follows the user across `/resume`,
+		// `/new`, `/fork` and `/tree` instead of dying with the session it was
+		// started on. Installed alongside the entry tap so a single `#teardown`
+		// detaches both.
+		if (this.#followSession) {
+			this.#sessionIdUnsubscribe = this.#ctx.sessionManager.onSessionIdChanged(() => this.#scheduleSessionRebind());
+		}
 		this.#updateStatusSegment();
+		if (this.#publishLink) await this.#publishLinkFile();
+	}
+
+	/**
+	 * Publish the room to `<config-root>/run/collab/<pid>.json` so local
+	 * automation can attach without scraping the TUI.
+	 *
+	 * A room shared read-only publishes only the view links: the write token
+	 * still exists, but a user who chose the read-only share must not have the
+	 * steerable link written to disk behind their back.
+	 *
+	 * The postmortem hook covers the signal paths that never reach
+	 * {@link #teardown} (`/exit`, SIGINT/SIGTERM/SIGHUP, uncaught exception).
+	 * An abrupt exit still leaks the record, which is why consumers treat `pid`
+	 * as a liveness heuristic and the next publish sweeps dead owners. It is
+	 * registered at most once: a rebind re-publishes the same pid's record, and
+	 * a second registration would outlive the `#teardown` that unregisters one.
+	 *
+	 * `startedAt` is the room's start, not the current session's, so a consumer
+	 * that shows uptime does not see it reset every time the user resumes.
+	 */
+	async #publishLinkFile(): Promise<void> {
+		this.#unregisterLinkFileCleanup ??= postmortem.register("collab-link-file", () => unpublishCollabLink());
+		const view = this.#publishView;
+		await publishCollabLink({
+			pid: process.pid,
+			cwd: this.#ctx.sessionManager.getCwd(),
+			sessionId: this.#sessionId,
+			startedAt: this.#startedAt,
+			relayUrl: this.#relayUrl,
+			link: view ? undefined : this.#link,
+			webLink: view ? undefined : this.#webLink,
+			viewLink: this.#viewLink,
+			webViewLink: this.#webViewLink,
+		});
+		// A relay drop during the publish tears the host down and unregisters the
+		// cleanup hook, so the record that lands afterwards would advertise a dead
+		// room under a live pid and never be swept.
+		if (this.#stopped) await unpublishCollabLink();
 	}
 
 	/** Broadcast a goodbye, detach all taps, and close the socket. */
@@ -297,7 +441,16 @@ export class CollabHost {
 	async #teardown(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		// A `start()` still waiting on the handshake would otherwise hang for the
+		// full connect timeout and then report a failure for a room the user has
+		// already stopped. `socket.close()` below cannot settle it: `onClose`
+		// early-returns once `#stopped` is set.
+		this.#abortStart?.(new Error("collab stopped before the relay handshake completed"));
 		this.#ctx.sessionManager.onEntryAppended = undefined;
+		this.#sessionIdUnsubscribe?.();
+		this.#sessionIdUnsubscribe = undefined;
+		clearTimeout(this.#rebindDebounce ?? undefined);
+		this.#rebindDebounce = null;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		for (const unsubscribe of this.#busUnsubscribers) unsubscribe();
@@ -315,14 +468,80 @@ export class CollabHost {
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
+		// Release the slot before the unpublish I/O: while that awaits, anything
+		// reading `ctx.collabHost` would otherwise see a host with no socket and
+		// print a join hint for a room that is already gone.
 		this.#ctx.collabHost = undefined;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
+		if (this.#unregisterLinkFileCleanup) {
+			this.#unregisterLinkFileCleanup();
+			this.#unregisterLinkFileCleanup = undefined;
+			await unpublishCollabLink();
+		}
+	}
+
+	/**
+	 * Queue a rebind onto the session the manager has just adopted.
+	 *
+	 * Trailing debounce, for two reasons: the tap fires while AgentSession is
+	 * still restoring the rest of the transition (model, thinking level,
+	 * messages), and one transition can move the id repeatedly — `/tree` mints a
+	 * branch, a failed `switchSession` rolls back. Guests are therefore
+	 * re-welcomed once, from the session the user actually landed in.
+	 */
+	#scheduleSessionRebind(): void {
+		if (this.#stopped || !this.#followSession) return;
+		clearTimeout(this.#rebindDebounce ?? undefined);
+		this.#rebindDebounce = setTimeout(() => {
+			this.#rebindDebounce = null;
+			void this.#rebindToCurrentSession().catch(err =>
+				logger.warn("collab host session rebind failed", { error: String(err) }),
+			);
+		}, SESSION_REBIND_DEBOUNCE_MS);
+	}
+
+	/**
+	 * Point the room at the session that is loaded now, keeping the room id, key
+	 * and write token — the link a phone or supervisor already holds stays valid,
+	 * so remote access survives an in-session `/resume` instead of requiring a
+	 * relaunch with `omp resume`.
+	 *
+	 * Every guest gets the same welcome + snapshot train it would get on a
+	 * reconnect, which is the resync path both guest implementations already
+	 * take: the replica is rewritten wholesale, so nothing of the previous
+	 * session survives into it. Pending guest UI requests are settled
+	 * `unavailable` first — they belong to dialogs the switch already discarded,
+	 * and an answer arriving for one would be applied to the wrong session.
+	 */
+	async #rebindToCurrentSession(): Promise<void> {
+		if (this.#stopped || !this.#socket) return;
+		const sessionId = this.#ctx.sessionManager.getSessionId();
+		if (sessionId === this.#sessionId) return;
+		this.#sessionId = sessionId;
+		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
+		this.#pendingUi.clear();
+		// The state frame is deduped against the last one sent; the resumed
+		// session can legitimately produce an identical footer, and a guest that
+		// just re-synced must still receive one.
+		this.#lastStateJson = "";
+		for (const [peerId, peer] of this.#peers) this.#sendWelcome(peerId, peer.canWrite);
+		this.#scheduleStateBroadcast();
+		if (this.#publishLink) await this.#publishLinkFile();
 	}
 
 	#broadcast(frame: CollabFrame): void {
 		if (this.#stopped || !this.#socket) return;
 		if (this.#ctx.sessionManager.getSessionId() !== this.#sessionId) {
+			// A session-following room drops this frame — it describes a session
+			// guests have not been welcomed into — and lets the queued rebind
+			// deliver it as part of the new snapshot. Reached only when a frame
+			// beats the debounce, or the tap never fired (a manager the room does
+			// not own, e.g. in tests).
+			if (this.#followSession) {
+				this.#scheduleSessionRebind();
+				return;
+			}
 			void this.stop("session switched");
 			this.#ctx.session.emitNotice("warning", "Collab ended: session switched", "collab");
 			return;
@@ -333,7 +552,7 @@ export class CollabHost {
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
 		switch (frame.t) {
 			case "hello":
-				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
+				this.#handleHello(frame, fromPeer);
 				break;
 			case "prompt":
 				this.#handlePrompt(frame.text, frame.images, fromPeer);
@@ -368,22 +587,37 @@ export class CollabHost {
 		this.#socket?.send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
 	}
 
-	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
-		if (proto !== COLLAB_PROTO) {
+	#handleHello(hello: HelloFrame, fromPeer: number): void {
+		if (hello.proto !== COLLAB_PROTO) {
 			this.#socket?.send(
-				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
+				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${hello.proto}` },
 				fromPeer,
 			);
 			return;
 		}
-		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
-		const canWrite = this.#verifyWriteToken(writeToken);
-		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		const cleanName = hello.name.trim().slice(0, 64) || `guest-${fromPeer}`;
+		const canWrite = this.#verifyWriteToken(hello.writeToken);
+		this.#peers.set(fromPeer, { name: cleanName, canWrite, client: hello.client });
+		this.#sendWelcome(fromPeer, canWrite);
+		this.#ctx.session.emitNotice("info", joinNotice(cleanName, canWrite, hello.client), "collab");
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
+	}
 
-		// Snapshot and send synchronously: no awaits between snapshot, welcome,
-		// and chunk sends, so subsequent broadcast frames (entry/event/state/bus)
-		// queue behind the snapshot on the same socket and the guest can't
-		// observe a gap between the snapshot fragment and live traffic.
+	/**
+	 * Send one peer the current session: `welcome` header/state/agents, then the
+	 * `snapshot-chunk` train, then any guest UI request still awaiting an answer.
+	 *
+	 * Snapshot and send synchronously: no awaits between snapshot, welcome, and
+	 * chunk sends, so subsequent broadcast frames (entry/event/state/bus) queue
+	 * behind the snapshot on the same socket and the guest can't observe a gap
+	 * between the snapshot fragment and live traffic.
+	 *
+	 * Used both for a joining guest's hello and for a rebind onto a newly loaded
+	 * session, which is why it takes `canWrite` rather than re-deriving it: a
+	 * rebind must not silently re-evaluate a peer's permission.
+	 */
+	#sendWelcome(fromPeer: number, canWrite: boolean): void {
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
 		if (JSON.stringify(snapshot).length > WELCOME_IMAGE_STRIP_THRESHOLD) {
 			let stripped = 0;
@@ -413,13 +647,6 @@ export class CollabHost {
 				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
 			}
 		}
-		this.#ctx.session.emitNotice(
-			"info",
-			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
-			"collab",
-		);
-		this.#updateStatusSegment();
-		this.#scheduleStateBroadcast();
 	}
 
 	/**
@@ -496,6 +723,24 @@ export class CollabHost {
 				logger.warn("collab guest prompt failed", { error: String(err) });
 				this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
 			});
+		// A guest prompt is a turn start, so it feeds automatic titling the way the
+		// editor's does: a session created from the phone and driven only from the
+		// phone otherwise stayed nameless forever — its card read the directory
+		// basename and `--resume` listed it as "Untitled · HH:MM" — because the
+		// only auto-title trigger lived in the TUI's editor submit handler. Kicked
+		// off *after* the dispatch above, because titling can synchronously spawn
+		// the local tiny-title worker and the prompt must not queue behind a
+		// subprocess launch.
+		//
+		// The portal's own resume prompt is the one exclusion: it says "continue
+		// what you were doing", which names no task. Matched in full rather than by
+		// its marker prefix, exactly as the phone's projection filter does — a
+		// prefix test would let any write-token guest suppress titling for the
+		// whole session by prepending the marker to its first instruction. Reaching
+		// into `mobile/` for that constant is deliberate: the text is a wire
+		// convention the portal and this host have to agree on, and `mobile/types`
+		// is a leaf module of shapes with no runtime cost.
+		if (text !== INTERNAL_RESUME_PROMPT) this.#ctx.startAutoTitleGeneration(text);
 	}
 
 	#handleAbort(fromPeer: number): void {
@@ -512,9 +757,9 @@ export class CollabHost {
 	}
 
 	#handlePeerLeft(peer: number): void {
-		const name = this.#peers.get(peer)?.name;
+		const gone = this.#peers.get(peer);
 		this.#peers.delete(peer);
-		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
+		if (gone) this.#ctx.session.emitNotice("info", leaveNotice(gone.name, gone.client), "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}

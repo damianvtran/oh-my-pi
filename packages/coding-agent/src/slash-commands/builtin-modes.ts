@@ -140,7 +140,7 @@ async function applyVisionMode(session: AgentSession, mode: InspectImageMode): P
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
 
-function shortDetail(value: string, limit = AUTOCOMPLETE_DETAIL_LIMIT): string {
+export function shortDetail(value: string, limit = AUTOCOMPLETE_DETAIL_LIMIT): string {
 	const singleLine = value.replace(/\s+/g, " ").trim();
 	return singleLine.length <= limit ? singleLine : `${singleLine.slice(0, limit - 1)}…`;
 }

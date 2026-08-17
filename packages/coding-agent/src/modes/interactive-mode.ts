@@ -4625,6 +4625,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.isKnownSlashCommand(text);
 	}
 
+	startAutoTitleGeneration(text: string): void {
+		this.#inputController.maybeStartTitleGeneration(text);
+	}
+
 	addMessageToChat(
 		message: AgentMessage,
 		options?: {

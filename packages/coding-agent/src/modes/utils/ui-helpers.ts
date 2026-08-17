@@ -37,6 +37,7 @@ import { ToolExecutionComponent, type ToolExecutionHandle } from "../../modes/co
 import { TranscriptBlock, TranscriptContainer } from "../../modes/components/transcript-container";
 import { createUsageRowBlock } from "../../modes/components/usage-row";
 import { UserMessageComponent } from "../../modes/components/user-message";
+import { WakeMessageComponent } from "../../modes/components/wake-message";
 import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "../../modes/image-references";
 import { theme } from "../../modes/theme/theme";
@@ -51,6 +52,7 @@ import {
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
 import { replaceTabs } from "../../tools/render-utils";
+import { WAKE_PROMPT_MESSAGE_TYPE, type WakePromptDetails } from "../../wake/store";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import { createAssistantMessageComponent } from "./interactive-context-helpers";
 import {
@@ -198,6 +200,11 @@ export class UiHelpers {
 					}
 					if (message.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
 						const component = new CollabPromptMessageComponent(message as CustomMessage<CollabPromptDetails>);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === WAKE_PROMPT_MESSAGE_TYPE) {
+						const component = new WakeMessageComponent(message as CustomMessage<WakePromptDetails>);
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}
