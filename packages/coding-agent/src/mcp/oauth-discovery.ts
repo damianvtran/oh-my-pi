@@ -41,9 +41,10 @@ export interface AuthDetectionResult {
 	/**
 	 * OAuth scopes advertised by the challenge (RFC 6750 `scope=` on
 	 * `WWW-Authenticate`) or by protected-resource metadata. Passed through
-	 * `discoverOAuthEndpoints` as `protectedScopes` so the eventual
-	 * authorization request carries them even when the auth-server metadata
-	 * document itself omits `scopes_supported`.
+	 * `discoverOAuthEndpoints` as `protectedScopes`, which OUTRANKS the
+	 * authorization server's RFC 8414 `scopes_supported`: both sources here are
+	 * resource-scoped and state what this resource actually needs, while
+	 * `scopes_supported` is the AS-wide universe of everything the issuer knows.
 	 */
 	scopes?: string;
 	message?: string;
@@ -114,10 +115,12 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			(obj.default_client_id as string | undefined) ||
 			(obj.public_client_id as string | undefined);
 
+		// `resource` may arrive as an RFC 9728-style array here too; a bare cast
+		// would type an array as `string` and stringify it into the credential.
 		const resource =
-			(obj.resource as string | undefined) ||
-			(obj.resource_uri as string | undefined) ||
-			(obj.resourceUri as string | undefined);
+			readMetadataResource(obj) ??
+			(typeof obj.resource_uri === "string" ? obj.resource_uri : undefined) ??
+			(typeof obj.resourceUri === "string" ? obj.resourceUri : undefined);
 
 		return { authorizationUrl, tokenUrl, registrationUrl: readRegistrationUrl(obj), clientId, scopes, resource };
 	};
@@ -340,6 +343,57 @@ function readMetadataScopes(metadata: Record<string, unknown>): string | undefin
 }
 
 /**
+ * Read the protected-resource identifier off an RFC 9728 metadata document.
+ *
+ * RFC 9728 specifies `resource` as a single string, but real deployments emit
+ * an array — gitlab.com returns `"resource": ["https://gitlab.com/api/v4/mcp"]`
+ * from `/.well-known/oauth-protected-resource/api/v4/mcp`. A string-only read
+ * silently dropped the identifier there, so the credential was stored without a
+ * `resource` and every later refresh had to re-synthesize it from the server
+ * URL. Accept both shapes and take the first usable string.
+ */
+function readMetadataResource(metadata: Record<string, unknown>): string | undefined {
+	const value = metadata.resource;
+	if (typeof value === "string" && value.trim() !== "") return value;
+	if (Array.isArray(value)) {
+		return value.find((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+	}
+	return undefined;
+}
+
+/**
+ * Choose the scopes to request, given what the protected resource declared
+ * (RFC 9728, or an RFC 6750 `scope=` challenge) and what the authorization
+ * server advertises (RFC 8414 `scopes_supported`).
+ *
+ * The resource's list wins: it states what THIS resource needs, while
+ * `scopes_supported` is the AS-wide universe of everything the issuer knows.
+ * Reading the AS list first made OMP request all 26 gitlab.com scopes —
+ * `sudo`, `admin_mode`, `api`, `user:*` — for a resource that declares only
+ * `mcp`, and asked for scopes the dynamically registered client never had.
+ *
+ * `offline_access` is the one exception, and it is not really an exception to
+ * the rule: it is an AS/OIDC-level scope governing refresh-token issuance, not
+ * a resource-access scope, so a resource document has no reason to list it and
+ * its absence there carries no signal. Dropping it would cost the refresh token
+ * outright on an AS that gates one behind it — and, via the
+ * `offline_access`-driven `prompt=consent` in `MCPOAuthFlow.generateAuthUrl`,
+ * would reintroduce exactly the "MCP server keeps losing auth" failure this
+ * precedence rule was written to fix. So carry it over when the AS advertises
+ * it; only a scope the issuer itself published is ever added.
+ */
+function resolveRequestScopes(
+	protectedScopes: string | undefined,
+	authServerScopes: string | undefined,
+): string | undefined {
+	if (!protectedScopes) return authServerScopes;
+	const requested = protectedScopes.split(/\s+/).filter(Boolean);
+	if (requested.includes("offline_access")) return protectedScopes;
+	if (!authServerScopes?.split(/\s+/).includes("offline_access")) return protectedScopes;
+	return [...requested, "offline_access"].join(" ");
+}
+
+/**
  * Fetch the RFC 9728 protected-resource metadata document at
  * {@link resourceMetadataUrl} and return any scopes it advertises. Used by
  * `/mcp add` / `/mcp reauth` on the JSON-error-body path, where the caller
@@ -379,6 +433,14 @@ export async function discoverOAuthEndpoints(
 	opts?: { fetch?: FetchImpl; protectedResource?: string; protectedScopes?: string; signal?: AbortSignal },
 ): Promise<OAuthEndpoints | null> {
 	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
+	// Known gap: on the blind-probe path (no `resourceMetadataUrl` and no
+	// challenge `scope=`), a server that hosts both documents on one origin has
+	// its authorization-server metadata read first and `findEndpoints` returns
+	// immediately, so `protectedScopes` is never populated and the AS-wide
+	// `scopes_supported` is requested after all. Reordering these paths would
+	// change discovery for every MCP server, so it is left alone: any server
+	// that answers RFC 9728 correctly advertises `resource_metadata` on its 401,
+	// which routes through the step-1 fetch below and never reaches this list.
 	const wellKnownPaths = [
 		"/.well-known/oauth-authorization-server",
 		"/.well-known/openid-configuration",
@@ -412,9 +474,7 @@ export async function discoverOAuthEndpoints(
 			if (metaResp.ok) {
 				const meta = (await metaResp.json()) as Record<string, unknown>;
 				protectedScopes = readMetadataScopes(meta) ?? protectedScopes;
-				if (typeof meta.resource === "string" && meta.resource.trim() !== "") {
-					protectedResource = meta.resource;
-				}
+				protectedResource = readMetadataResource(meta) ?? protectedResource;
 				const authServers = Array.isArray(meta.authorization_servers)
 					? meta.authorization_servers.filter((entry): entry is string => typeof entry === "string")
 					: [];
@@ -433,7 +493,7 @@ export async function discoverOAuthEndpoints(
 
 	const findEndpoints = (metadata: Record<string, unknown>): OAuthEndpoints | null => {
 		if (metadata.authorization_endpoint && metadata.token_endpoint) {
-			const resource = typeof metadata.resource === "string" ? metadata.resource : protectedResource;
+			const resource = readMetadataResource(metadata) ?? protectedResource;
 
 			return {
 				authorizationUrl: String(metadata.authorization_endpoint),
@@ -449,7 +509,7 @@ export async function discoverOAuthEndpoints(
 								: typeof metadata.public_client_id === "string"
 									? metadata.public_client_id
 									: undefined,
-				scopes: readMetadataScopes(metadata) ?? protectedScopes,
+				scopes: resolveRequestScopes(protectedScopes, readMetadataScopes(metadata)),
 				resource,
 			};
 		}
@@ -457,7 +517,7 @@ export async function discoverOAuthEndpoints(
 		if (metadata.oauth || metadata.authorization || metadata.auth) {
 			const oauthData = (metadata.oauth || metadata.authorization || metadata.auth) as Record<string, unknown>;
 			if (typeof oauthData.authorization_url === "string" && typeof oauthData.token_url === "string") {
-				const resource = typeof oauthData.resource === "string" ? oauthData.resource : protectedResource;
+				const resource = readMetadataResource(oauthData) ?? protectedResource;
 
 				return {
 					authorizationUrl: oauthData.authorization_url || String(oauthData.authorizationUrl),
@@ -473,7 +533,7 @@ export async function discoverOAuthEndpoints(
 									: typeof oauthData.public_client_id === "string"
 										? oauthData.public_client_id
 										: undefined,
-					scopes: readMetadataScopes(oauthData) ?? protectedScopes,
+					scopes: resolveRequestScopes(protectedScopes, readMetadataScopes(oauthData)),
 					resource,
 				};
 			}
@@ -515,10 +575,7 @@ export async function discoverOAuthEndpoints(
 								? metadata.authorization_servers.filter((entry): entry is string => typeof entry === "string")
 								: [];
 
-							const discoveredProtectedResource =
-								typeof metadata.resource === "string" && metadata.resource.trim() !== ""
-									? metadata.resource
-									: protectedResource;
+							const discoveredProtectedResource = readMetadataResource(metadata) ?? protectedResource;
 
 							for (const discoveredAuthServer of authServers) {
 								if (visitedAuthServers.has(discoveredAuthServer)) {

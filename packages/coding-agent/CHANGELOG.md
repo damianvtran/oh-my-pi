@@ -519,6 +519,8 @@
 ### Fixed
 
 - Fixed cancelling a scheduled wake leaving already-fired follow-up prompts queued, which could start several more turns after the schedule disappeared from `wake({op:"list"})`; tool and `/wake cancel` results now report how many queued deliveries were purged.
+- Fixed MCP OAuth discovery requesting the authorization server's entire scope universe when the protected resource advertises its own scopes. RFC 8414 `scopes_supported` lists everything the AS knows, while RFC 9728 resource metadata states what the resource actually needs, so the resource's list now wins. Against gitlab.com's MCP server this asked the user to consent to all 26 GitLab scopes — including `sudo`, `admin_mode`, and `api` — for a server whose protected-resource metadata requires only `mcp`, and requested scopes the dynamically registered client was never granted. `offline_access` is still carried over from the authorization server when it advertises one and the resource document omits it, since it governs refresh-token issuance rather than resource access; dropping it would cost the refresh token on servers that gate one behind it.
+- Fixed MCP OAuth discovery dropping the protected-resource identifier when RFC 9728 metadata returns `resource` as an array instead of a string. gitlab.com emits `"resource": ["https://gitlab.com/api/v4/mcp"]`, so the stored credential carried no audience and every token request had to synthesize one from the server URL. Recovering it also stops the indicator being treated as an OMP-synthesized fallback, so `resource` is now transmitted to same-origin authorization and token endpoints where it was previously filtered out.
 
 ## [17.2.4] - 2026-08-01
 
