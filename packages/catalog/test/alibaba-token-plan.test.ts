@@ -8,7 +8,10 @@ import {
 	alibabaTokenPlanModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
-import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import {
+	parseAlibabaTokenPlanCredential,
+	serializeAlibabaTokenPlanCredential,
+} from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 
 describe("QwenCloud Token Plan provider", () => {
 	test("ships the documented Individual text-model allowlist", () => {
@@ -214,6 +217,44 @@ describe("QwenCloud Token Plan provider", () => {
 		expect(fetched).toBe(false);
 	});
 
+	test("round-trips the OAuth grant inside the compound credential", () => {
+		const oauth = {
+			clientId: "client-1",
+			accessToken: "qc-access",
+			refreshToken: "qc-refresh",
+			expiresAt: 1_900_000_000_000,
+			aliyunId: "damian-aliyun",
+			email: "damian@example.com",
+		};
+		const serialized = serializeAlibabaTokenPlanCredential("sk-sp-test", "", undefined, oauth);
+
+		expect(JSON.parse(serialized)).toEqual({ token: "sk-sp-test", oauth });
+		expect(parseAlibabaTokenPlanCredential(serialized)).toEqual({ token: "sk-sp-test", oauth });
+		// A grant without optional fields stays minimal, and a bare key stays bare.
+		expect(
+			parseAlibabaTokenPlanCredential('{"token":"sk-sp-test","oauth":{"clientId":"c","accessToken":"a"}}'),
+		).toEqual({
+			token: "sk-sp-test",
+			oauth: { clientId: "c", accessToken: "a" },
+		});
+		expect(serializeAlibabaTokenPlanCredential("sk-sp-test", "", undefined, undefined)).toBe("sk-sp-test");
+	});
+
+	test("rejects malformed OAuth grants instead of degrading to cookie quota", () => {
+		for (const oauth of [
+			'{"token":"sk-sp-test","oauth":{"clientId":"c"}}',
+			'{"token":"sk-sp-test","oauth":{"clientId":"c","accessToken":"a","expiresAt":"soon"}}',
+			'{"token":"sk-sp-test","oauth":{"clientId":"c","accessToken":"a","expiresAt":0}}',
+			'{"token":"sk-sp-test","oauth":"qc-access"}',
+		]) {
+			expect(parseAlibabaTokenPlanCredential(oauth)).toBeNull();
+		}
+		// Legacy cookie-only credentials from before the OAuth login still parse.
+		expect(parseAlibabaTokenPlanCredential('{"token":"sk-sp-test","cookie":"session_id=test"}')).toEqual({
+			token: "sk-sp-test",
+			cookie: "session_id=test",
+		});
+	});
 	test("uses Token Plan-specific environment keys and authoritative discovery", () => {
 		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "alibaba-token-plan");
 		expect(descriptor).toMatchObject({
