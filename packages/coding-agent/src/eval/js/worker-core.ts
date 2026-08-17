@@ -1,4 +1,5 @@
 import { ToolError } from "../../tools/tool-errors";
+import { ArgvDisclosureLedger, redactProcessInvocation } from "../../utils/argv-disclosure";
 import { JsRuntime, type RuntimeHooks } from "./shared/runtime";
 import type {
 	RunErrorPayload,
@@ -49,12 +50,26 @@ export type WorkerCoreOptions =
 /** Finished-cell filenames retained for attributing rejections that surface after the run settled. */
 const RECENT_CELL_FILES_MAX = 256;
 
-function errorPayload(error: unknown): RunErrorPayload {
+/**
+ * Serialize an error for the host.
+ *
+ * `ledger` carries the cell sources this kernel has already shown the agent.
+ * Node bakes the full argv of a failed `exec`/`execFile`/`execFileSync` into
+ * `Error.message` (on timeout as well as non-zero exit), so without this pass a
+ * credential the cell put in argv — read from the environment, or substituted
+ * into a tool call by `deobfuscateToolArguments` — is echoed into the tool
+ * result and the session file. `redactProcessInvocation` keeps every argument
+ * the agent's own source already disclosed and replaces the rest with their
+ * length. Omitting `ledger` is the fail-safe direction: nothing counts as
+ * disclosed, so every argument past argv[0] is redacted.
+ */
+function errorPayload(error: unknown, ledger?: ArgvDisclosureLedger): RunErrorPayload {
 	if (error instanceof Error) {
+		const display = redactProcessInvocation(error, ledger);
 		return {
 			name: error.name,
-			message: error.message,
-			stack: error.stack,
+			message: display.message,
+			stack: display.stack,
 			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
 			isToolError: error.name === "ToolError" || error instanceof ToolError,
 		};
@@ -76,19 +91,24 @@ function errorFromPayload(payload: RunErrorPayload): Error {
  * failing is a cell failure, not a success with noise); the rest surface as
  * output text so nothing is silently dropped.
  */
-function foldFloatingRejections(active: ActiveRun, result: RunResult, hooks: RuntimeHooks): RunResult {
+function foldFloatingRejections(
+	active: ActiveRun,
+	result: RunResult,
+	hooks: RuntimeHooks,
+	ledger: ArgvDisclosureLedger,
+): RunResult {
 	const rejections = active.floatingRejections;
 	if (rejections.length === 0) return result;
 	let folded = result;
 	let reported = rejections;
 	if (result.ok) {
-		const error = errorPayload(rejections[0]);
+		const error = errorPayload(rejections[0], ledger);
 		error.message = `Unhandled rejection (missing await?): ${error.message}`;
 		folded = { type: "result", runId: active.runId, ok: false, error };
 		reported = rejections.slice(1);
 	}
 	for (const reason of reported) {
-		const payload = errorPayload(reason);
+		const payload = errorPayload(reason, ledger);
 		hooks.onText(`[unhandled rejection] ${payload.name ?? "Error"}: ${payload.message}\n`);
 	}
 	return folded;
@@ -99,6 +119,13 @@ export class WorkerCore {
 	#runtime: JsRuntime | null = null;
 	#runs = new Map<string, ActiveRun>();
 	#recentCellFiles = new Set<string>();
+	/**
+	 * Cell sources this kernel has run, i.e. the bytes already visible in the
+	 * transcript. Per-instance rather than module-global: the inline fallback can
+	 * host two sessions in one realm, and one session's source must never make
+	 * another session's argv look disclosed.
+	 */
+	#disclosed = new ArgvDisclosureLedger();
 	#unsubscribe: () => void;
 	#uninstallRejectionGuard: () => void;
 	#options: WorkerCoreOptions;
@@ -177,7 +204,7 @@ export class WorkerCore {
 					type: "log",
 					level: "warn",
 					msg: "Unhandled rejection from a finished eval cell (missing await?)",
-					meta: { filename: recent, error: errorPayload(reason) },
+					meta: { filename: recent, error: errorPayload(reason, this.#disclosed) },
 				});
 				return true;
 			}
@@ -195,7 +222,7 @@ export class WorkerCore {
 				type: "log",
 				level: "warn",
 				msg: "Unhandled rejection during concurrent eval runs; cannot attribute to a cell",
-				meta: { error: errorPayload(reason) },
+				meta: { error: errorPayload(reason, this.#disclosed) },
 			});
 			return true;
 		}
@@ -279,6 +306,9 @@ export class WorkerCore {
 	async #runOne(runId: string, code: string, filename: string, snapshot: SessionSnapshot): Promise<void> {
 		const active: ActiveRun = { runId, filename, pendingTools: new Map(), floatingRejections: [] };
 		this.#runs.set(runId, active);
+		// Record before running: the cell that fails is the cell whose literals
+		// must still count as disclosed in its own error rendering.
+		this.#disclosed.record(code);
 		const hooks: RuntimeHooks = {
 			onText: chunk => this.#transport.send({ type: "text", runId, chunk }),
 			onDisplay: output => this.#transport.send({ type: "display", runId, output }),
@@ -292,14 +322,14 @@ export class WorkerCore {
 			runtime.displayValue(value, hooks);
 			result = { type: "result", runId, ok: true };
 		} catch (error) {
-			result = { type: "result", runId, ok: false, error: errorPayload(error) };
+			result = { type: "result", runId, ok: false, error: errorPayload(error, this.#disclosed) };
 		}
 		try {
 			// One event-loop turn so rejections the cell already floated surface
 			// while this run can still own them (rejection callbacks run before
 			// timers fire).
 			await Bun.sleep(0);
-			result = foldFloatingRejections(active, result, hooks);
+			result = foldFloatingRejections(active, result, hooks, this.#disclosed);
 		} finally {
 			this.#runs.delete(runId);
 			this.#rememberCellFile(filename);
