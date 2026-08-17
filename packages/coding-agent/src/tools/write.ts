@@ -12,7 +12,7 @@ import type {
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord, pluralize, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 
 import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
 import { normalizeToLF } from "../edit/normalize";
@@ -23,10 +23,11 @@ import { couldBecomeXdUrl, parseXdUrl } from "../internal-urls/xd-protocol";
 import { createLspWritethrough, type FileDiagnosticsResult, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
-import { getLanguageFromPath, highlightCode, type Theme } from "../modes/theme/theme";
+import { renderDiff } from "../modes/components/diff";
+import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
+import { fileHyperlink, framedBlock, outputBlockContentWidth, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import {
 	type ArchiveMemberContent,
@@ -62,10 +63,10 @@ import {
 	cachedRenderedString,
 	createRenderedStringCache,
 	Ellipsis,
+	formatChangeStatsSuffix,
 	formatDiagnostics,
 	formatErrorDetail,
 	formatExpandHint,
-	formatMoreItems,
 	formatStatusIcon,
 	getLspBatchRequest,
 	type RenderedStringCache,
@@ -73,6 +74,7 @@ import {
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
+	wrapDiffGutterLine,
 } from "./render-utils";
 import { dispatchReportIssueDevice, REPORT_ISSUE_DEVICE_NAME, renderReportIssueDeviceCall } from "./report-tool-issue";
 import { dispatchResolutionDevice, isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
@@ -1375,11 +1377,6 @@ function writeContentOf(args: unknown): string {
 	return typeof content === "string" ? content : "";
 }
 
-function formatLineCountSuffix(lineCount: number, uiTheme: Theme): string {
-	if (lineCount <= 0) return "";
-	return uiTheme.fg("dim", ` · ${lineCount} line${lineCount === 1 ? "" : "s"}`);
-}
-
 function normalizeDisplayText(text: unknown): string {
 	let displayText = "";
 	if (typeof text === "string") {
@@ -1391,15 +1388,28 @@ function normalizeDisplayText(text: unknown): string {
 }
 
 /**
- * Minimum line-number gutter width for write previews. The streaming preview's
- * gutter must stay byte-stable as the line count grows: a width derived purely
- * from `String(totalLines).length` widens at the 10/100/1000-line crossings,
- * rewriting every already-rendered row — which forces the transcript's commit
- * audit to recommit the block's committed prefix (a full duplicate in native
- * scrollback). Reserving 3 digits keeps the gutter constant through 999 lines
- * and keeps the streamed rows byte-identical to the final result render.
+ * Render a slice of written content as the edit tool's diff rows.
+ *
+ * A written file is entirely new content, so every row is an addition: building
+ * canonical `+<line>|<text>` rows and handing them to the shared `renderDiff`
+ * is what keeps a Write card and an Edit card in one notation — the `+N│`
+ * code-frame gutter, the added-line color, and the dim indent glyphs all come
+ * from a single implementation instead of a second, numbered-gutter style that
+ * only the write tool spoke. `firstLineNumber` is 1-based and lets the collapsed
+ * streaming window keep real file line numbers on a tail slice.
+ *
+ * No file path is passed: `renderDiff` only syntax-highlights *context* rows,
+ * and an all-added payload has none, so it would buy nothing but a lookup.
+ *
+ * `renderDiff` reserves a 3-digit gutter, which the streaming preview relies on:
+ * a width derived purely from the current line count would widen at the 999→1000
+ * crossing and rewrite every already-rendered row, forcing the transcript's
+ * commit audit to recommit the block's committed prefix (a full duplicate in
+ * native scrollback).
  */
-const WRITE_GUTTER_MIN_WIDTH = 3;
+function renderAddedRows(lines: string[], firstLineNumber: number): string {
+	return renderDiff(lines.map((line, index) => `+${firstLineNumber + index}|${line}`).join("\n"));
+}
 
 /**
  * Per-component streaming line index for {@link formatStreamingContent}.
@@ -1480,49 +1490,50 @@ function tailWindowStart(content: string, previewLines: number): number {
 function formatStreamingContent(
 	content: string,
 	expanded: boolean,
-	language: string | undefined,
 	uiTheme: Theme,
 	spinnerFrame?: number,
 	cache?: RenderedStringCache,
 	streamKey?: object,
 ): string {
 	if (!content) return "";
-	const bodyText = cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
+	const bodyText = cachedRenderedString(cache, uiTheme, expanded, "", content, () => {
 		// Collapsed: follow the streaming edge with a bounded tail window so the box
 		// stays short enough not to strand its scrolled-off head above the viewport
 		// while the block is volatile. `Ctrl+O` (expanded) lifts the cap for a
 		// deliberate full view — matching the eval streaming preview.
-		let totalLines: number;
-		let startIndex: number;
+		// Two ways to reach the visible window, for two different costs. Expanded
+		// shows everything, so the full line array is unavoidable. Collapsed shows
+		// a bounded tail, and materializing every line to throw all but the last
+		// few away is what made a large streamed payload quadratic — so the line
+		// COUNT comes from the streaming cache and the slice comes from a reverse
+		// scan, neither of which touches the head of the content. The rows are
+		// still numbered from `startIndex + 1`, so the diff gutter keeps real file
+		// line numbers on a tail slice.
 		let visibleText: string;
+		let startIndex: number;
 		if (expanded) {
 			visibleText = normalizeDisplayText(content);
-			totalLines = 1;
-			for (let i = 0; i < visibleText.length; i++) if (visibleText.charCodeAt(i) === 10) totalLines++;
 			startIndex = 0;
 		} else {
-			totalLines = streamingTotalLines(streamKey, content);
+			const totalLines = streamingTotalLines(streamKey, content);
 			startIndex = Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
 			const tail =
 				startIndex === 0 ? content : content.slice(tailWindowStart(content, WRITE_STREAMING_PREVIEW_LINES));
-			visibleText = tail.replace(/\r/g, "");
+			visibleText = normalizeDisplayText(tail);
 		}
+		// Guard the normalized TEXT, before splitting. `"".split("\n")` is `[""]`,
+		// never `[]`, so an array-length guard here is unreachable and a payload
+		// that normalizes away entirely — carriage returns only — would render one
+		// empty `+1│` row plus a streaming footer instead of nothing at all.
 		if (visibleText.length === 0) return "";
+		const visibleLines = visibleText.split("\n");
 		const hidden = startIndex;
-		const highlighted = highlightCode(visibleText, language);
-		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
 
 		let text = "\n\n";
 		if (hidden > 0) {
-			text += `${uiTheme.fg("dim", `… (${hidden} earlier line${hidden === 1 ? "" : "s"})`)}\n`;
+			text += `${uiTheme.fg("dim", `… (${hidden} earlier ${pluralize("line", hidden)})`)}\n`;
 		}
-		for (let i = 0; i < highlighted.length; i++) {
-			const lineNum = startIndex + i + 1;
-			const gutter = uiTheme.fg("dim", `${String(lineNum).padStart(lineNumberWidth, " ")} `);
-			const body = replaceTabs(highlighted[i] ?? "");
-			text += `${gutter}${body}\n`;
-		}
-		return text;
+		return `${text}${renderAddedRows(visibleLines, startIndex + 1)}\n`;
 	});
 	if (bodyText.length === 0) return "";
 	// The animated glyph lives on this trailing line — inside the transcript's
@@ -1533,34 +1544,19 @@ function formatStreamingContent(
 	return `${bodyText}${spinner}${uiTheme.fg("dim", `… (streaming)`)}`;
 }
 
-function renderContentPreview(
-	content: string,
-	expanded: boolean,
-	language: string | undefined,
-	uiTheme: Theme,
-	cache?: RenderedStringCache,
-): string {
+function renderContentPreview(content: string, expanded: boolean, uiTheme: Theme, cache?: RenderedStringCache): string {
 	if (!content) return "";
-	return cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
-		const rawLines = normalizeDisplayText(content).split("\n");
-		const totalLines = rawLines.length;
-		const maxLines = expanded ? totalLines : Math.min(totalLines, WRITE_PREVIEW_LINES);
-		const visibleLines = rawLines.slice(0, maxLines);
-		const highlighted = highlightCode(visibleLines.join("\n"), language);
-		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
-		const hidden = totalLines - maxLines;
+	return cachedRenderedString(cache, uiTheme, expanded, "", content, () => {
+		const lines = normalizeDisplayText(content).split("\n");
+		const maxLines = expanded ? lines.length : Math.min(lines.length, WRITE_PREVIEW_LINES);
+		const hidden = lines.length - maxLines;
 
-		let text = "\n\n";
-		for (let i = 0; i < highlighted.length; i++) {
-			const lineNum = i + 1;
-			const gutter = uiTheme.fg("dim", `${String(lineNum).padStart(lineNumberWidth, " ")} `);
-			const body = replaceTabs(highlighted[i] ?? "");
-			text += `${gutter}${body}\n`;
-		}
-		if (!expanded && hidden > 0) {
-			const hint = formatExpandHint(uiTheme, expanded, hidden > 0);
-			const moreLine = `${formatMoreItems(hidden, "line")}${hint ? ` ${hint}` : ""}`;
-			text += uiTheme.fg("dim", moreLine);
+		let text = `\n\n${renderAddedRows(lines.slice(0, maxLines), 1)}`;
+		if (hidden > 0) {
+			// Same truncation footer the edit tool's collapsed diff uses, so both
+			// cards end on one recognizable "there is more here" row.
+			const more = `… (${hidden} more ${pluralize("line", hidden)}) ${formatExpandHint(uiTheme)}`;
+			text += uiTheme.fg("toolOutput", `\n${more}`);
 		}
 		return text.trimEnd();
 	});
@@ -1620,7 +1616,6 @@ export const writeToolRenderer = {
 				? formatStreamingContent(
 						content,
 						Boolean(options?.expanded),
-						lang,
 						uiTheme,
 						options?.spinnerFrame,
 						streamingCache,
@@ -1630,7 +1625,12 @@ export const writeToolRenderer = {
 						options,
 					)
 				: "";
-			const bodyLines = body ? body.split("\n") : [];
+			// Diff rows self-wrap with a continuation gutter; pre-wrap to the frame's
+			// inner width so renderOutputBlock's generic wrap is a no-op. Like the
+			// edit tool, the left border sits flush because the code-frame gutter
+			// already provides the padding.
+			const innerWidth = outputBlockContentWidth(width, 0);
+			const bodyLines = body ? body.split("\n").flatMap(line => wrapDiffGutterLine(line, innerWidth)) : [];
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 			return {
 				header,
@@ -1638,6 +1638,7 @@ export const writeToolRenderer = {
 				state: "pending",
 				borderColor: "borderMuted",
 				width,
+				contentPaddingLeft: 0,
 			};
 		});
 	},
@@ -1686,8 +1687,10 @@ export const writeToolRenderer = {
 
 		const isPartial = options.isPartial === true;
 		const progressText = result.content?.find(c => c.type === "text")?.text ?? "";
-		const lineCount = countLines(fileContent);
-		const lineSuffix = formatLineCountSuffix(lineCount, uiTheme);
+		// Every written line is an addition, so the header carries the same
+		// bracketed change badge an edit reports — `⟨+16⟩` rather than a
+		// write-only `· 16 lines` phrasing.
+		const lineSuffix = formatChangeStatsSuffix(countLines(fileContent), 0, uiTheme);
 		const execSuffix =
 			!isPartial && result.details?.madeExecutable
 				? `${uiTheme.fg("dim", " · ")}${uiTheme.fg("success", "made executable!")}`
@@ -1707,7 +1710,7 @@ export const writeToolRenderer = {
 		const previewCache = createRenderedStringCache();
 		return framedBlock(uiTheme, width => {
 			const { expanded } = options;
-			let body = renderContentPreview(fileContent, expanded, lang, uiTheme, previewCache);
+			let body = renderContentPreview(fileContent, expanded, uiTheme, previewCache);
 			if (isPartial && progressText) {
 				const safeProgressText = truncateToWidth(
 					replaceTabs(progressText),
@@ -1726,7 +1729,12 @@ export const writeToolRenderer = {
 					if (firstNonEmpty >= 0) body += `\n${diagLines.slice(firstNonEmpty).join("\n")}`;
 				}
 			}
-			const bodyLines = body.split("\n");
+			// Diff rows self-wrap with a continuation gutter; pre-wrap to the frame's
+			// inner width so renderOutputBlock's generic wrap is a no-op. Like the
+			// edit tool, the left border sits flush because the code-frame gutter
+			// already provides the padding.
+			const innerWidth = outputBlockContentWidth(width, 0);
+			const bodyLines = body.split("\n").flatMap(line => wrapDiffGutterLine(line, innerWidth));
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 			return {
 				header,
@@ -1734,6 +1742,7 @@ export const writeToolRenderer = {
 				state: isPartial ? "pending" : "success",
 				borderColor: "borderMuted",
 				width,
+				contentPaddingLeft: 0,
 			};
 		});
 	},
