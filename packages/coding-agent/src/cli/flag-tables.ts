@@ -86,6 +86,17 @@ const setResume: OptionalSetter = (result, value) => {
 	result.resume = value !== undefined ? value : true;
 };
 
+/**
+ * `--session <id>` resolves the same field as `--resume`, but carries the
+ * machine-restore contract: it names the exact session this process should be,
+ * so a session id with nothing on disk yet is adopted instead of rejected (see
+ * `Args.adoptSession`). The bare form is the picker, same as `--resume`.
+ */
+const setSession: OptionalSetter = (result, value) => {
+	setResume(result, value);
+	result.adoptSession = value !== undefined;
+};
+
 const MAX_TIME_DURATION_RE = /^(\d+(?:\.\d+)?)([smh])$/;
 
 function maxTimeMultiplier(unit: string | undefined): number {
@@ -245,7 +256,7 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 export const OPTIONAL_FLAGS: Record<string, OptionalFlagConfig> = {
 	"--resume": { set: setResume, rejectEmpty: true },
 	"-r": { set: setResume, rejectEmpty: true },
-	"--session": { set: setResume, rejectEmpty: true },
+	"--session": { set: setSession, rejectEmpty: true },
 };
 
 /**

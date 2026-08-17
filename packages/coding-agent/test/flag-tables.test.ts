@@ -132,6 +132,31 @@ describe("OPTIONAL_FLAGS per-flag quirks", () => {
 	});
 });
 
+/**
+ * `--session <id>` is the restore contract a supervisor re-runs (cmux binds
+ * `<omp> --session <id>` to a surface), so it flags the session argument as
+ * adoptable; `--resume` / `-r` are the human forms and stay strict. See
+ * `Args.adoptSession`.
+ */
+describe("--session marks the session argument adoptable", () => {
+	it("sets adoptSession for a valued --session", () => {
+		const result = parseArgs(["--session", "019ea530-0000-7000-8000-000000000000"]);
+		expect(result.resume).toBe("019ea530-0000-7000-8000-000000000000");
+		expect(result.adoptSession).toBe(true);
+	});
+
+	it("leaves adoptSession unset for --resume and -r", () => {
+		expect(parseArgs(["--resume", "019ea530-0000-7000-8000-000000000000"]).adoptSession).toBeUndefined();
+		expect(parseArgs(["-r", "019ea530-0000-7000-8000-000000000000"]).adoptSession).toBeUndefined();
+	});
+
+	it("leaves adoptSession false for the bare picker form", () => {
+		const result = parseArgs(["--session"]);
+		expect(result.resume).toBe(true);
+		expect(result.adoptSession).toBe(false);
+	});
+});
+
 describe("parseArgs end-of-options (--)", () => {
 	it("treats tokens after -- as literal messages, not flags", () => {
 		const result = parseArgs(["--", "--profile", "work"]);
