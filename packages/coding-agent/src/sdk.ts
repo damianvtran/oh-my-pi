@@ -7,7 +7,7 @@ import {
 	type AgentTool,
 	AppendOnlyContextManager,
 	filterProviderReplayMessages,
-	type ThinkingLevel,
+	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
@@ -1737,6 +1737,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
+			// `task.inheritSessionModel` pairs this with getActiveModelString: the
+			// live session's effective level wins, then the agent state. `auto`
+			// resolves to a concrete level here, and `inherit` defers to a
+			// higher-level selector, so neither is a concrete level to pass on.
+			getActiveThinkingLevel: () => {
+				const level = session?.thinkingLevel ?? agent?.state.thinkingLevel;
+				return level === undefined || level === ThinkingLevel.Inherit ? undefined : level;
+			},
 			getInspectImageModeOverride: () => session?.getInspectImageModeOverride(),
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],

@@ -240,6 +240,21 @@ export function formatModelSelectorValue(selector: string, thinkingLevel: Config
 	return thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit ? `${selector}:${thinkingLevel}` : selector;
 }
 
+/**
+ * The session's live selector: `provider/id` plus its active thinking level
+ * (concrete levels only — `auto`/`inherit`/unset ride without a suffix).
+ * Spawn surfaces (`task.inheritSessionModel`, the vibe runtime, the agent
+ * dashboard) use it so subagents track the session's effort as well as its
+ * model. Returns undefined when no model is live.
+ */
+export function formatActiveModelSelector(
+	model: Model<Api> | undefined,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+): string | undefined {
+	if (!model) return undefined;
+	return formatModelSelectorValue(formatModelString(model), concreteThinkingLevel(thinkingLevel));
+}
+
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
 	const colonIdx = modelId.lastIndexOf(":");
 	if (colonIdx === -1) {
@@ -1098,6 +1113,17 @@ export interface AgentModelPatternResolutionOptions {
 	settings?: Settings;
 	activeModelPattern?: string;
 	fallbackModelPattern?: string;
+	/**
+	 * Fork feature (`task.inheritSessionModel`): when true and a session model
+	 * override is not supplied, the parent session's live model pattern wins
+	 * over the agent definition's own model role. Role resolution
+	 * (`@slow`/`@smol`/`@designer`/…) follows `modelRoles.default` and never
+	 * tracks a retry-fallback or manual model switch the session is running
+	 * on; this flag makes spawns track it. Explicit overrides — a per-spawn
+	 * `settingsOverride` (task tool `model` argument,
+	 * `task.agentModelOverrides`) — still win outright.
+	 */
+	inheritSessionModel?: boolean;
 }
 
 interface EffectiveAgentModelSelection {
@@ -1118,6 +1144,17 @@ function resolveEffectiveAgentModelSelection(
 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
 	if (overridePatterns.length > 0) {
 		return { source: settingsOverride, patterns: overridePatterns };
+	}
+
+	// `task.inheritSessionModel` (fork feature): the session's live model —
+	// whatever the session is running on right now, including a retry-fallback
+	// or manually switched model — replaces the agent's role-based resolution.
+	// The active pattern is returned verbatim so an embedded `:level` selector
+	// rides along; a missing one falls through to the existing chain so the
+	// flag alone can never break a spawn.
+	if (options.inheritSessionModel && activeModelPattern?.trim()) {
+		const inherited = activeModelPattern.trim();
+		return { source: inherited, patterns: [inherited] };
 	}
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);

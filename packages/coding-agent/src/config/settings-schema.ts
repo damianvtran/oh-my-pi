@@ -4851,6 +4851,27 @@ export const SETTINGS_SCHEMA = {
 		type: "record",
 		default: {} as Record<string, string>,
 	},
+	/**
+	 * Fork feature (not yet upstream): when enabled, every subagent spawn —
+	 * regardless of its agent definition's `model` role — starts on the
+	 * session's live model and thinking selector. Without it, agents whose
+	 * frontmatter names a role (`@slow`, `@smol`, `@designer`, …) resolve that
+	 * role's chain, which follows `modelRoles.default` and never tracks a
+	 * failover or manual model switch the session is currently running on.
+	 * Explicit per-spawn model overrides (`task` tool argument,
+	 * `task.agentModelOverrides`) still win.
+	 */
+	"task.inheritSessionModel": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Subagents Inherit Session Model",
+			description:
+				"Spawn every subagent on the session's current model and effort (including retry-fallback or manually switched models) instead of resolving the agent's own model role. Per-spawn model arguments and task.agentModelOverrides still win.",
+		},
+	},
 	"task.prewalk": {
 		type: "boolean",
 		default: false,

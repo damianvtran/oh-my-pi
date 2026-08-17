@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { formatActiveModelSelector, resolveAgentModelSelection } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -279,7 +279,17 @@ export async function resolveEffectiveSubagentPolicy(
 		}
 	}
 	const agentModelOverrides = request.session.settings.get("task.agentModelOverrides");
-	const parentActiveModelPattern = request.session.getActiveModelString?.();
+	// Fork feature (`task.inheritSessionModel`): the session's live selector —
+	// model plus its active thinking suffix — becomes the spawn's primary
+	// pattern, so failover or manual switches track into subagents. The
+	// thinking level rides inside the selector; without a live model object
+	// the bare active string is used so the flag alone can never break a spawn.
+	const inheritSessionModel = request.session.settings.get("task.inheritSessionModel") === true;
+	const parentActiveThinkingLevel = request.session.getActiveThinkingLevel?.();
+	const parentActiveModelPattern =
+		(inheritSessionModel &&
+			formatActiveModelSelector(request.session.getActiveModel?.(), parentActiveThinkingLevel)) ||
+		request.session.getActiveModelString?.();
 	const modelResolution = {
 		requestModel: request.model,
 		settingsOverride: agentModelOverrides[agentName],
@@ -287,6 +297,7 @@ export async function resolveEffectiveSubagentPolicy(
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
+		inheritSessionModel,
 	};
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the

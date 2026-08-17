@@ -1,5 +1,5 @@
 import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
-import type { AgentOptions, AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentOptions, AgentTelemetryConfig, AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
@@ -280,6 +280,12 @@ export interface ToolSession {
 	getActiveModelString?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
+	/**
+	 * The session's current effective thinking selector (undefined when unset).
+	 * Paired with {@link getActiveModelString} by `task.inheritSessionModel` so
+	 * spawns inherit the session's effort along with its model.
+	 */
+	getActiveThinkingLevel?: () => ThinkingLevel | undefined;
 	/** Session-scoped inspect_image mode override set by `/vision`; wins over the persisted setting. */
 	getInspectImageModeOverride?: () => InspectImageMode | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
